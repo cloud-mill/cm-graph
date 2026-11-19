@@ -28,7 +28,8 @@ for (const size of SIZES) {
       await expect(page.getByRole('heading', { level: 1 })).toBeVisible()
       const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)
       expect(overflow, 'page scrolls sideways').toBeLessThanOrEqual(0)
-      expect(await spill(page, '.dash-top > *, .hero-copy > *, .hero-stage, .statement h2, .feat, .card, .sect-head, .dash-foot')).toEqual([])
+      // on a phone the templates are a row to flick through, so only that row may run past the edge
+      expect(await spill(page, `.dash-top > *, .hero-copy > *, .hero-stage, .statement h2, .feat, ${size.width <= 760 ? '.card.doc' : '.card'}, .sect-head, .dash-foot`)).toEqual([])
       await expect(page.getByRole('button', { name: 'Start a blueprint' })).toBeInViewport()
       await expect(page.getByRole('button', { name: /^New blueprint/ })).toBeInViewport()
       // button and card text is never clipped
@@ -42,8 +43,9 @@ for (const size of SIZES) {
       await app.open(TRIO())
       expect(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBeLessThanOrEqual(0)
       expect(await page.evaluate(() => document.documentElement.scrollHeight - document.documentElement.clientHeight)).toBeLessThanOrEqual(0)
-      expect(await spill(page, '.topbar .island, .topbar .icon-btn, .topbar .btn, .toolbar, .toolbar .icon-btn, .zoom-ctl, .hud, .viewcube, .panel')).toEqual([])
-      await expect(page.locator('.toolbar')).toBeInViewport()
+      expect(await spill(page, '.topbar .island, .topbar .icon-btn, .topbar .btn, .toolbar, .toolbar .icon-btn, .zoom-ctl, .hud, .viewcube, .panel, .dock-row, .dock-btn, .fab')).toEqual([])
+      // a narrow window gets the phone layout: a dock in place of the toolbar
+      await expect(page.locator(size.width <= 760 ? '.dock' : '.toolbar')).toBeInViewport()
       await expect(page.getByRole('button', { name: 'Share' })).toBeInViewport()
       // all three components were framed inside the canvas that is actually visible
       const canvas = (await page.locator('.canvas-svg').boundingBox())!
@@ -65,13 +67,11 @@ for (const size of SIZES) {
 
     test('dialogs and menus stay inside the screen', async ({ page, app }) => {
       await app.open(TRIO())
-      const inside = async (selector: string) => {
+      // checked once any opening animation has finished
+      const inside = (selector: string) => expect.poll(async () => {
         const b = (await page.locator(selector).boundingBox())!
-        expect(b.x, selector).toBeGreaterThanOrEqual(0)
-        expect(b.x + b.width, selector).toBeLessThanOrEqual(size.width + 1)
-        expect(b.y, selector).toBeGreaterThanOrEqual(0)
-        expect(b.y + b.height, selector).toBeLessThanOrEqual(size.height + 1)
-      }
+        return b.x >= 0 && b.x + b.width <= size.width + 1 && b.y >= 0 && b.y + b.height <= size.height + 1
+      }, { message: selector + ' is inside the screen' }).toBe(true)
       await page.keyboard.press('Control+e')
       await inside('.modal')
       await expect(page.getByRole('dialog', { name: 'Export' }).getByRole('button', { name: 'Download' })).toBeInViewport()
@@ -98,32 +98,29 @@ for (const size of SIZES) {
   })
 }
 
-test.describe('narrow screens', () => {
+test.describe('narrow window with a mouse', () => {
   test.use({ viewport: { width: 390, height: 844 } })
 
   test('library and inspector are sheets, one at a time', async ({ page, app }) => {
     await app.open(TRIO())
-    const lib = page.locator('.panel.palette'), insp = page.locator('.panel.right')
-    await page.getByRole('button', { name: 'Library' }).click()
+    const lib = page.getByRole('dialog', { name: 'Library' }), insp = page.getByRole('dialog', { name: 'Inspector' })
+    await page.locator('.dock').getByRole('button', { name: 'Add', exact: true }).click()
     await expect(lib).toBeVisible()
-    const sheet = (await lib.boundingBox())!
-    expect(sheet.width).toBeLessThanOrEqual(390)
-    expect(sheet.y + sheet.height).toBeLessThanOrEqual(845)
-    expect(sheet.y).toBeGreaterThan(200) // a bottom sheet, not a full-height column
-    await page.getByRole('button', { name: 'Inspector' }).click()
+    await expect.poll(async () => { const b = (await lib.boundingBox())!; return b.width <= 390 && b.y > 200 && Math.round(b.y + b.height) <= 845 }).toBe(true)
+    // a mouse still adds with a double-click
+    await lib.locator('.pal-item[title="Virtual machine: EC2"]').dblclick()
+    await expect(app.nodes()).toHaveCount(4)
+    await lib.getByRole('button', { name: 'Close library' }).click()
+    await page.locator('.dock').getByRole('button', { name: 'Edit' }).click()
     await expect(insp).toBeVisible()
     await expect(lib).toHaveCount(0)
-    await page.getByRole('button', { name: 'Library' }).click()
-    await expect(insp).toHaveCount(0)
-    // a component can be added from the sheet
-    await page.locator('.pal-item[title="Virtual machine: EC2"]').dblclick()
-    await expect(app.nodes()).toHaveCount(4)
+    await page.keyboard.press('Escape')
   })
 
-  test('everything without a button of its own is reachable through the command palette', async ({ page, app }) => {
+  test('everything without a button of its own is reachable through the menu', async ({ page, app }) => {
     await app.open(TRIO())
     await expect(page.getByRole('button', { name: 'Export', exact: true })).toHaveCount(0)
-    await page.getByRole('button', { name: 'Search or run a command' }).click()
+    await page.locator('.dock').getByRole('button', { name: 'Menu' }).click()
     await page.getByRole('dialog', { name: 'Command palette' }).getByRole('textbox').fill('export')
     await page.keyboard.press('Enter')
     const dialog = page.getByRole('dialog', { name: 'Export' })
@@ -131,6 +128,18 @@ test.describe('narrow screens', () => {
     await dialog.getByRole('button', { name: /^Terraform/ }).click()
     await expect(dialog.locator('pre.code')).toContainText('aws_instance')
     await expect(dialog.getByRole('button', { name: 'Download' })).toBeInViewport()
+  })
+
+  test('growing the window brings the desktop layout back without losing work', async ({ page, app }) => {
+    await app.open(TRIO())
+    await expect(page.locator('.dock')).toBeVisible()
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await expect(page.locator('.dock')).toHaveCount(0)
+    await expect(page.locator('.toolbar')).toBeVisible()
+    await expect(app.nodes()).toHaveCount(3)
+    await page.setViewportSize({ width: 390, height: 844 })
+    await expect(page.locator('.dock')).toBeVisible()
+    await expect(page.locator('.toolbar')).toHaveCount(0)
   })
 })
 

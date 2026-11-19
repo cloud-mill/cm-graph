@@ -59,3 +59,21 @@ jobs:
             playwright-report
             test-results
           retention-days: 14
+
+  safari:
+    name: Phone tests on Safari's engine (WebKit)
+    runs-on: ubuntu-latest
+    needs: check
+    # informational until it has a first green run: this engine could not be run on the development machine
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps webkit chrome
+      - run: npx playwright test --project=safari
+        env:
+          E2E_WEBKIT: '1'

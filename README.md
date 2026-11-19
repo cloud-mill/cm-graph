@@ -65,6 +65,40 @@ src/ui       editor shell, panels, dialogs, dashboard
 `<Scene/>` is a pure function of the document and a projection, so the same
 renderer drives the editor, dashboard thumbnails, dialog previews and exports.
 
+## On a phone
+
+A narrow screen gets its own layout rather than a squeezed desktop one.
+
+- **Dock.** One bar in the thumb's reach with three faces: tools, a prompt while
+  a tool is in use, and the actions for whatever is selected.
+- **Sheets.** The library and the inspector rise over the canvas, can be pulled
+  taller or flicked away, and leave the canvas live above them. Sideways, they
+  dock to the right edge. The on-screen keyboard lifts them instead of covering them.
+- **Getting around** works the way maps do. The ground under your fingers stays
+  under your fingers.
+
+  | Gesture | What it does |
+  | --- | --- |
+  | Drag with one finger | Move. A flick coasts; a touch stops it. |
+  | Pinch | Zoom about the point between your fingers. |
+  | Twist two fingers | Turn the scene the way your fingers turn, about that point. A pinch never turns by accident: the twist has to be meant. |
+  | Slide two fingers up or down, side by side | Tilt, from near the horizon to straight overhead. |
+  | Double tap the ground | Zoom in on that spot. Keep the second tap down and slide to zoom with one thumb. |
+  | Tap with two fingers | Zoom out. |
+  | Drag the cube | Orbit with one thumb. Its faces are the standard views. |
+
+  A read-out shows the angle while you turn or tilt. Once the camera is off its
+  home angle a compass button appears and takes you back; if the diagram slides
+  out of sight, so does "Back to diagram". The gestures are drawn once on a first
+  visit and live under Menu, "Touch gestures".
+- **Editing.** Tap selects. Drag a selected component to move it, or press and
+  hold any component to pick it up in one motion. Press and hold the ground for a menu.
+- **Connecting** is two taps: the first component, then the one it talks to.
+- **Guides** appear while a component being moved lines up with another.
+
+Touch gestures follow the pointer in use, so tablets and touch laptops get them
+with the desktop layout. The app can be added to a phone's home screen.
+
 ## Testing
 
 Three layers, all run by `npm run verify`.
@@ -78,6 +112,7 @@ Three layers, all run by `npm run verify`.
 | `npm run test:e2e` | End-to-end tests in Google Chrome (Playwright), against the dev server |
 | `npm run test:e2e:prod` | The same tests against the production build |
 | `npm run test:perf` | Only the performance and stability tests |
+| `npm run test:e2e -- --project=android` | Only the phone tests on one profile (`android`, `iphone`, `small-phone`, `landscape`) |
 | `npm run test:e2e:ui` | Playwright's interactive runner, for debugging |
 | `npm run verify` | Everything above, in order |
 
@@ -98,6 +133,13 @@ handling, six screen sizes from 320 to 1920 pixels wide, automated WCAG 2.1 AA
 checks (axe) in both themes, and performance: frame time on a 300-component
 blueprint, no redrawing of components that did not change, and no growth in
 listeners, DOM or memory across repeated open and close cycles.
+
+The phone tests run on four device profiles (Pixel 7, iPhone 15, iPhone SE and
+a phone held sideways) and send real multi-touch input through Chrome, so
+pinch, twist and press-and-hold are exercised the way a screen delivers them.
+These are Chrome with each phone's size, pixel ratio, touch and user agent.
+Safari's own engine is opt-in, because it needs system libraries:
+`npx playwright install --with-deps webkit`, then `E2E_WEBKIT=1 npm run test:e2e -- --project=safari`.
 
 The first end-to-end run needs Google Chrome installed (`npx playwright install chrome`
 if it is not). `.github/workflows/ci.yml` runs the whole set on every push and

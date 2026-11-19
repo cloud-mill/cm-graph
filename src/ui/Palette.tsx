@@ -7,6 +7,7 @@ import { setPref } from '../core/storage'
 import { useStore } from '../core/store'
 import { addAtCenter } from './actions'
 import { Select, keys } from './atoms'
+import { haptic, isPhone } from './device'
 
 export function Palette() {
   const [q, setQ] = useState('')
@@ -15,6 +16,15 @@ export function Palette() {
   const provider = useStore((s) => s.provider)
   const mine = useMemo(() => CATALOG_LIST.filter((d) => d.provider === provider || d.provider === 'any'), [provider])
   const input = useRef<HTMLInputElement>(null)
+  // a finger scrolls this list, so a touch never starts a drag: it adds on tap instead
+  const byTouch = useRef(false)
+  const tapAdd = (type: string) => {
+    if (!byTouch.current) return
+    useStore.setState({ placing: null })
+    addAtCenter(type)
+    haptic(8)
+    if (isPhone()) useStore.setState({ showLib: false })
+  }
   const groups = useMemo(() => {
     const t = q.trim().toLowerCase()
     // browsing shows one cloud; searching looks across all three, the current cloud first
@@ -66,7 +76,8 @@ export function Palette() {
             <div className="palette-grid">
               {g.items.map((d) => (
                 <button key={d.type} className={'pal-item' + (placing === d.type ? ' on' : '')} title={`${d.name}: ${d.svc}`}
-                  onPointerDown={(e) => { if (e.button === 0) { e.preventDefault(); useStore.setState({ placing: d.type, tool: 'select' }) } }}
+                  onPointerDown={(e) => { byTouch.current = e.pointerType === 'touch'; if (e.button === 0 && !byTouch.current) { e.preventDefault(); useStore.setState({ placing: d.type, tool: 'select' }) } }}
+                  onClick={() => tapAdd(d.type)}
                   onDoubleClick={() => { useStore.setState({ placing: null }); addAtCenter(d.type) }}>
                   <ModelIcon type={d.type} proj={ISO} size={44} />
                   <span className="pal-name">{d.provider === 'any' ? d.name : d.svc}</span>
@@ -78,7 +89,7 @@ export function Palette() {
         ))}
         {!groups.length && <div className="muted pad">Nothing matches “{q}”.</div>}
       </div>
-      <div className="palette-foot"><span>Drag to place</span><span><kbd>{keys('⇧')}</kbd> repeat</span></div>
+      <div className="palette-foot not-phone"><span>Drag to place</span><span><kbd>{keys('⇧')}</kbd> repeat</span></div>
     </aside>
   )
 }

@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { Check, Copy, Download, FileCode2, FileJson, History, Image, RotateCcw, Trash2, Upload } from 'lucide-react'
 import { fitView } from '../canvas/camera'
 import { Scene, THEMES, sceneBounds } from '../canvas/Scene'
-import { budgetCsv, download, pngBlob, slug, svgString } from '../core/exporters'
+import { budgetCsv, download, slug } from '../core/files'
 import { makeCam, makeProj } from '../core/iso'
 import { type Snapshot, addSnapshot, coerceDoc, listSnapshots, removeSnapshot } from '../core/storage'
 import { useStore } from '../core/store'
@@ -52,8 +52,9 @@ export function ExportDialog({ onClose }: { onClose: () => void }) {
     setBusy(true)
     try {
       const o = { flat, cam: camOpt, theme, background: bg, labels }
-      if (format === 'png') download(name + '.png', await pngBlob(doc, o, Number(scale)))
-      else if (format === 'svg') download(name + '.svg', svgString(doc, o).svg, 'image/svg+xml')
+      // the image renderer is fetched the first time an image is exported
+      if (format === 'png') download(name + '.png', await (await import('../core/exporters')).pngBlob(doc, o, Number(scale)))
+      else if (format === 'svg') download(name + '.svg', (await import('../core/exporters')).svgString(doc, o).svg, 'image/svg+xml')
       else if (format === 'tf') download('main.tf', code)
       else if (format === 'json') download(name + '.cloudmill.json', code, 'application/json')
       else download(name + '-budget.csv', code, 'text/csv')

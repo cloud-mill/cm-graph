@@ -19,6 +19,10 @@ interface State {
   tool: Tool
   /** component type being dragged in from the palette */
   placing: string | null
+  /** with the connect tool: the component a connection is being drawn from, waiting for its other end */
+  linkFrom: string | null
+  /** touch: taps add to the selection instead of replacing it */
+  multi: boolean
   view: View
   /** orbit camera, in degrees: rotation about the vertical axis and elevation above the ground */
   yaw: number
@@ -44,7 +48,7 @@ interface State {
   showInsp: boolean
   /** id of the component added most recently (drives its entrance animation) */
   fresh: string | null
-  modal: null | 'export' | 'import' | 'shortcuts' | 'command' | 'history' | 'share'
+  modal: null | 'export' | 'import' | 'shortcuts' | 'command' | 'history' | 'share' | 'gestures'
 
   load: (doc: Doc) => void
   /** Apply a change. Non-transient changes create an undo step. */
@@ -99,6 +103,8 @@ export const useStore = create<State>((set, get) => ({
   selection: [],
   tool: 'select',
   placing: null,
+  linkFrom: null,
+  multi: false,
   view: { x: 0, y: 0, k: 1 },
   yaw: ISO_YAW,
   pitch: ISO_PITCH,
@@ -120,7 +126,7 @@ export const useStore = create<State>((set, get) => ({
   fresh: null,
   modal: null,
 
-  load: (doc) => set({ doc, past: [], future: [], selection: [], tool: 'select', placing: null, saved: true, saveFailed: false, lens: 'none', modal: null, panel: 'inspect' }),
+  load: (doc) => set({ doc, past: [], future: [], selection: [], tool: 'select', placing: null, linkFrom: null, multi: false, saved: true, saveFailed: false, lens: 'none', modal: null, panel: 'inspect' }),
 
   apply: (fn, transient) => {
     const { doc, past } = get()

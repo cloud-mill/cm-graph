@@ -150,6 +150,7 @@ test.describe('performance and stability', () => {
 
   test('keeps working offline once loaded', async ({ page, app, context }) => {
     await app.open(TRIO())
+    await page.waitForLoadState('networkidle') // "once loaded" includes the parts fetched in the background
     await context.setOffline(true)
     await app.pick('a')
     await page.keyboard.press('ArrowRight')

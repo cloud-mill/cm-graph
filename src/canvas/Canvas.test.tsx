@@ -2,12 +2,13 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { costOf, money } from '../core/catalog'
-import { ISO_YAW, pt } from '../core/iso'
+import { ISO_PITCH, ISO_YAW, pt, unproject } from '../core/iso'
 import { useStore } from '../core/store'
 import { MAX_SCALE, MIN_SCALE } from '../core/types'
 import { docOf, edge, node, resetStore } from '../test/helpers'
-import { Canvas, heat } from './Canvas'
-import { cam, hud, projNow } from './camera'
+import { COARSE, PHONE, stubMedia } from '../test/media'
+import { Canvas, HOLD_MS, heat } from './Canvas'
+import { cam, flushFrame, hud, projNow } from './camera'
 
 // these render whole screens; leave headroom for a busy machine
 vi.setConfig({ testTimeout: 20_000 })
@@ -25,7 +26,8 @@ const move = (wx: number, wy: number, o: object = {}) => fireEvent.pointerMove(s
 const up = (wx: number, wy: number, o: object = {}) => fireEvent.pointerUp(svg(), { pointerId: 1, ...at(wx, wy), ...o })
 const drag = (el: Element, from: [number, number], to: [number, number], o: object = {}) => { down(el, ...from, o); move(...to, o); up(...to, o) }
 
-const handles = (prefix: string) => [...document.querySelectorAll('[data-handle]')].filter((h) => new RegExp(`^${prefix}\\d$`).test(h.getAttribute('data-handle')!))
+// a component's handle is a group wrapping the visible square (and, for fingers, a bigger invisible target): count each handle once
+const handles = (prefix: string) => [...new Set([...document.querySelectorAll('[data-handle]')].map((h) => h.getAttribute('data-handle')!).filter((h) => new RegExp(`^${prefix}\\d$`).test(h)))]
 const area = (id: string, x: number, y: number, w: number, d: number) => ({ id, x, y, w, d, name: id, color: '#8F6FF2', kind: 'vpc' as const })
 const label = (id: string, x: number, y: number) => ({ id, x, y, text: 'Note', size: 20, dir: 'x' as const })
 
@@ -598,3 +600,726 @@ describe('cost heatmap and read-outs', () => {
     expect(document.querySelector('.canvas-wrap')).toHaveAttribute('data-tool', 'area')
   })
 })
+
+// ---- touch ---------------------------------------------------------------------
+
+/** one finger: `id` tells fingers apart, positions are ground cells unless given as client px */
+const finger = (id: number) => {
+  const o = { pointerId: id, pointerType: 'touch', button: 0 }
+  return {
+    down: (el: Element, wx: number, wy: number) => fireEvent.pointerDown(el, { ...o, ...at(wx, wy) }),
+    move: (wx: number, wy: number) => fireEvent.pointerMove(svg(), { ...o, ...at(wx, wy) }),
+    up: (wx: number, wy: number) => fireEvent.pointerUp(svg(), { ...o, ...at(wx, wy) }),
+    downAt: (x: number, y: number, el: Element = svg()) => fireEvent.pointerDown(el, { ...o, clientX: x, clientY: y }),
+    // two-finger moves are applied once per frame: `flushFrame` is that frame arriving
+    moveTo: (x: number, y: number) => { const r = fireEvent.pointerMove(svg(), { ...o, clientX: x, clientY: y }); act(() => flushFrame()); return r },
+    upAt: (x: number, y: number) => fireEvent.pointerUp(svg(), { ...o, clientX: x, clientY: y }),
+    cancel: () => fireEvent.pointerCancel(svg(), { ...o }),
+  }
+}
+const f1 = finger(11), f2 = finger(12), f3 = finger(13)
+const tap = (el: Element, wx: number, wy: number) => { f1.down(el, wx, wy); f1.up(wx, wy) }
+/** where a ground point is drawn right now */
+const drawn = (wx: number, wy: number) => at(wx, wy)
+const busy = () => document.querySelector('.canvas-wrap')!.classList.contains('busy')
+
+describe('touch: one finger', () => {
+  it('a tap selects, and a tap elsewhere replaces the selection', () => {
+    mount()
+    tap(hit('node', 'a'), 1, 1)
+    expect(S().selection).toEqual(['a'])
+    tap(hit('node', 'b'), 9, 1)
+    expect(S().selection).toEqual(['b'])
+  })
+  it('a tap on a connection selects it', () => {
+    mount(docOf([node('a', 'ec2', 0, 0), node('b', 'rds', 8, 0)], [edge('e', 'a', 'b')]))
+    tap(hit('edge', 'e'), 5, 1)
+    expect(S().selection).toEqual(['e'])
+  })
+  it('a tap on bare ground clears the selection and ends multi-select', () => {
+    mount(undefined, { selection: ['a'], multi: true })
+    tap(svg(), 4, 4)
+    expect(S()).toMatchObject({ selection: [], multi: false })
+  })
+  it('a finger that trembles a little is still a tap', () => {
+    mount()
+    const p = at(1, 1)
+    f1.downAt(p.clientX, p.clientY, hit('node', 'a'))
+    f1.moveTo(p.clientX + 5, p.clientY + 4)
+    f1.upAt(p.clientX + 5, p.clientY + 4)
+    expect(S().selection).toEqual(['a'])
+    expect(S().view).toEqual({ x: 600, y: 300, k: 1 })
+  })
+  it('dragging across a component that is not selected pans: it never moves by accident', () => {
+    mount()
+    const p = at(1, 1)
+    f1.downAt(p.clientX, p.clientY, hit('node', 'a'))
+    f1.moveTo(p.clientX + 60, p.clientY - 25)
+    expect(busy()).toBe(true)
+    f1.moveTo(p.clientX + 80, p.clientY - 30)
+    f1.upAt(p.clientX + 80, p.clientY - 30)
+    expect(S().view).toEqual({ x: 680, y: 270, k: 1 })
+    expect(S().doc.nodes[0]).toMatchObject({ x: 0, y: 0 })
+    expect(S().selection).toEqual([])
+    expect(S().past).toHaveLength(0)
+    expect(busy()).toBe(false)
+  })
+  it('dragging bare ground pans too', () => {
+    mount(undefined, { selection: ['a'] })
+    f1.downAt(300, 600)
+    f1.moveTo(250, 640)
+    f1.upAt(250, 640)
+    expect(S().view).toEqual({ x: 550, y: 340, k: 1 })
+    expect(S().selection).toEqual(['a']) // a pan is not a tap: the selection stays
+  })
+  it('dragging a selected component moves it, snapped to the grid, as one undo step', () => {
+    mount(undefined, { selection: ['a'] })
+    f1.down(hit('node', 'a'), 1, 1)
+    f1.move(3.2, 2.1)
+    expect(busy()).toBe(true)
+    f1.up(3.2, 2.1)
+    expect(S().doc.nodes[0]).toMatchObject({ x: 2, y: 1 })
+    expect(S().view).toEqual({ x: 600, y: 300, k: 1 })
+    expect(S().past).toHaveLength(1)
+    act(() => S().undo())
+    expect(S().doc.nodes[0]).toMatchObject({ x: 0, y: 0 })
+  })
+  it('needs a firmer push than a mouse before a move begins', () => {
+    mount(undefined, { selection: ['a'] })
+    const p = at(1, 1)
+    f1.downAt(p.clientX, p.clientY, hit('node', 'a'))
+    f1.moveTo(p.clientX + 6, p.clientY) // past the mouse threshold, inside the finger one
+    expect(busy()).toBe(false)
+    f1.upAt(p.clientX + 6, p.clientY)
+    expect(S().past).toHaveLength(0)
+  })
+  it('keeps working when the browser refuses to capture the pointer', () => {
+    mount()
+    vi.spyOn(Element.prototype as any, 'setPointerCapture').mockImplementation(() => { throw new DOMException('gone', 'NotFoundError') })
+    tap(hit('node', 'a'), 1, 1)
+    expect(S().selection).toEqual(['a'])
+  })
+  it('with another tool up, a finger uses that tool as a mouse would', () => {
+    mount(docOf(), { tool: 'area' })
+    f1.down(svg(), 0, 0)
+    f1.move(4, 3)
+    f1.up(4, 3)
+    expect(S().doc.areas).toMatchObject([{ x: 0, y: 0, w: 4, d: 3 }])
+  })
+})
+
+describe('touch: press and hold', () => {
+  beforeEach(() => { vi.useFakeTimers() })
+
+  it('on a component picks it up: it is selected at once and the same finger carries it', () => {
+    const vibrate = vi.fn<(ms: number) => boolean>()
+    Object.defineProperty(navigator, 'vibrate', { value: vibrate, configurable: true })
+    mount()
+    f1.down(hit('node', 'b'), 9, 1)
+    act(() => { vi.advanceTimersByTime(HOLD_MS - 10) })
+    expect(S().selection).toEqual([])
+    act(() => { vi.advanceTimersByTime(20) })
+    expect(S().selection).toEqual(['b'])
+    expect(vibrate).toHaveBeenCalledWith(12)
+    expect(busy()).toBe(true) // lifted
+    f1.move(9, 4)
+    expect(S().doc.nodes[1]).toMatchObject({ x: 8, y: 3 })
+    f1.up(9, 4)
+    expect(busy()).toBe(false)
+    expect(S().past).toHaveLength(1)
+    expect(S().view).toEqual({ x: 600, y: 300, k: 1 })
+    delete (navigator as any).vibrate
+  })
+  it('on a component, released without moving, just leaves it selected', () => {
+    mount()
+    f1.down(hit('node', 'a'), 1, 1)
+    act(() => { vi.advanceTimersByTime(HOLD_MS) })
+    f1.up(1, 1)
+    expect(S().selection).toEqual(['a'])
+    expect(S().past).toHaveLength(0)
+    expect(document.querySelector('.ctx-menu')).toBeNull()
+  })
+  it('on a text label moves it in half cells', () => {
+    mount(docOf([], [], { labels: [label('l', 0, 0)] }))
+    f1.down(hit('label', 'l'), 0, 0)
+    act(() => { vi.advanceTimersByTime(HOLD_MS) })
+    f1.move(1.5, 0)
+    f1.up(1.5, 0)
+    expect(S().doc.labels[0]).toMatchObject({ x: 1.5, y: 0 })
+  })
+  it('on bare ground opens the menu there', () => {
+    mount(undefined, { selection: ['a'] })
+    f1.downAt(300, 600)
+    act(() => { vi.advanceTimersByTime(HOLD_MS) })
+    const menu = document.querySelector('.ctx-menu')!
+    expect(menu).toHaveTextContent('Add label here')
+    expect(S().selection).toEqual([])
+    // lifting the finger afterwards is not a tap and does not close it
+    f1.upAt(300, 600)
+    expect(document.querySelector('.ctx-menu')).not.toBeNull()
+  })
+  it('on a connection opens its menu rather than trying to move it', () => {
+    mount(docOf([node('a', 'ec2', 0, 0), node('b', 'rds', 8, 0)], [edge('e', 'a', 'b')]))
+    vi.mocked(document.elementFromPoint).mockReturnValue(hit('edge', 'e'))
+    f1.down(hit('edge', 'e'), 5, 1)
+    act(() => { vi.advanceTimersByTime(HOLD_MS) })
+    expect(S().selection).toEqual(['e'])
+    expect(document.querySelector('.ctx-menu')).toHaveTextContent('Reverse direction')
+  })
+  it('is called off as soon as the finger travels', () => {
+    mount()
+    const p = at(1, 1)
+    f1.downAt(p.clientX, p.clientY, hit('node', 'a'))
+    f1.moveTo(p.clientX + 40, p.clientY)
+    act(() => { vi.advanceTimersByTime(HOLD_MS * 2) })
+    expect(S().selection).toEqual([])
+    expect(document.querySelector('.ctx-menu')).toBeNull()
+    f1.upAt(p.clientX + 40, p.clientY)
+    expect(S().view.x).toBe(640)
+  })
+  it('is called off when the finger lifts early, and when the canvas goes away', () => {
+    const { unmount } = mount()
+    tap(hit('node', 'a'), 1, 1)
+    act(() => { vi.advanceTimersByTime(HOLD_MS * 2) })
+    expect(busy()).toBe(false)
+    f1.down(hit('node', 'b'), 9, 1)
+    unmount()
+    expect(() => vi.advanceTimersByTime(HOLD_MS * 2)).not.toThrow()
+    expect(S().selection).toEqual(['a'])
+  })
+  it('does nothing if a second finger has already turned it into a pinch', () => {
+    mount()
+    f1.down(hit('node', 'a'), 1, 1)
+    f2.downAt(900, 500)
+    act(() => { vi.advanceTimersByTime(HOLD_MS * 2) })
+    expect(S().selection).toEqual([])
+    expect(document.querySelector('.ctx-menu')).toBeNull()
+  })
+})
+
+describe('touch: getting around with one finger', () => {
+  it('a flick keeps the view moving, and it eases to a stop', () => {
+    vi.useFakeTimers()
+    mount()
+    f1.downAt(600, 400)
+    for (let i = 1; i <= 6; i++) { act(() => { vi.advanceTimersByTime(16) }); f1.moveTo(600 + i * 20, 400) }
+    const x = S().view.x
+    f1.upAt(720, 400)
+    act(() => { vi.advanceTimersByTime(120) })
+    const mid = S().view.x
+    expect(mid).toBeGreaterThan(x + 40)
+    act(() => { vi.advanceTimersByTime(3000) })
+    const end = S().view.x
+    expect(end).toBeGreaterThan(mid)
+    act(() => { vi.advanceTimersByTime(1000) })
+    expect(S().view.x).toBe(end)
+    expect(S().view.y).toBe(300)
+  })
+  it('a finger that stops before lifting leaves the view exactly there', () => {
+    vi.useFakeTimers()
+    mount()
+    f1.downAt(600, 400)
+    for (let i = 1; i <= 6; i++) { act(() => { vi.advanceTimersByTime(16) }); f1.moveTo(600 + i * 20, 400) }
+    act(() => { vi.advanceTimersByTime(200) })
+    const x = S().view.x
+    f1.upAt(720, 400)
+    act(() => { vi.advanceTimersByTime(1000) })
+    expect(S().view.x).toBe(x)
+  })
+  it('touching the glass stops a coasting view dead', () => {
+    vi.useFakeTimers()
+    mount()
+    f1.downAt(600, 400)
+    for (let i = 1; i <= 6; i++) { act(() => { vi.advanceTimersByTime(16) }); f1.moveTo(600 + i * 20, 400) }
+    f1.upAt(720, 400)
+    act(() => { vi.advanceTimersByTime(64) })
+    f1.downAt(300, 300)
+    const x = S().view.x
+    act(() => { vi.advanceTimersByTime(1000) })
+    expect(S().view.x).toBe(x)
+    f1.cancel()
+  })
+  it('a double tap on bare ground zooms in on that spot', () => {
+    vi.useFakeTimers()
+    mount()
+    f1.downAt(700, 500); f1.upAt(700, 500)
+    act(() => { vi.advanceTimersByTime(120) })
+    f1.downAt(704, 498); f1.upAt(704, 498)
+    act(() => { vi.advanceTimersByTime(600) })
+    expect(S().view.k).toBeCloseTo(2)
+    // what was under the second tap still is
+    expect(S().view.x).toBeCloseTo(704 - (704 - 600) * 2)
+    expect(S().view.y).toBeCloseTo(498 - (498 - 300) * 2)
+  })
+  it('two slow taps are just two taps', () => {
+    vi.useFakeTimers()
+    mount()
+    f1.downAt(700, 500); f1.upAt(700, 500)
+    act(() => { vi.advanceTimersByTime(600) })
+    f1.downAt(700, 500); f1.upAt(700, 500)
+    act(() => { vi.advanceTimersByTime(600) })
+    expect(S().view.k).toBe(1)
+  })
+  it('two quick taps far apart are just two taps', () => {
+    vi.useFakeTimers()
+    mount()
+    f1.downAt(700, 500); f1.upAt(700, 500)
+    f1.downAt(900, 300); f1.upAt(900, 300)
+    act(() => { vi.advanceTimersByTime(600) })
+    expect(S().view.k).toBe(1)
+  })
+  it('double tap and slide zooms with one thumb: down for in, up for out, about the tapped spot', () => {
+    mount()
+    f1.downAt(700, 500); f1.upAt(700, 500)
+    f1.downAt(700, 500)
+    f1.moveTo(700, 505)
+    expect(S().view.k).toBe(1) // not yet a slide
+    f1.moveTo(700, 579)
+    expect(S().view.k).toBeCloseTo(Math.exp(0.7))
+    expect(busy()).toBe(true)
+    // the tapped spot has not moved
+    expect((700 - S().view.x) / S().view.k).toBeCloseTo(700 - 600, 0)
+    f1.moveTo(700, 409)
+    expect(S().view.k).toBeCloseTo(Math.exp(-1))
+    f1.moveTo(700, -2000)
+    expect(S().view.k).toBe(0.15)
+    f1.upAt(700, -2000)
+    expect(busy()).toBe(false)
+    expect(S().view.k).toBe(0.15) // lifting after a slide is not a double tap
+  })
+  it('a second finger during a double tap turns it into an ordinary pinch', () => {
+    mount()
+    f1.downAt(500, 400); f1.upAt(500, 400)
+    f1.downAt(500, 400); f2.downAt(700, 400)
+    f1.moveTo(400, 400); f2.moveTo(800, 400)
+    expect(S().view.k).toBeCloseTo(2)
+    f1.cancel(); f2.cancel()
+  })
+})
+
+describe('touch: multi-select', () => {
+  it('taps add to and take from the selection', () => {
+    mount(undefined, { selection: ['a'], multi: true })
+    tap(hit('node', 'b'), 9, 1)
+    expect(S().selection).toEqual(['a', 'b'])
+    tap(hit('node', 'a'), 1, 1)
+    expect(S().selection).toEqual(['b'])
+    expect(S().multi).toBe(true)
+  })
+  it('press and hold adds what is under the finger and carries the whole selection', () => {
+    vi.useFakeTimers()
+    mount(undefined, { selection: ['a'], multi: true })
+    f1.down(hit('node', 'b'), 9, 1)
+    act(() => { vi.advanceTimersByTime(HOLD_MS) })
+    expect(S().selection).toEqual(['a', 'b'])
+    f1.move(9, 3)
+    f1.up(9, 3)
+    expect(S().doc.nodes.map((n) => [n.x, n.y])).toEqual([[0, 2], [8, 2]])
+  })
+  it('press and hold on something already selected keeps it selected', () => {
+    vi.useFakeTimers()
+    mount(undefined, { selection: ['a', 'b'], multi: true })
+    f1.down(hit('node', 'a'), 1, 1)
+    act(() => { vi.advanceTimersByTime(HOLD_MS) })
+    expect(S().selection).toEqual(['a', 'b'])
+  })
+})
+
+describe('touch: two fingers', () => {
+  it('spreading zooms about the middle of the fingers, so the ground under them stays put', () => {
+    mount()
+    const before = drawn(2, 3)
+    f1.downAt(500, 400); f2.downAt(700, 400)
+    expect(busy()).toBe(true)
+    f1.moveTo(400, 400); f2.moveTo(800, 400)
+    expect(S().view.k).toBeCloseTo(2)
+    // the ground point that was under (600, 400) is still there
+    const g = [(600 - 600) / 1, (400 - 300) / 1] // scene px under the midpoint before the pinch
+    expect(g[0] * 2 + S().view.x).toBeCloseTo(600)
+    expect(g[1] * 2 + S().view.y).toBeCloseTo(400)
+    expect(drawn(2, 3)).not.toEqual(before)
+    f2.upAt(800, 400)
+    f1.upAt(400, 400)
+    expect(busy()).toBe(false)
+    expect(S().yaw).toBe(ISO_YAW)
+    expect(S().selection).toEqual([])
+  })
+  it('moving both fingers together pans', () => {
+    mount()
+    f1.downAt(500, 400); f2.downAt(700, 400)
+    f1.moveTo(530, 350); f2.moveTo(730, 350)
+    expect(S().view.k).toBeCloseTo(1)
+    expect(S().view.x).toBeCloseTo(630)
+    expect(S().view.y).toBeCloseTo(250)
+    f1.upAt(530, 350); f2.upAt(730, 350)
+  })
+  it('zoom stops at its limits', () => {
+    mount()
+    f1.downAt(590, 400); f2.downAt(610, 400)
+    f1.moveTo(0, 400); f2.moveTo(1200, 400)
+    expect(S().view.k).toBe(4)
+    f1.upAt(0, 400); f2.upAt(1200, 400)
+    f1.downAt(0, 400); f2.downAt(1200, 400)
+    f1.moveTo(599, 400); f2.moveTo(601, 400)
+    expect(S().view.k).toBe(0.15)
+    f1.cancel(); f2.cancel()
+  })
+  it('a second finger ends a move in progress where it is, and the pinch takes over', () => {
+    mount(undefined, { selection: ['a'] })
+    f1.down(hit('node', 'a'), 1, 1)
+    f1.move(3, 1)
+    expect(S().doc.nodes[0].x).toBe(2)
+    const p = at(3, 1)
+    f2.downAt(p.clientX + 200, p.clientY)
+    f1.moveTo(p.clientX - 100, p.clientY)
+    expect(S().doc.nodes[0].x).toBe(2) // no longer following the finger
+    expect(S().view.k).toBeGreaterThan(1)
+    f1.upAt(p.clientX - 100, p.clientY); f2.upAt(p.clientX + 200, p.clientY)
+    expect(document.querySelectorAll('.guide')).toHaveLength(0)
+  })
+  it('the finger left down after a pinch carries on as a pan, with no jump and no tap', () => {
+    mount(undefined, { selection: ['a'] })
+    f1.downAt(500, 400); f2.downAt(700, 400)
+    f1.moveTo(450, 400); f2.moveTo(750, 400)
+    f2.upAt(750, 400)
+    const view = S().view
+    expect(busy()).toBe(true)
+    f1.moveTo(450, 400)
+    expect(S().view).toEqual(view) // lifting one finger moved nothing
+    f1.moveTo(480, 430)
+    expect(S().view).toEqual({ ...view, x: view.x + 30, y: view.y + 30 })
+    f1.upAt(480, 430)
+    expect(busy()).toBe(false)
+    expect(S().selection).toEqual(['a']) // and its lifting is not a tap
+    // the next touch is an ordinary one again
+    tap(svg(), 4, 4)
+    expect(S().selection).toEqual([])
+  })
+  it('when one of the pair lifts with a third finger down, the two that are left carry on without a jump', () => {
+    mount()
+    f1.downAt(500, 400); f2.downAt(700, 400); f3.downAt(600, 600)
+    f1.moveTo(450, 400); f2.moveTo(750, 400)
+    const view = S().view
+    f1.upAt(450, 400)
+    f2.moveTo(750, 400)
+    expect(S().view.k).toBeCloseTo(view.k); expect(S().view.x).toBeCloseTo(view.x); expect(S().view.y).toBeCloseTo(view.y)
+    f2.moveTo(790, 400); f3.moveTo(640, 600)
+    expect(S().view.x).toBeCloseTo(view.x + 40)
+    f2.cancel(); f3.cancel()
+  })
+  it('a third finger changes nothing', () => {
+    mount()
+    f1.downAt(500, 400); f2.downAt(700, 400); f3.downAt(600, 600)
+    f1.moveTo(400, 400); f2.moveTo(800, 400)
+    expect(S().view.k).toBeCloseTo(2)
+    f3.upAt(600, 600)
+    f1.moveTo(450, 400)
+    expect(S().view.k).toBeCloseTo(1.75)
+    f1.cancel(); f2.cancel()
+    expect(busy()).toBe(false)
+  })
+  /** both fingers, a given distance apart about (600, 400), turned `deg` clockwise */
+  const twistTo = (deg: number, dist = 200) => {
+    const r = (deg * Math.PI) / 180
+    f1.moveTo(600 - (Math.cos(r) * dist) / 2, 400 - (Math.sin(r) * dist) / 2)
+    f2.moveTo(600 + (Math.cos(r) * dist) / 2, 400 + (Math.sin(r) * dist) / 2)
+  }
+  it('a deliberate twist turns the scene the way the fingers turn, about the point between them', () => {
+    mount()
+    const under = unproject(projNow(), (600 - S().view.x) / S().view.k, (400 - S().view.y) / S().view.k)
+    f1.downAt(500, 400); f2.downAt(700, 400)
+    for (let d = 2; d <= 50; d += 2) twistTo(d)
+    // clockwise fingers, clockwise scene: yaw grows, by the twist less the little it took to be sure
+    expect(S().yaw).toBeGreaterThan(ISO_YAW + 36)
+    expect(S().yaw).toBeLessThan(ISO_YAW + 50)
+    expect(S().view.k).toBeCloseTo(1)
+    const q = pt(projNow(), under[0], under[1])
+    expect(q[0] * S().view.k + S().view.x).toBeCloseTo(600)
+    expect(q[1] * S().view.k + S().view.y).toBeCloseTo(400)
+    expect(screen.getByRole('status')).toHaveTextContent(/^Turn \d+°$/)
+    f1.cancel(); f2.cancel()
+    expect(screen.queryByRole('status')).toBeNull()
+  })
+  it('a turn stays exactly where it was left: nothing snaps afterwards', () => {
+    vi.useFakeTimers()
+    mount()
+    f1.downAt(500, 400); f2.downAt(700, 400)
+    for (let d = -2; d >= -34; d -= 2) twistTo(d)
+    const yaw = S().yaw
+    expect(yaw).toBeLessThan(ISO_YAW - 20)
+    f1.cancel(); f2.cancel()
+    act(() => { vi.advanceTimersByTime(600) })
+    expect(S().yaw).toBe(yaw)
+  })
+  it('a turn past north comes back as an ordinary angle', () => {
+    mount()
+    f1.downAt(500, 400); f2.downAt(700, 400)
+    for (let d = -3; d >= -90; d -= 3) twistTo(d)
+    expect(S().yaw).toBeLessThan(0)
+    f1.cancel(); f2.cancel()
+    expect(S().yaw).toBeGreaterThan(270)
+    expect(S().yaw).toBeLessThan(360)
+  })
+  it('a pinch that wobbles does not turn', () => {
+    mount()
+    f1.downAt(500, 400); f2.downAt(700, 400)
+    for (let i = 1; i <= 10; i++) twistTo(5 * Math.sin(i), 200 + i * 30)
+    expect(S().yaw).toBe(ISO_YAW)
+    expect(S().view.k).toBeCloseTo(2.5)
+    f1.cancel(); f2.cancel()
+  })
+  it('two fingers side by side sliding up tilt the camera, and nothing else', () => {
+    mount()
+    f1.downAt(500, 400); f2.downAt(700, 400)
+    for (let y = 392; y >= 300; y -= 8) { f1.moveTo(500, y); f2.moveTo(700, y) }
+    expect(S().pitch).toBeLessThan(ISO_PITCH - 15)
+    expect(S().yaw).toBe(ISO_YAW)
+    expect(S().view.k).toBeCloseTo(1, 2)
+    expect(screen.getByRole('status')).toHaveTextContent(/^Tilt \d+°$/)
+    f1.cancel(); f2.cancel()
+  })
+  it('sliding down tilts to the plan view and says so', () => {
+    mount()
+    f1.downAt(500, 300); f2.downAt(700, 300)
+    for (let y = 310; y <= 560; y += 10) { f1.moveTo(500, y); f2.moveTo(700, y) }
+    expect(S().pitch).toBe(90)
+    expect(S().flat).toBe(true)
+    expect(screen.getByRole('status')).toHaveTextContent('Plan view')
+    f1.cancel(); f2.cancel()
+  })
+  it('a second finger that joins a pan in progress never tilts', () => {
+    mount()
+    f1.downAt(500, 400)
+    f1.moveTo(500, 440)
+    f2.downAt(700, 440)
+    for (let y = 430; y >= 340; y -= 10) { f1.moveTo(500, y); f2.moveTo(700, y) }
+    expect(S().pitch).toBe(ISO_PITCH)
+    f1.cancel(); f2.cancel()
+  })
+  it('two fingers touched and lifted step the zoom back out', () => {
+    vi.useFakeTimers()
+    mount()
+    f1.downAt(500, 400); f2.downAt(700, 400)
+    f1.upAt(500, 400); f2.upAt(700, 400)
+    act(() => { vi.advanceTimersByTime(600) })
+    expect(S().view.k).toBeCloseTo(0.5)
+    // about the point between the fingers
+    expect(S().view.x).toBeCloseTo(600); expect(S().view.y).toBeCloseTo(350)
+  })
+  it('two fingers that rested first are not a tap', () => {
+    vi.useFakeTimers()
+    mount()
+    f1.downAt(500, 400); f2.downAt(700, 400)
+    act(() => { vi.advanceTimersByTime(500) })
+    f1.upAt(500, 400); f2.upAt(700, 400)
+    act(() => { vi.advanceTimersByTime(600) })
+    expect(S().view.k).toBe(1)
+  })
+  it('stops a camera animation the moment the fingers land', () => {
+    vi.useFakeTimers()
+    mount()
+    act(() => { S().set({ selection: [] }) })
+    const k0 = S().view.k
+    f1.downAt(500, 400); f2.downAt(700, 400)
+    act(() => { vi.advanceTimersByTime(1000) })
+    expect(S().view.k).toBe(k0)
+    f1.cancel(); f2.cancel()
+  })
+})
+
+describe('touch: connecting by taps', () => {
+  const tapNode = (id: 'a' | 'b') => {
+    vi.mocked(document.elementFromPoint).mockReturnValue(hit('node', id))
+    tap(hit('node', id), id === 'a' ? 1 : 9, 1)
+  }
+  it('the first tap picks one end and marks it; tapping it again lets go', () => {
+    mount(undefined, { tool: 'connect' })
+    tapNode('a')
+    expect(S().linkFrom).toBe('a')
+    expect(document.querySelector('.link-from')).not.toBeNull()
+    expect(S().doc.edges).toHaveLength(0)
+    tapNode('a')
+    expect(S().linkFrom).toBeNull()
+    expect(document.querySelector('.link-from')).toBeNull()
+  })
+  it('the second tap, on another component, makes the connection and returns to selecting', () => {
+    mount(undefined, { tool: 'connect' })
+    tapNode('a')
+    tapNode('b')
+    expect(S().doc.edges).toMatchObject([{ from: 'a', to: 'b', arrow: 'end' }])
+    expect(S()).toMatchObject({ linkFrom: null, tool: 'select' })
+    expect(S().selection).toEqual([S().doc.edges[0].id])
+  })
+  it('starts from the component the dock handed over', () => {
+    mount(undefined, { tool: 'connect', linkFrom: 'b' })
+    tapNode('a')
+    expect(S().doc.edges).toMatchObject([{ from: 'b', to: 'a' }])
+  })
+  it('says so when the two are already connected, and still finishes', () => {
+    mount(docOf([node('a', 'ec2', 0, 0), node('b', 'rds', 8, 0)], [edge('e', 'b', 'a')]), { tool: 'connect', linkFrom: 'a' })
+    tapNode('b')
+    expect(S().doc.edges).toHaveLength(1)
+    expect(S().toasts.at(-1)).toMatchObject({ text: 'Those components are already connected', kind: 'warn' })
+    expect(S()).toMatchObject({ linkFrom: null, tool: 'select' })
+  })
+  it('a tap on bare ground gives up the half-drawn connection but keeps the tool', () => {
+    mount(undefined, { tool: 'connect', linkFrom: 'a' })
+    vi.mocked(document.elementFromPoint).mockReturnValue(svg())
+    tap(svg(), 4, 4)
+    expect(S()).toMatchObject({ linkFrom: null, tool: 'connect' })
+  })
+  it('dragging from one component to another still connects, and clears any armed end', () => {
+    mount(docOf([node('a', 'ec2', 0, 0), node('b', 'rds', 8, 0), node('c', 's3', 0, 8)]), { tool: 'connect', linkFrom: 'c' })
+    f1.down(hit('node', 'a'), 1, 1)
+    vi.mocked(document.elementFromPoint).mockReturnValue(hit('node', 'b'))
+    f1.move(9, 1)
+    f1.up(9, 1)
+    expect(S().doc.edges).toMatchObject([{ from: 'a', to: 'b' }])
+    expect(S()).toMatchObject({ linkFrom: null, tool: 'connect' }) // a drag keeps the tool, for the next one
+  })
+  it('leaving the connect tool forgets the armed end', () => {
+    mount(undefined, { tool: 'connect', linkFrom: 'a' })
+    act(() => { S().set({ tool: 'select' }) })
+    expect(S().linkFrom).toBeNull()
+  })
+  it('works the same with a mouse', () => {
+    mount(undefined, { tool: 'connect' })
+    vi.mocked(document.elementFromPoint).mockReturnValue(hit('node', 'a'))
+    drag(hit('node', 'a'), [1, 1], [1, 1])
+    expect(S().linkFrom).toBe('a')
+    vi.mocked(document.elementFromPoint).mockReturnValue(hit('node', 'b'))
+    drag(hit('node', 'b'), [9, 1], [9, 1])
+    expect(S().doc.edges).toMatchObject([{ from: 'a', to: 'b' }])
+  })
+  it('the connection handle on a selected component does not arm anything when merely tapped', () => {
+    mount(undefined, { selection: ['a'] })
+    vi.mocked(document.elementFromPoint).mockReturnValue(hit('node', 'a'))
+    const h = document.querySelector('[data-handle="connect"]')!
+    drag(h, [1, 1], [1, 1])
+    expect(S().linkFrom).toBeNull()
+    expect(S().doc.edges).toHaveLength(0)
+  })
+})
+
+describe('alignment guides', () => {
+  it('draws a line while what is being moved is level with something else, and clears it on release', () => {
+    mount(undefined, { selection: ['a'] })
+    down(hit('node', 'a'), 1, 1)
+    move(3, 1) // still on the same row as b
+    const lines = document.querySelectorAll('.guide')
+    expect(lines).toHaveLength(1)
+    // it runs through both centres, a little past each end
+    const a = at(3 - 1.6, 1), b = at(9 + 1.6, 1), v = S().view
+    expect(Number(lines[0].getAttribute('x1')) * v.k + v.x).toBeCloseTo(a.clientX, 1)
+    expect(Number(lines[0].getAttribute('x2')) * v.k + v.x).toBeCloseTo(b.clientX, 1)
+    move(3, 4) // off the row
+    expect(document.querySelectorAll('.guide')).toHaveLength(0)
+    move(9, 6) // straight below b: a column this time
+    expect(document.querySelectorAll('.guide')).toHaveLength(1)
+    up(9, 6)
+    expect(document.querySelectorAll('.guide')).toHaveLength(0)
+  })
+  it('ticks under the finger each time a new line appears, and only then', () => {
+    const vibrate = vi.fn<(ms: number) => boolean>()
+    Object.defineProperty(navigator, 'vibrate', { value: vibrate, configurable: true })
+    mount(docOf([node('a', 'ec2', 0, 4), node('b', 'rds', 8, 0)]), { selection: ['a'] })
+    f1.down(hit('node', 'a'), 1, 5)
+    f1.move(3, 5)
+    expect(vibrate).not.toHaveBeenCalledWith(5)
+    f1.move(3, 1) // level with b
+    expect(vibrate.mock.calls.filter((c) => c[0] === 5)).toHaveLength(1)
+    f1.move(4, 1) // still level: the same line, no second tick
+    expect(vibrate.mock.calls.filter((c) => c[0] === 5)).toHaveLength(1)
+    f1.move(4, 3)
+    f1.move(4, 1)
+    expect(vibrate.mock.calls.filter((c) => c[0] === 5)).toHaveLength(2)
+    f1.up(4, 1)
+    delete (navigator as any).vibrate
+  })
+  it('a mouse gets the lines without the tick', () => {
+    const vibrate = vi.fn<(ms: number) => boolean>()
+    Object.defineProperty(navigator, 'vibrate', { value: vibrate, configurable: true })
+    mount(undefined, { selection: ['a'] })
+    drag(hit('node', 'a'), [1, 1], [3, 1])
+    expect(vibrate).not.toHaveBeenCalled()
+    delete (navigator as any).vibrate
+  })
+})
+
+describe('touch targets and the phone layout', () => {
+  const targets = () => [...document.querySelectorAll('.overlay circle[fill="transparent"]')]
+  it('a mouse gets no enlarged targets', () => {
+    mount(undefined, { selection: ['a'] })
+    expect(targets()).toHaveLength(0)
+  })
+  it('fingers get a generous invisible target around every handle', () => {
+    stubMedia(COARSE)
+    mount(undefined, { selection: ['a'] })
+    expect(handles('n')).toHaveLength(4)
+    // four resize corners and the connect handle
+    expect(targets()).toHaveLength(5)
+    for (const c of targets()) expect(Number(c.getAttribute('r'))).toBeGreaterThanOrEqual(15)
+    // a press on the target starts the resize, as a press on the square does
+    const corner = document.querySelector('g[data-handle="n2"] circle')!
+    down(corner, 2.1, 2.1)
+    move(4.1, 4.1)
+    up(4.1, 4.1)
+    expect(S().doc.nodes[0].scale).toBe(2)
+  })
+  it('targets keep their size on screen at any zoom', () => {
+    stubMedia(COARSE)
+    mount(undefined, { selection: ['a'] })
+    act(() => { useStore.setState({ view: { x: 600, y: 300, k: 2 } }) })
+    expect(Number(document.querySelector('g[data-handle="n0"] circle')!.getAttribute('r'))).toBeCloseTo(7.5)
+  })
+  it('leaves the resize corners out when the component is too small on screen for fingers to tell them apart', () => {
+    stubMedia(COARSE)
+    mount(undefined, { selection: ['a'] })
+    act(() => { useStore.setState({ view: { x: 600, y: 300, k: 0.5 } }) })
+    expect(handles('n')).toHaveLength(0)
+    expect(document.querySelector('[data-handle="connect"]')).not.toBeNull()
+    // a bigger component earns them back at the same zoom
+    act(() => { S().patchNode('a', { scale: 2 }) })
+    expect(handles('n')).toHaveLength(4)
+  })
+  it('area corners get the larger target too', () => {
+    stubMedia(COARSE)
+    mount(docOf([], [], { areas: [area('r', 0, 0, 6, 4)] }), { selection: ['r'] })
+    expect(handles('r')).toHaveLength(4)
+    expect(targets()).toHaveLength(4)
+    down(targets()[2], 6, 4)
+    move(8, 5)
+    up(8, 5)
+    expect(S().doc.areas[0]).toMatchObject({ w: 8, d: 5 })
+  })
+  it('on a phone the dock connects, so the on-canvas connect handle is left out', () => {
+    stubMedia(PHONE)
+    mount(undefined, { selection: ['a'] })
+    expect(document.querySelector('[data-handle="connect"]')).toBeNull()
+    expect(handles('n')).toHaveLength(4)
+  })
+  it('the empty canvas speaks to both kinds of device', () => {
+    mount(docOf())
+    expect(document.querySelector('.empty-sub.not-phone')).toHaveTextContent('Drag a component in from the library')
+    expect(document.querySelector('.empty-sub.only-phone')).toHaveTextContent('Tap Add below to place your first component.')
+  })
+})
+
+describe('double-click', () => {
+  it('opens the inspector if it was put away', () => {
+    mount(undefined, { showInsp: false, showLib: true, panel: 'budget' })
+    vi.mocked(document.elementFromPoint).mockReturnValue(hit('node', 'a'))
+    const before = S().focusName
+    fireEvent.doubleClick(svg(), at(1, 1))
+    expect(S()).toMatchObject({ showInsp: true, panel: 'inspect', showLib: true })
+    expect(S().focusName).toBe(before + 1)
+  })
+  it('on a narrow screen it takes the library\'s place', () => {
+    vi.stubGlobal('innerWidth', 390)
+    mount(undefined, { showInsp: false, showLib: true })
+    vi.mocked(document.elementFromPoint).mockReturnValue(hit('node', 'a'))
+    fireEvent.doubleClick(svg(), at(1, 1))
+    expect(S()).toMatchObject({ showInsp: true, showLib: false })
+  })
+})
+

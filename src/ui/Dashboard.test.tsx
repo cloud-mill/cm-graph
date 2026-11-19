@@ -200,6 +200,13 @@ describe('Dashboard', () => {
     expect(doc.name).toBe('Imported from Terraform')
     expect(doc.nodes).toHaveLength(11)
   })
+  it('offers the same import from the hero, which is where a phone finds it', async () => {
+    render(<Dashboard />)
+    const again = screen.getByRole('button', { name: 'Import from Terraform' })
+    expect(again).toHaveClass('only-phone')
+    await userEvent.click(again)
+    expect(screen.getByRole('dialog', { name: 'Import' })).toBeInTheDocument()
+  })
   it('closes the import dialog without creating anything', async () => {
     render(<Dashboard />)
     await userEvent.click(screen.getByRole('button', { name: 'Import Terraform' }))

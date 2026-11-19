@@ -1,19 +1,26 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Copy, Group, Scan, Trash2, Waypoints } from 'lucide-react'
-import { type Proj, U, f, makeCam, mix, planeMatrix, poly, pt, unproject, upright } from '../core/iso'
+import { MAX_PITCH, MIN_PITCH, type Proj, U, f, makeCam, mix, normYaw, planeMatrix, poly, pt, unproject, upright } from '../core/iso'
 import { costOf, defOf, defaultProps, docCost, money, nodeName } from '../core/catalog'
 import { pathOf, route } from '../core/routing'
-import { kindOf, moveItems, useStore } from '../core/store'
+import { type View, kindOf, moveItems, useStore } from '../core/store'
 import { type AreaT, type Doc, type NodeT, MAX_SCALE, MIN_SCALE, centerOf, footOf } from '../core/types'
 import { Scene, THEMES, brackets } from './Scene'
 import { Model } from './models'
-import { beginOrbit, cam, fitView, hud, projNow, smoothZoom, zoomBy } from './camera'
+import { animateView, beginOrbit, cam, center, fitView, flushFrame, glide, holdStill, hud, onFrame, projNow, smoothZoom, zoomBy } from './camera'
+import { type Finger, type Gesture, MAX_K, MIN_K, type Trail, fling, gestureMove, gestureRebase, gestureStart, isTwoFingerTap, track } from './touch'
+import { type Guide, alignGuides } from '../core/guides'
+import { haptic, usePhone } from '../ui/device'
 import { wrapSelectionInArea } from '../ui/actions'
 import { ContextMenu, type MenuState } from '../ui/ContextMenu'
 import { keys } from '../ui/atoms'
 
 type Drag =
-  | { mode: 'pan'; sx: number; sy: number; vx: number; vy: number; moved: boolean }
+  | { mode: 'pan'; sx: number; sy: number; vx: number; vy: number; moved: boolean; quiet?: boolean }
+  // second tap of a double tap on bare ground, held: sliding it zooms with one thumb
+  | { mode: 'dtap'; sx: number; sy: number; view: View; moved: boolean }
+  // a finger has landed and has not yet said what it wants: a tap, a pan, or a press-and-hold
+  | { mode: 'touch'; id: string | null; kind: string | null; sx: number; sy: number; vx: number; vy: number; wx: number; wy: number }
   | { mode: 'move'; wx: number; wy: number; sx: number; sy: number; base: Doc; active: boolean; step: number }
   | { mode: 'resize'; id: string; corner: number; base: AreaT; active: boolean }
   | { mode: 'nresize'; id: string; corner: number; base: NodeT; active: boolean }
@@ -31,6 +38,10 @@ export function heat(t: number) {
 
 // rough body heights, so the selection bar sits just above each kind of component
 const HEIGHT: Record<string, number> = { tower: 1.9, rack: 2.1, slab: 0.55, tile: 0.3, cylinder: 1.7, bucket: 1.5, stack: 1.05, cluster: 0.95, people: 1.2, globe: 1.9, disc: 0.5, gate: 1.45 }
+
+/** how long a finger rests before it counts as press-and-hold, and how far it may wander and still be a tap */
+export const HOLD_MS = 420
+const TOUCH_SLOP = 9
 
 export function Canvas() {
   const ref = useRef<SVGSVGElement>(null)
@@ -70,6 +81,25 @@ export function Canvas() {
   const [menu, setMenu] = useState<MenuState | null>(null)
   const [panning, setPanning] = useState(false)
   const [orbiting, setOrbiting] = useState(false)
+  // touch: where each finger is, the two-finger gesture in progress, and the press-and-hold timer
+  const fingers = useRef(new Map<number, Finger>())
+  const gesture = useRef<Gesture | null>(null)
+  const landed = useRef({ first: 0, pair: 0 })
+  const trail = useRef<Trail[]>([])
+  const lastTap = useRef<{ t: number; x: number; y: number } | null>(null)
+  // what a two-finger gesture is doing right now, shown as a small read-out while it lasts
+  const [reading, setReading] = useState<'turn' | 'tilt' | null>(null)
+  const press = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  const [guides, setGuides] = useState<Guide[]>([])
+  const guideKey = useRef('')
+  const linkFrom = useStore((s) => s.linkFrom)
+  // on a phone the dock's Connect button does this job, with a far bigger target
+  const phone = usePhone()
+  // fingers need bigger handles than a mouse does
+  const coarse = useMemo(() => typeof matchMedia !== 'undefined' && matchMedia('(pointer: coarse)').matches, [])
+  useEffect(() => () => clearTimeout(press.current), [])
+  // a connection waiting for its other end only makes sense while the connect tool is up
+  useEffect(() => { if (tool !== 'connect' && useStore.getState().linkFrom) useStore.setState({ linkFrom: null }) }, [tool])
 
   const sel = useMemo(() => new Set(selection), [selection])
 
@@ -171,7 +201,31 @@ export function Canvas() {
     if (placing) return
     const st = useStore.getState()
     const target = e.target as HTMLElement
-    ref.current!.setPointerCapture(e.pointerId)
+    const touch = e.pointerType === 'touch'
+    try { ref.current!.setPointerCapture(e.pointerId) } catch { /* a pointer that is already gone cannot be captured */ }
+    if (touch) {
+      const r = ref.current!.getBoundingClientRect()
+      const now = performance.now()
+      // a finger on the glass stops whatever the camera was doing
+      holdStill()
+      fingers.current.set(e.pointerId, { x: e.clientX - r.left, y: e.clientY - r.top })
+      if (fingers.current.size === 2) {
+        // a second finger turns whatever the first was doing into a camera gesture
+        const d = drag.current
+        const idle = !d || d.mode === 'touch' || d.mode === 'dtap' || (d.mode === 'pan' && !d.moved)
+        clearTimeout(press.current)
+        drag.current = null
+        lastTap.current = null
+        setMoving(false); setWire(null); setDraft(null); setMarquee(null); showGuides([])
+        const [a, b] = [...fingers.current.values()]
+        // only fingers that land together, with nothing else going on, can be a tilt
+        gesture.current = gestureStart(a, b, idle && now - landed.current.first < 300)
+        landed.current.pair = now
+        setPanning(true)
+      }
+      if (fingers.current.size >= 2) return
+      landed.current.first = now
+    }
     const hitEl = target.closest('[data-kind], [data-handle]')
     // orbit: right-drag anywhere, alt-drag on empty ground, or any drag with the orbit tool
     if (e.button === 2 || (e.button === 0 && (st.tool === 'orbit' || (e.altKey && !hitEl)))) {
@@ -221,6 +275,21 @@ export function Canvas() {
       } else drag.current = { mode: 'pan', sx: e.clientX, sy: e.clientY, vx: st.view.x, vy: st.view.y, moved: false }
       return
     }
+    // a second tap on bare ground, straight after the first: lift to zoom in, or slide to zoom with one thumb
+    const tapped = lastTap.current
+    if (touch && st.tool === 'select' && !id && tapped && performance.now() - tapped.t < 320 && Math.hypot(e.clientX - tapped.x, e.clientY - tapped.y) < 40) {
+      lastTap.current = null
+      drag.current = { mode: 'dtap', sx: e.clientX, sy: e.clientY, view: st.view, moved: false }
+      return
+    }
+    // touch, select tool: dragging something that is already selected moves it; anything else waits to
+    // see whether this is a tap (select), a drag (pan) or a press-and-hold (pick up, or the menu)
+    if (touch && st.tool === 'select' && !(id && kind && kind !== 'edge' && st.selection.includes(id) && !st.multi)) {
+      drag.current = { mode: 'touch', id: id ?? null, kind: kind ?? null, sx: e.clientX, sy: e.clientY, vx: st.view.x, vy: st.view.y, wx, wy }
+      clearTimeout(press.current)
+      press.current = setTimeout(() => longPress(), HOLD_MS)
+      return
+    }
     if (id && kind) {
       if (e.shiftKey) st.select([id], true)
       else if (!st.selection.includes(id)) st.select([id])
@@ -237,7 +306,56 @@ export function Canvas() {
     drag.current = { mode: 'pan', sx: e.clientX, sy: e.clientY, vx: st.view.x, vy: st.view.y, moved: false }
   }
 
+  const showGuides = (g: Guide[]) => {
+    const key = g.map((x) => x.axis + x.at + ':' + x.from + ':' + x.to).join()
+    if (key === guideKey.current) return false
+    const more = g.length > guideKey.current.split(',').filter(Boolean).length
+    guideKey.current = key
+    setGuides(g)
+    return more
+  }
+
+  /** Move the camera to where the two fingers are now. */
+  const stepGesture = () => {
+    const g = gesture.current
+    if (!g || fingers.current.size < 2) return
+    const [a, b] = [...fingers.current.values()]
+    const s = useStore.getState()
+    const was = { turning: g.turning, kind: g.kind }
+    const next = gestureMove(g, a, b, { view: s.view, yaw: s.yaw, pitch: s.pitch }, center())
+    // a tick when the camera lets go into a turn or a tilt, and when a tilt reaches the end of its travel
+    if ((g.turning && !was.turning) || (g.kind === 'tilt' && was.kind !== 'tilt')) { haptic(8); setReading(g.kind === 'tilt' ? 'tilt' : 'turn') }
+    if (next.pitch !== s.pitch && (next.pitch >= MAX_PITCH || next.pitch <= MIN_PITCH)) haptic(10)
+    useStore.setState({ view: next.view, yaw: next.yaw, pitch: next.pitch, flat: next.pitch >= 89.5 })
+  }
+
+  /** A finger has rested in one place: pick up what is under it, or open the menu on bare ground. */
+  const longPress = () => {
+    const d = drag.current
+    if (!d || d.mode !== 'touch') return
+    const st = useStore.getState()
+    haptic(12)
+    if (d.id && d.kind !== 'edge') {
+      if (st.multi) { if (!st.selection.includes(d.id)) st.select([d.id], true) } else st.select([d.id])
+      const onlyFree = useStore.getState().selection.every((s) => kindOf(st.doc, s) === 'label')
+      drag.current = { mode: 'move', wx: d.wx, wy: d.wy, sx: d.sx, sy: d.sy, base: st.doc, active: false, step: onlyFree ? 0.5 : 1 }
+      setMoving(true) // the selection lifts straight away, so the hold is felt before the drag
+      return
+    }
+    drag.current = null
+    openMenuAt(d.sx, d.sy)
+  }
+
   const onPointerMove = (e: React.PointerEvent) => {
+    if (e.pointerType === 'touch' && fingers.current.has(e.pointerId)) {
+      const r = ref.current!.getBoundingClientRect()
+      fingers.current.set(e.pointerId, { x: e.clientX - r.left, y: e.clientY - r.top })
+      if (gesture.current) {
+        // both fingers report separately: wait for the frame so the camera moves once, with both in place
+        if (fingers.current.size >= 2) onFrame(stepGesture)
+        return
+      }
+    }
     const d = drag.current
     if (hud.el) {
       const [hx, hy] = toWorld(e.clientX, e.clientY)
@@ -246,10 +364,33 @@ export function Canvas() {
     }
     if (!d) return
     const st = useStore.getState()
+    if (d.mode === 'touch') {
+      // it moved before the hold was up: this is a pan
+      if (Math.hypot(e.clientX - d.sx, e.clientY - d.sy) < TOUCH_SLOP) return
+      clearTimeout(press.current)
+      drag.current = { mode: 'pan', sx: d.sx, sy: d.sy, vx: d.vx, vy: d.vy, moved: true }
+      setPanning(true)
+      trail.current = []
+      track(trail.current, performance.now(), e.clientX, e.clientY)
+      st.set({ view: { ...st.view, x: d.vx + e.clientX - d.sx, y: d.vy + e.clientY - d.sy } })
+      return
+    }
+    if (d.mode === 'dtap') {
+      const dy = e.clientY - d.sy
+      if (!d.moved && Math.abs(dy) < TOUCH_SLOP) return
+      if (!d.moved) { d.moved = true; d.sy += Math.sign(dy) * TOUCH_SLOP; setPanning(true) }
+      // down zooms in, up zooms out, about the spot that was tapped
+      const r = ref.current!.getBoundingClientRect()
+      const cx = d.sx - r.left, cy = d.sy - r.top
+      const k = Math.max(MIN_K, Math.min(MAX_K, d.view.k * Math.exp((e.clientY - d.sy) * 0.01)))
+      st.set({ view: { k, x: cx - ((cx - d.view.x) * k) / d.view.k, y: cy - ((cy - d.view.y) * k) / d.view.k } })
+      return
+    }
     if (d.mode === 'pan') {
       const dx = e.clientX - d.sx, dy = e.clientY - d.sy
       if (!d.moved && Math.hypot(dx, dy) < 4) return
       if (!d.moved) { d.moved = true; setPanning(true) }
+      if (e.pointerType === 'touch') track(trail.current, performance.now(), e.clientX, e.clientY)
       st.set({ view: { ...st.view, x: d.vx + dx, y: d.vy + dy } })
     } else if (d.mode === 'orbit') {
       const dx = e.clientX - d.sx, dy = e.clientY - d.sy
@@ -258,7 +399,7 @@ export function Canvas() {
       d.update(dx, dy)
     } else if (d.mode === 'move') {
       if (!d.active) {
-        if (Math.hypot(e.clientX - d.sx, e.clientY - d.sy) < 4) return
+        if (Math.hypot(e.clientX - d.sx, e.clientY - d.sy) < (e.pointerType === 'touch' ? TOUCH_SLOP : 4)) return
         d.active = true
         setMoving(true)
         // alt-drag clones the selection and moves the copies
@@ -268,6 +409,8 @@ export function Canvas() {
       const dx = Math.round((wx - d.wx) / d.step) * d.step, dy = Math.round((wy - d.wy) / d.step) * d.step
       const sel = new Set(useStore.getState().selection)
       st.apply((doc) => moveItems(doc, d.base, sel, dx, dy), true)
+      // a line appears whenever what is being moved comes level with something else, with a tick under the finger
+      if (showGuides(alignGuides(useStore.getState().doc.nodes, sel)) && e.pointerType === 'touch') haptic(5)
     } else if (d.mode === 'resize') {
       if (!d.active) { d.active = true; st.checkpoint() }
       const [wx, wy] = toWorld(e.clientX, e.clientY).map((v) => Math.round(v * 2) / 2)
@@ -300,25 +443,84 @@ export function Canvas() {
   }
 
   const onPointerUp = (e: React.PointerEvent) => {
+    clearTimeout(press.current)
+    if (e.pointerType === 'touch') {
+      const g = gesture.current
+      if (g) flushFrame()
+      const pair = [...fingers.current.keys()].slice(0, 2)
+      fingers.current.delete(e.pointerId)
+      if (g) {
+        const left = [...fingers.current.values()]
+        if (left.length >= 2) {
+          // one of three or more lifted: the gesture carries on with the two that are left
+          if (pair.includes(e.pointerId)) gestureRebase(g, left[0], left[1])
+          return
+        }
+        gesture.current = null
+        setReading(null)
+        const s = useStore.getState()
+        if (s.yaw < 0 || s.yaw >= 360) useStore.setState({ yaw: normYaw(s.yaw) })
+        const r = ref.current!.getBoundingClientRect()
+        if (isTwoFingerTap(g, performance.now() - landed.current.pair)) {
+          // two fingers touched and left: step back out, about the spot between them
+          haptic(6)
+          animateView(zoomBy(0.5, (g.a.x + g.b.x) / 2, (g.a.y + g.b.y) / 2), 260)
+          drag.current = null
+          setPanning(false)
+        } else if (left.length === 1) {
+          // the finger still down carries on as a pan, from exactly where things are
+          trail.current = []
+          drag.current = { mode: 'pan', sx: left[0].x + r.left, sy: left[0].y + r.top, vx: s.view.x, vy: s.view.y, moved: true, quiet: true }
+        } else { drag.current = null; setPanning(false) }
+        return
+      }
+    }
     const d = drag.current
     drag.current = null
     if (!space.current) setPanning(false)
     setMoving(false)
+    showGuides([])
     if (!d) return
     const st = useStore.getState()
+    if (d.mode === 'dtap') {
+      if (d.moved) return
+      haptic(6)
+      const r = ref.current!.getBoundingClientRect()
+      animateView(zoomBy(2, d.sx - r.left, d.sy - r.top), 260)
+      return
+    }
+    if (d.mode === 'pan' && d.moved && e.pointerType === 'touch' && e.type !== 'pointercancel') {
+      // a flick keeps going and eases to a stop; a finger that came to rest leaves the view where it is
+      const v = fling(trail.current, performance.now())
+      if (v && !(d.quiet && Math.hypot(e.clientX - d.sx, e.clientY - d.sy) < 24)) glide(v[0], v[1])
+      return
+    }
+    if (d.mode === 'touch') {
+      // lifted without moving: a tap
+      if (!d.id) { lastTap.current = st.tool === 'select' && e.type !== 'pointercancel' ? { t: performance.now(), x: e.clientX, y: e.clientY } : null; st.select([]); if (st.multi) st.set({ multi: false }); return }
+      haptic(6)
+      st.select([d.id], st.multi)
+      return
+    }
     if (d.mode === 'orbit') {
       setOrbiting(false)
       // a right-click that never became a drag is a context-menu request
-      if (!d.moved && d.button === 2) openMenu(e)
+      if (!d.moved && d.button === 2) openMenuAt(e.clientX, e.clientY)
       return
     }
-    if (d.mode === 'pan' && !d.moved) st.select([])
+    if (d.mode === 'pan' && !d.moved) { st.select([]); if (st.linkFrom) st.set({ linkFrom: null }) }
     else if (d.mode === 'connect') {
       const t = nodeAt(e.clientX, e.clientY)
-      if (t && t !== d.from) {
-        const id = st.addEdge(d.from, t)
-        if (id) st.select([id])
+      const link = (from: string, to: string) => {
+        const id = st.addEdge(from, to)
+        if (id) { st.select([id]); haptic(10) }
         else st.toast('Those components are already connected', 'warn')
+      }
+      if (t && t !== d.from) { link(d.from, t); if (st.linkFrom) st.set({ linkFrom: null }) }
+      else if (t === d.from && st.tool === 'connect') {
+        // a tap rather than a drag: the first tap picks one end, the second picks the other
+        if (st.linkFrom && st.linkFrom !== t) { link(st.linkFrom, t); st.set({ linkFrom: null, tool: 'select' }) }
+        else { st.set({ linkFrom: st.linkFrom === t ? null : t }); haptic(6) }
       }
       setWire(null)
     } else if (d.mode === 'marquee') {
@@ -349,21 +551,24 @@ export function Canvas() {
   }
 
   const onContextMenu = (e: React.MouseEvent) => e.preventDefault()
-  const openMenu = (e: React.PointerEvent) => {
+  const openMenuAt = (cx: number, cy: number) => {
     const st = useStore.getState()
     // the pointer is captured by the canvas, so look up what is actually under it
-    const hit = (document.elementFromPoint(e.clientX, e.clientY)?.closest('[data-kind]') ?? null) as HTMLElement | null
+    const hit = (document.elementFromPoint(cx, cy)?.closest('[data-kind]') ?? null) as HTMLElement | null
     const id = hit?.dataset.id
     if (id && !st.selection.includes(id)) st.select([id])
     if (!id) st.select([])
-    const [wx, wy] = toWorld(e.clientX, e.clientY)
-    setMenu({ x: e.clientX, y: e.clientY, wx, wy, target: id ? (hit!.dataset.kind as any) : null })
+    const [wx, wy] = toWorld(cx, cy)
+    setMenu({ x: cx, y: cy, wx, wy, target: id ? (hit!.dataset.kind as any) : null })
   }
 
   const onDoubleClick = (e: React.MouseEvent) => {
     // the canvas captures the pointer, so the event's own target is the canvas: look up what is under it
     const hit = (document.elementFromPoint(e.clientX, e.clientY)?.closest('[data-kind]') ?? (e.target as HTMLElement).closest('[data-kind]')) as HTMLElement | null
-    if (hit?.dataset.id) useStore.setState((s) => ({ panel: 'inspect', focusName: s.focusName + 1 }))
+    // while several things are being picked, two quick taps are two picks, not a request to edit
+    if (useStore.getState().multi) return
+    // opens the inspector if it was put away, since a rename has to happen somewhere
+    if (hit?.dataset.id) useStore.setState((s) => ({ panel: 'inspect', showInsp: true, ...(innerWidth <= 760 ? { showLib: false } : {}), focusName: s.focusName + 1 }))
   }
 
   // ---- overlay geometry
@@ -378,6 +583,7 @@ export function Canvas() {
   const cursor = orbiting ? 'move' : panning ? 'grabbing' : tool === 'orbit' ? 'move' : placing ? 'copy' : tool === 'connect' || tool === 'area' ? 'crosshair' : tool === 'text' ? 'text' : 'default'
   const wireFrom = wire && drag.current?.mode === 'connect' ? byId.get(drag.current.from) : null
   const wireTarget = wire?.target ? byId.get(wire.target) : null
+  const linkNode = linkFrom ? byId.get(linkFrom) : null
 
   const busy = moving || orbiting || panning || !!wire || !!placing
   const fp = (x: number, y: number, o: number, s = 2) => brackets(proj, x - o, y - o, x + s + o, y + s + o, 0.55)
@@ -426,6 +632,17 @@ export function Canvas() {
                 <path d={fp(n.x, n.y, 0.1, footOf(n))} fill="none" stroke={ACCENT} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" />
               </g>
             ))}
+            {linkNode && (
+              <g className="link-from">
+                <polygon points={foot(linkNode.x, linkNode.y, 0.1, footOf(linkNode))} fill={ACCENT} fillOpacity={0.18} />
+                <path d={fp(linkNode.x, linkNode.y, 0.1, footOf(linkNode))} fill="none" stroke={ACCENT} strokeWidth={2} strokeLinecap="round" />
+              </g>
+            )}
+            {guides.map((g) => {
+              const a = g.axis === 'x' ? pt(proj, g.at, g.from - 1.6) : pt(proj, g.from - 1.6, g.at)
+              const b = g.axis === 'x' ? pt(proj, g.at, g.to + 1.6) : pt(proj, g.to + 1.6, g.at)
+              return <line key={g.axis + g.at} className="guide" x1={f(a[0])} y1={f(a[1])} x2={f(b[0])} y2={f(b[1])} stroke={ACCENT} strokeOpacity={0.75} strokeWidth={1 / view.k} strokeDasharray={`${3 / view.k} ${4 / view.k}`} />
+            })}
             {wireTarget && (
               <g>
                 <polygon points={foot(wireTarget.x, wireTarget.y, 0.1, footOf(wireTarget))} fill={ACCENT} fillOpacity={0.18} />
@@ -451,6 +668,7 @@ export function Canvas() {
               return (
                 <g key={a.id}>
                   <polygon points={poly(corners)} fill={ACCENT} fillOpacity={0.04} stroke={ACCENT} strokeWidth={1.25 / view.k} strokeLinejoin="round" pointerEvents="none" />
+                  {selection.length === 1 && coarse && corners.map((c, i) => <circle key={'t' + i} cx={c[0]} cy={c[1]} r={15 / view.k} fill="transparent" data-handle={'r' + i} />)}
                   {selection.length === 1 && corners.map((c, i) => (
                     <rect key={i} x={c[0] - 5 / view.k} y={c[1] - 5 / view.k} width={10 / view.k} height={10 / view.k} rx={2.5 / view.k} fill={theme.bg} stroke={ACCENT} strokeWidth={1.5 / view.k}
                       data-handle={'r' + i} className="handle" style={{ cursor: 'crosshair' }} />
@@ -487,7 +705,7 @@ export function Canvas() {
               </g>
             )}
             {/* corner handles: drag to resize the selected component */}
-            {single && tool === 'select' && !wire && !moving && [[0, 0], [1, 0], [1, 1], [0, 1]].map(([ix, iy], i) => {
+            {single && tool === 'select' && !wire && !moving && (!coarse || footOf(single) * U * view.k > 64) && [[0, 0], [1, 0], [1, 1], [0, 1]].map(([ix, iy], i) => {
               const fs = footOf(single), o = 0.1
               const c = pt(proj, single.x + (ix ? fs + o : -o), single.y + (iy ? fs + o : -o))
               const r = 4.5 / view.k
@@ -495,10 +713,15 @@ export function Canvas() {
               const mid = pt(proj, single.x + fs / 2, single.y + fs / 2)
               const deg = ((Math.atan2(c[1] - mid[1], c[0] - mid[0]) * 180) / Math.PI + 360) % 180
               const arrow = ['ew-resize', 'nwse-resize', 'ns-resize', 'nesw-resize'][Math.round(deg / 45) % 4]
-              return <rect key={i} x={c[0] - r} y={c[1] - r} width={r * 2} height={r * 2} rx={r * 0.3} fill={theme.bg} stroke={ACCENT} strokeWidth={1.5 / view.k}
-                data-handle={'n' + i} className="handle" style={{ cursor: arrow }}><title>Drag to resize</title></rect>
+              return (
+                <g key={i} data-handle={'n' + i} style={{ cursor: arrow }}>
+                  {coarse && <circle cx={c[0]} cy={c[1]} r={15 / view.k} fill="transparent" />}
+                  <rect x={c[0] - r} y={c[1] - r} width={r * 2} height={r * 2} rx={r * 0.3} fill={theme.bg} stroke={ACCENT} strokeWidth={1.5 / view.k}
+                    className="handle" style={{ cursor: arrow }}><title>Drag to resize</title></rect>
+                </g>
+              )
             })}
-            {single && tool === 'select' && !wire && !moving && (() => {
+            {single && tool === 'select' && !wire && !moving && !phone && (() => {
               const { u: hu } = upright(proj) // keep the handle on the component's screen-right side
               const hk = footOf(single) / 2
               const c = pt(proj, single.x + hk + hu[0] * (hk + 0.8), single.y + hk + hu[1] * (hk + 0.8))
@@ -506,6 +729,7 @@ export function Canvas() {
               return (
                 <g data-handle="connect" style={{ cursor: 'crosshair' }} className="connect-handle">
                   <title>Drag to connect</title>
+                  {coarse && <circle cx={c[0]} cy={c[1]} r={22 / view.k} fill="transparent" />}
                   <circle cx={c[0]} cy={c[1]} r={r * 1.7} fill={ACCENT} opacity={0.16} className="pulse" />
                   <circle cx={c[0]} cy={c[1]} r={r} fill={ACCENT} />
                   <path d={`M${c[0] - r * 0.42} ${c[1]}H${c[0] + r * 0.42}M${c[0] + r * 0.06} ${c[1] - r * 0.36}L${c[0] + r * 0.44} ${c[1]}L${c[0] + r * 0.06} ${c[1] + r * 0.36}`}
@@ -517,6 +741,8 @@ export function Canvas() {
         </g>
         {marquee && <rect x={marquee.x} y={marquee.y} width={marquee.w} height={marquee.h} rx={3} fill={ACCENT} fillOpacity={0.06} stroke={ACCENT} strokeOpacity={0.7} strokeWidth={1} pointerEvents="none" />}
       </svg>
+      {/* what the fingers are doing to the camera, while they are doing it */}
+      {reading && <div className="gesture-pill mono" role="status">{reading === 'turn' ? `Turn ${Math.round(normYaw(yaw - 45))}°` : pitch >= 89.5 ? 'Plan view' : `Tilt ${Math.round(90 - pitch)}°`}</div>}
       {barAt && !busy && tool === 'select' && (
         <div className="sel-bar" style={{ left: barAt[0], top: barAt[1] }} key={selection.join()}>
           {single ? (
@@ -540,7 +766,8 @@ export function Canvas() {
         <div className="empty-hint">
           <div className="empty-mark" />
           <div className="empty-title">An empty plane.</div>
-          <div className="empty-sub">Drag a component in from the library, or summon anything with <kbd>{keys('⌘K')}</kbd></div>
+          <div className="empty-sub not-phone">Drag a component in from the library, or summon anything with <kbd>{keys('⌘K')}</kbd></div>
+          <div className="empty-sub only-phone">Tap <b>Add</b> below to place your first component.</div>
         </div>
       )}
       {menu && <ContextMenu menu={menu} onClose={() => setMenu(null)} />}

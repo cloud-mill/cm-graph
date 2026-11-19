@@ -6,6 +6,7 @@ import { CATALOG_LIST, PROVIDERS, defOf, nodeName } from '../core/catalog'
 import { ISO } from '../core/iso'
 import { useStore } from '../core/store'
 import { keys } from './atoms'
+import { isPhone } from './device'
 import { addAtCenter, go, saveVersion, selectAll, tidy, toggleFlat, translateTo } from './actions'
 
 interface Cmd {
@@ -47,6 +48,7 @@ export function CommandPalette({ onClose }: { onClose: () => void }) {
       { id: 'labels', group: 'Actions', label: st.showLabels ? 'Hide component names' : 'Show component names', kbd: 'L', run: () => st.set({ showLabels: !st.showLabels }) },
       { id: 'theme', group: 'Actions', label: st.theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme', run: () => st.setTheme(st.theme === 'dark' ? 'light' : 'dark') },
       { id: 'all', group: 'Actions', label: 'Select all', kbd: '⌘A', run: selectAll },
+      ...(isPhone() ? [{ id: 'gestures', group: 'Actions' as const, label: 'Touch gestures', hint: 'help pinch twist tilt rotate zoom', run: () => st.set({ modal: 'gestures' }) }] : []),
       { id: 'keys', group: 'Actions', label: 'Keyboard shortcuts', kbd: '?', run: () => st.set({ modal: 'shortcuts' }) },
       { id: 'dash', group: 'Actions', label: 'Back to all blueprints', run: () => go('#/') },
       ...PROVIDERS.map((p): Cmd => ({ id: 'to:' + p.id, group: 'Actions', label: `Translate blueprint to ${p.short}`, hint: `${p.name} convert migrate cloud`, run: () => translateTo(p.id) })),

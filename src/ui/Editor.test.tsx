@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { beginOrbit, cam } from '../canvas/camera'
@@ -7,6 +7,7 @@ import { docCost, money } from '../core/catalog'
 import { listSnapshots, loadDoc, saveDoc } from '../core/storage'
 import { useStore } from '../core/store'
 import { docOf, edge, node, resetStore } from '../test/helpers'
+import { PHONE, stubMedia } from '../test/media'
 import { Editor, Logo } from './Editor'
 
 const S = () => useStore.getState()
@@ -511,3 +512,159 @@ describe('keyboard shortcuts', () => {
     expect(S().showGrid).toBe(true)
   })
 })
+
+describe('phone layout', () => {
+  const sheetOf = (name: string) => screen.queryByRole('dialog', { name })
+  const touchTap = (el: Element) => { fireEvent.pointerDown(el, { button: 0, pointerType: 'touch' }); fireEvent.click(el) }
+  beforeEach(() => {
+    stubMedia(PHONE)
+    ;(window as any).innerWidth = 390
+    Object.assign(cam, { w: 390, h: 844, left: 0, top: 0 })
+  })
+  afterEach(() => { vi.unstubAllGlobals() })
+  const openPhone = (state: object = {}) => open({ showLib: false, showInsp: false, ...state })
+
+  it('keeps the top bar to what is always needed', () => {
+    openPhone()
+    const bar = document.querySelector('.topbar')!
+    expect([...bar.querySelectorAll('button')].map((b) => b.getAttribute('aria-label'))).toEqual(['All blueprints', 'Undo', 'Redo', 'Share'])
+    expect(screen.getByLabelText('Blueprint name')).toHaveValue('Shop')
+    expect(document.querySelector('.cmdk-trigger')).toBeNull()
+    expect(btn('Undo')).toBeDisabled()
+    expect(btn('Redo')).toBeDisabled()
+  })
+  it('replaces the desktop toolbar, zoom controls and side panels with the dock', () => {
+    openPhone({ showLib: true })
+    expect(screen.getByRole('navigation', { name: 'Tools' })).toBeInTheDocument()
+    expect(document.querySelector('.editor')).toHaveClass('phone')
+    for (const gone of ['.toolbar', '.zoom', '.hint-pill', '.minimap', '.editor > .panel']) expect(document.querySelector(gone), gone).toBeNull()
+    expect(btn('Fit to screen')).toBeInTheDocument()
+    expect(btn('Switch to plan view')).toBeInTheDocument()
+    // the running total stays, and still opens the budget
+    click(document.querySelector('.hud-cell.cost')!)
+    expect(S()).toMatchObject({ panel: 'budget', showInsp: true })
+  })
+  it('renames from the top bar as one undo step, and leaves the field on Enter', () => {
+    openPhone()
+    const name = screen.getByLabelText('Blueprint name')
+    fireEvent.change(name, { target: { value: 'Sho' } })
+    fireEvent.change(name, { target: { value: 'Shopfront' } })
+    expect(S().doc.name).toBe('Shopfront')
+    name.focus()
+    key('Enter', {}, name)
+    expect(name).not.toHaveFocus()
+    key('a', {}, name) // any other key is just typing
+    expect(S().tool).toBe('select')
+    click(btn('Undo'))
+    expect(S().doc.name).toBe('Shop')
+    click(btn('Redo'))
+    expect(S().doc.name).toBe('Shopfront')
+  })
+  it('shows whether the blueprint is saved as a single dot', () => {
+    openPhone()
+    const dot = () => screen.getByRole('status', { name: /saved|Saving/i })
+    expect(dot()).toHaveAccessibleName('Saved')
+    act(() => { useStore.setState({ saved: false }) })
+    expect(dot()).toHaveAccessibleName('Saving')
+    expect(dot()).toHaveClass('busy')
+    act(() => { useStore.setState({ saveFailed: true }) })
+    expect(dot()).toHaveAccessibleName('Not saved')
+    expect(dot()).toHaveClass('failed')
+  })
+  it('goes back to the list and opens sharing from the bar', () => {
+    openPhone()
+    click(btn('Share'))
+    expect(screen.getByRole('dialog', { name: 'Share blueprint' })).toBeInTheDocument()
+    act(() => { S().set({ modal: null }) })
+    click(btn('All blueprints'))
+    expect(location.hash).toBe('#/')
+  })
+  it('adds a component from the library sheet with one tap, then gets out of the way', () => {
+    openPhone()
+    click(btn('Add'))
+    const lib = sheetOf('Library')!
+    expect(lib).toHaveTextContent('Add a component')
+    expect(sheetOf('Inspector')).toBeNull()
+    touchTap(screen.getByTitle('Function: Lambda'))
+    expect(S().doc.nodes.map((n) => n.type)).toEqual(['ec2', 'rds', 'lambda'])
+    expect(sheetOf('Library')).toBeNull()
+    // the new component is selected, so the dock now offers what can be done with it
+    const sel = screen.getByRole('navigation', { name: 'Selection' })
+    expect(sel).toHaveTextContent('lambda-1')
+  })
+  it('closes the library sheet from its own button', () => {
+    openPhone()
+    click(btn('Add'))
+    click(btn('Close library'))
+    expect(sheetOf('Library')).toBeNull()
+    expect(S().showLib).toBe(false)
+  })
+  it('edits the selection in the inspector sheet, whose title is the three tabs', () => {
+    openPhone({ selection: ['a'] })
+    click(btn('Edit'))
+    const insp = sheetOf('Inspector')!
+    expect([...insp.querySelectorAll('[role=tab]')].map((t) => t.textContent)).toEqual(['Inspect', 'Budget', expect.stringMatching(/^Advisor/)])
+    expect(screen.getByLabelText('Component name')).toHaveValue('web')
+    fireEvent.change(screen.getByLabelText('Component name'), { target: { value: 'api' } })
+    expect(S().doc.nodes[0].name).toBe('api')
+    click(screen.getByRole('tab', { name: 'Budget' }))
+    expect(insp).toHaveTextContent('per month')
+    click(screen.getByRole('tab', { name: /Advisor/ }))
+    expect(insp).toHaveTextContent('finding')
+    click(btn('Close inspector'))
+    expect(sheetOf('Inspector')).toBeNull()
+    expect(S().showInsp).toBe(false)
+  })
+  it('only ever shows one sheet', () => {
+    openPhone({ selection: ['a'] })
+    click(btn('Edit'))
+    expect(sheetOf('Inspector')).not.toBeNull()
+    act(() => { S().select([]) })
+    act(() => { S().set({ showLib: true, showInsp: false }) })
+    expect(sheetOf('Library')).not.toBeNull()
+    expect(sheetOf('Inspector')).toBeNull()
+  })
+  it('swaps the dock for a prompt while a tool is in use', () => {
+    openPhone()
+    click(btn('Connect'))
+    expect(screen.getByRole('navigation', { name: 'Tool' })).toHaveTextContent('Tap a component, then the one it talks to')
+    click(btn(/Cancel/))
+    expect(screen.getByRole('navigation', { name: 'Tools' })).toBeInTheDocument()
+  })
+  it('draws the camera gestures once, on the first visit only', () => {
+    vi.useFakeTimers()
+    openPhone()
+    expect(sheetOf('Getting around')).toBeNull()
+    act(() => { vi.advanceTimersByTime(1500) })
+    expect(sheetOf('Getting around')).not.toBeNull()
+    click(btn('Got it'))
+    expect(sheetOf('Getting around')).toBeNull()
+    cleanup()
+    openPhone()
+    act(() => { vi.advanceTimersByTime(3000) })
+    expect(sheetOf('Getting around')).toBeNull()
+    vi.useRealTimers()
+  })
+  it('holds the gesture guide back while a sheet is up, for the next visit', () => {
+    vi.useFakeTimers()
+    openPhone({ showLib: true })
+    act(() => { vi.advanceTimersByTime(3000) })
+    expect(sheetOf('Getting around')).toBeNull()
+    cleanup()
+    openPhone()
+    act(() => { vi.advanceTimersByTime(1500) })
+    expect(sheetOf('Getting around')).not.toBeNull()
+    vi.useRealTimers()
+  })
+  it('returns to the desktop layout when the window grows', () => {
+    const media = stubMedia(PHONE)
+    openPhone({ showInsp: true })
+    expect(sheetOf('Inspector')).not.toBeNull()
+    act(() => media.set(() => false))
+    expect(sheetOf('Inspector')).toBeNull()
+    expect(document.querySelector('.editor > .panel.right')).not.toBeNull()
+    expect(document.querySelector('.toolbar')).not.toBeNull()
+    expect(screen.queryByRole('navigation', { name: 'Tools' })).toBeNull()
+  })
+})
+

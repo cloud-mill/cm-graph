@@ -1,11 +1,12 @@
 // @vitest-environment jsdom
 import { fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { beforeEach, describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { CATALOG_LIST } from '../core/catalog'
 import { getPref } from '../core/storage'
 import { useStore } from '../core/store'
 import { docOf, node, resetStore } from '../test/helpers'
+import { PHONE, stubMedia } from '../test/media'
 import { Palette } from './Palette'
 
 const S = () => useStore.getState()
@@ -106,5 +107,53 @@ describe('Palette', () => {
     expect(b).toMatchObject({ type: 'rds', name: 'rds-2' })
     for (const p of S().doc.nodes) for (const q of S().doc.nodes) if (p !== q) expect(Math.abs(p.x - q.x) >= 2 || Math.abs(p.y - q.y) >= 2).toBe(true)
     expect(S().selection).toEqual([b.id])
+  })
+
+  it('with a finger, a press never starts a drag: the list has to scroll', () => {
+    resetStore({ provider: 'aws', tool: 'area' })
+    render(<Palette />)
+    const vm = screen.getByTitle('Virtual machine: EC2')
+    fireEvent.pointerDown(vm, { button: 0, pointerType: 'touch' })
+    expect(S()).toMatchObject({ placing: null, tool: 'area' })
+    expect(vm).not.toHaveClass('on')
+  })
+  it('with a finger, a tap adds the component in view and selects it', () => {
+    resetStore({ provider: 'aws', doc: docOf([node('x', 'ec2', -1, -1)]), showLib: true })
+    render(<Palette />)
+    const db = screen.getByTitle('Relational database: RDS / Aurora')
+    fireEvent.pointerDown(db, { button: 0, pointerType: 'touch' })
+    fireEvent.click(db)
+    expect(S().doc.nodes).toHaveLength(2)
+    const added = S().doc.nodes[1]
+    expect(added).toMatchObject({ type: 'rds', name: 'rds-1' })
+    expect(S().selection).toEqual([added.id])
+    // not on top of what was already there
+    expect(Math.abs(added.x + 1) >= 2 || Math.abs(added.y + 1) >= 2).toBe(true)
+    // on a wide screen the library stays open for the next one
+    expect(S().showLib).toBe(true)
+  })
+  it('on a phone, adding puts the library away so the new component can be seen', () => {
+    stubMedia(PHONE)
+    resetStore({ provider: 'aws', showLib: true, placing: 's3' })
+    render(<Palette />)
+    const fn = screen.getByTitle('Function: Lambda')
+    fireEvent.pointerDown(fn, { button: 0, pointerType: 'touch' })
+    fireEvent.click(fn)
+    expect(S().doc.nodes.map((n) => n.type)).toEqual(['lambda'])
+    expect(S()).toMatchObject({ showLib: false, placing: null })
+    vi.unstubAllGlobals()
+  })
+  it('with a mouse, a single click still adds nothing: it is press-and-drag or double-click', () => {
+    render(<Palette />)
+    const vm = screen.getByTitle('Virtual machine: EC2')
+    fireEvent.pointerDown(vm, { button: 0, pointerType: 'mouse' })
+    fireEvent.click(vm)
+    expect(S().doc.nodes).toHaveLength(0)
+    expect(S().placing).toBe('ec2')
+    // and a mouse after a finger goes back to mouse behaviour
+    fireEvent.pointerDown(vm, { button: 0, pointerType: 'touch' })
+    fireEvent.pointerDown(vm, { button: 0, pointerType: 'mouse' })
+    fireEvent.click(vm)
+    expect(S().doc.nodes).toHaveLength(0)
   })
 })

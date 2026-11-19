@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { fireEvent, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { providerOf } from '../core/catalog'
@@ -212,5 +212,15 @@ describe('CommandPalette', () => {
     await userEvent.type(input(), 'export')
     expect(document.querySelector('.cmdk-item kbd')).toHaveTextContent('Ctrl+E')
     expect(document.querySelector('.cmdk-item .cmdk-ico.dot')).not.toBeNull()
+  })
+  it('on a phone, offers the touch gestures; on a desktop it does not', async () => {
+    open()
+    await userEvent.type(input(), 'gestures')
+    expect(labels()).not.toContain('Touch gestures')
+    cleanup()
+    vi.stubGlobal('matchMedia', (q: string) => ({ matches: q.includes('max-width: 760px'), media: q, addEventListener() {}, removeEventListener() {} }))
+    await run('touch gestures')
+    expect(S().modal).toBe('gestures')
+    vi.unstubAllGlobals()
   })
 })

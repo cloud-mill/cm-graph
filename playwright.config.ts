@@ -25,10 +25,17 @@ export default defineConfig({
     permissions: ['clipboard-read', 'clipboard-write'],
   },
   projects: [
-    { name: 'desktop', use: { ...devices['Desktop Chrome'], channel: 'chrome', viewport: { width: 1440, height: 900 } }, testIgnore: /(responsive|performance)\.spec/ },
+    { name: 'desktop', use: { ...devices['Desktop Chrome'], channel: 'chrome', viewport: { width: 1440, height: 900 } }, testIgnore: /(responsive|performance|mobile)\.spec/ },
     { name: 'responsive', use: { ...devices['Desktop Chrome'], channel: 'chrome' }, testMatch: /responsive\.spec/ },
+    // phones: real device profiles (size, pixel ratio, touch, user agent) driven by Chrome's touch input
+    { name: 'android', use: { ...devices['Pixel 7'], channel: 'chrome' }, testMatch: /mobile\.spec/ },
+    { name: 'iphone', use: { ...devices['iPhone 15'], defaultBrowserType: 'chromium', channel: 'chrome' }, testMatch: /mobile\.spec/ },
+    { name: 'small-phone', use: { ...devices['iPhone SE'], defaultBrowserType: 'chromium', channel: 'chrome' }, testMatch: /mobile\.spec/ },
+    { name: 'landscape', use: { ...devices['Pixel 7 landscape'], channel: 'chrome' }, testMatch: /mobile\.spec/ },
+    // Safari's engine. It needs system libraries (`npx playwright install --with-deps webkit`), so it is opt-in
+    ...(process.env.E2E_WEBKIT ? [{ name: 'safari', use: { ...devices['iPhone 15'] }, testMatch: /mobile\.spec/ }] : []),
     // timing is only meaningful on a quiet machine, so these run one at a time after everything else has finished
-    { name: 'performance', use: { ...devices['Desktop Chrome'], channel: 'chrome', viewport: { width: 1440, height: 900 } }, testMatch: /performance\.spec/, dependencies: ['desktop', 'responsive'] },
+    { name: 'performance', use: { ...devices['Desktop Chrome'], channel: 'chrome', viewport: { width: 1440, height: 900 } }, testMatch: /performance\.spec/, dependencies: ['desktop', 'responsive', 'android', 'iphone', 'small-phone', 'landscape'] },
   ],
   webServer: {
     command: PROD ? `npx vite build && npx vite preview --port ${PORT} --strictPort` : `npx vite --port ${PORT} --strictPort`,

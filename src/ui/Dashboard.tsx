@@ -158,6 +158,7 @@ export function Dashboard() {
           <div className="hero-cta">
             <button className="btn primary lg" onClick={() => open(emptyDoc())}>Start a blueprint<ArrowRight size={15} /></button>
             <button className="btn ghost lg" onClick={() => open(instantiate(hero.t))}>Open the sample<ArrowUpRight size={15} /></button>
+            <button className="btn ghost lg only-phone" onClick={() => setImporting(true)}>Import from Terraform</button>
           </div>
           <div className="hero-note">Runs entirely in your browser. No account, nothing uploaded.</div>
         </div>

@@ -10,7 +10,7 @@ import { analyze } from '../core/advisor'
 import { docCost, money, nodeColor } from '../core/catalog'
 import { makeCam, normYaw, poly, pt, upright } from '../core/iso'
 import { type Panel, type Tool, coalesce, enableAutosave, flushSave, useStore } from '../core/store'
-import { loadDoc } from '../core/storage'
+import { getPref, loadDoc, setPref } from '../core/storage'
 import { IconBtn, Segmented, useTween, focusPending, keys, typeAhead } from './atoms'
 import { go, saveVersion, selectAll, tidy } from './actions'
 import { AdvisorPanel } from './AdvisorPanel'
@@ -20,6 +20,9 @@ import { ExportDialog, HistoryDialog, ImportDialog, ShareDialog, ShortcutsDialog
 import { Inspector } from './Inspector'
 import { Palette } from './Palette'
 import { footOf } from '../core/types'
+import { usePhone } from './device'
+import { GestureGuide, MobileDock, ViewFabs } from './MobileDock'
+import { Sheet } from './Sheet'
 
 /** Three stacked planes: the product is literally layers of infrastructure. */
 export function Logo({ size = 22 }: { size?: number }) {
@@ -32,7 +35,7 @@ export function Logo({ size = 22 }: { size?: number }) {
   )
 }
 
-function TopBar() {
+function TopBar({ phone }: { phone?: boolean }) {
   const name = useStore((s) => s.doc.name)
   const saved = useStore((s) => s.saved)
   const saveFailed = useStore((s) => s.saveFailed)
@@ -43,6 +46,22 @@ function TopBar() {
   const showLib = useStore((s) => s.showLib)
   const showInsp = useStore((s) => s.showInsp)
   const s = useStore.getState()
+  // on a phone the bar keeps only what is needed at all times; the rest lives in the dock and its menu
+  if (phone) return (
+    <header className="topbar">
+      <div className="island">
+        <button className="home" onClick={() => go('#/')} aria-label="All blueprints"><ChevronLeft size={16} /><Logo size={20} /></button>
+        <input className="doc-name" value={name} spellCheck={false} aria-label="Blueprint name" enterKeyHint="done"
+          onChange={(e) => coalesce('docname', (d) => ({ ...d, name: e.target.value }))} onKeyDown={(e) => e.key === 'Enter' && e.currentTarget.blur()} />
+        <span className={'save-dot' + (saveFailed ? ' failed' : saved ? '' : ' busy')} role="status" aria-label={saveFailed ? 'Not saved' : saved ? 'Saved' : 'Saving'} />
+      </div>
+      <div className="island">
+        <IconBtn title="Undo" onClick={s.undo} disabled={!canUndo}><Undo2 size={17} /></IconBtn>
+        <IconBtn title="Redo" onClick={s.redo} disabled={!canRedo}><Redo2 size={17} /></IconBtn>
+        <button className="btn primary sm" aria-label="Share" onClick={() => s.set({ modal: 'share' })}><Share2 size={14} /></button>
+      </div>
+    </header>
+  )
   return (
     <header className="topbar">
       <div className="island">
@@ -233,7 +252,7 @@ function Hud() {
   )
 }
 
-function CanvasChrome() {
+function CanvasChrome({ phone }: { phone?: boolean }) {
   const k = useStore((s) => s.view.k)
   const tool = useStore((s) => s.tool)
   const placing = useStore((s) => s.placing)
@@ -242,6 +261,7 @@ function CanvasChrome() {
     : tool === 'area' ? 'Drag on the ground to draw an area'
     : tool === 'text' ? 'Click to drop a label'
     : tool === 'orbit' ? 'Drag to orbit · right-drag orbits from any tool' : null
+  if (phone) return <><ViewCube /><Hud /><ViewFabs /></>
   return (
     <>
       <ViewCube />
@@ -252,7 +272,7 @@ function CanvasChrome() {
         <Minimap />
         <div className="zoom-ctl">
           <IconBtn title="Zoom out" kbd="-" onClick={() => animateView(zoomBy(1 / 1.3), 180)}><Minus size={14} /></IconBtn>
-          <button className="zoom-pct" onClick={() => animateView(zoomBy(1 / k), 240)}>{Math.round(k * 100)}%<span className="tip">Reset to 100%</span></button>
+          <button className="zoom-pct" onClick={() => animateView({ ...zoomBy(1 / k), k: 1 }, 240)}>{Math.round(k * 100)}%<span className="tip">Reset to 100%</span></button>
           <IconBtn title="Zoom in" kbd="+" onClick={() => animateView(zoomBy(1.3), 180)}><Plus size={14} /></IconBtn>
           <span className="sep" />
           <IconBtn title="Fit" kbd="F" onClick={() => fitView()}><Scan size={14} /></IconBtn>
@@ -265,13 +285,23 @@ function CanvasChrome() {
 function RightPanel() {
   const panel = useStore((s) => s.panel)
   const doc = useStore((s) => s.doc)
-  const s = useStore.getState()
   const issues = useMemo(() => analyze(doc).findings.filter((f) => f.severity !== 'low').length, [doc])
+  return (
+    <aside className="panel right">
+      <RightTabs panel={panel} issues={issues} />
+      <div className="right-scroll" key={panel}>
+        {panel === 'inspect' ? <Inspector /> : panel === 'budget' ? <BudgetPanel /> : <AdvisorPanel />}
+      </div>
+    </aside>
+  )
+}
+
+function RightTabs({ panel, issues }: { panel: Panel; issues: number }) {
+  const s = useStore.getState()
   const tabs: { id: Panel; label: string; badge?: number }[] = [
     { id: 'inspect', label: 'Inspect' }, { id: 'budget', label: 'Budget' }, { id: 'advisor', label: 'Advisor', badge: issues },
   ]
   return (
-    <aside className="panel right">
       <div className="tabs" role="tablist">
         {tabs.map((t) => (
           <button key={t.id} role="tab" aria-selected={panel === t.id} className={panel === t.id ? 'on' : ''} onClick={() => s.set({ panel: t.id })}>
@@ -279,10 +309,20 @@ function RightPanel() {
           </button>
         ))}
       </div>
+  )
+}
+
+/** The same three tabs as the desktop side panel, in a sheet: the tabs are the sheet's title. */
+function InspectSheet({ onClose }: { onClose: () => void }) {
+  const panel = useStore((s) => s.panel)
+  const doc = useStore((s) => s.doc)
+  const issues = useMemo(() => analyze(doc).findings.filter((f) => f.severity !== 'low').length, [doc])
+  return (
+    <Sheet label="Inspector" onClose={onClose} title={<RightTabs panel={panel} issues={issues} />}>
       <div className="right-scroll" key={panel}>
         {panel === 'inspect' ? <Inspector /> : panel === 'budget' ? <BudgetPanel /> : <AdvisorPanel />}
       </div>
-    </aside>
+    </Sheet>
   )
 }
 
@@ -378,17 +418,28 @@ export function Editor({ id }: { id: string }) {
   useEffect(() => { document.title = (title || 'Untitled') + ' · CloudMill Graph' }, [title])
   const showLib = useStore((st) => st.showLib)
   const showInsp = useStore((st) => st.showInsp)
+  const phone = usePhone()
+  // the gestures are the interface on a phone, so they are named once, the first time
+  useEffect(() => {
+    if (!phone || !loaded || getPref('coached', false)) return
+    const t = setTimeout(() => { const st = useStore.getState(); if (!st.modal && !st.showLib && !st.showInsp) { st.set({ modal: 'gestures' }); setPref('coached', true) } }, 1400)
+    return () => clearTimeout(t)
+  }, [phone, loaded])
   if (!loaded) return <div className="boot"><Logo size={34} /></div>
   const close = () => s.set({ modal: null })
   return (
-    <div className="editor" data-lib={showLib} data-insp={showInsp}>
+    <div className={'editor' + (phone ? ' phone' : '')} data-lib={showLib} data-insp={showInsp}>
       <main className="stage">
         <Canvas />
-        <CanvasChrome />
+        <CanvasChrome phone={phone} />
       </main>
-      <TopBar />
-      {showLib && <Palette />}
-      {showInsp && <RightPanel />}
+      <TopBar phone={phone} />
+      {phone && <MobileDock />}
+      {phone && showLib && <Sheet label="Library" title="Add a component" onClose={() => s.set({ showLib: false })}><Palette /></Sheet>}
+      {phone && showInsp && <InspectSheet onClose={() => s.set({ showInsp: false })} />}
+      {!phone && showLib && <Palette />}
+      {!phone && showInsp && <RightPanel />}
+      {modal === 'gestures' && phone && <GestureGuide onClose={close} />}
       {modal === 'command' && <CommandPalette onClose={close} />}
       {modal === 'export' && <ExportDialog onClose={close} />}
       {modal === 'import' && <ImportDialog onClose={close} />}

@@ -70,7 +70,8 @@ export class App {
 
   /** Wait for autosave to catch up with the canvas, then return what was stored. */
   async settled(): Promise<SeedDoc> {
-    await expect(this.page.locator('.save-state')).toHaveText('Saved')
+    // the desktop bar spells the state out; the phone bar shows it as a dot with the same label
+    await expect(this.page.locator('.save-state:text-is("Saved"), .save-dot[aria-label="Saved"]')).toBeVisible()
     return (await this.saved())!
   }
 
@@ -141,7 +142,13 @@ export class App {
 }
 
 /** Every test fails if the page logs an error or throws, whatever else it checks. */
-export const test = base.extend<{ app: App; problems: string[] }>({
+export const test = base.extend<{ app: App; problems: string[]; firstVisit: boolean }>({
+  // the one-time gesture guide is put away unless a test is about a first visit
+  firstVisit: [false, { option: true }],
+  page: async ({ page, firstVisit }, use) => {
+    if (!firstVisit) await page.addInitScript((key) => { try { localStorage.setItem(key + 'pref:coached', 'true') } catch { /* storage blocked: the test is about that */ } }, KEY)
+    await use(page)
+  },
   problems: [async ({ page }, use) => {
     const problems: string[] = []
     page.on('pageerror', (e) => problems.push('pageerror: ' + e.message))
