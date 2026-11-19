@@ -1,0 +1,513 @@
+// @vitest-environment jsdom
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { beginOrbit, cam } from '../canvas/camera'
+import { docCost, money } from '../core/catalog'
+import { listSnapshots, loadDoc, saveDoc } from '../core/storage'
+import { useStore } from '../core/store'
+import { docOf, edge, node, resetStore } from '../test/helpers'
+import { Editor, Logo } from './Editor'
+
+const S = () => useStore.getState()
+vi.setConfig({ testTimeout: 20_000 })
+const key = (k: string, o: object = {}, target: Element = document.body) => fireEvent.keyDown(target, { key: k, ...o })
+const ctrl = (k: string, o: object = {}) => key(k, { ctrlKey: true, ...o })
+const btn = (name: string | RegExp) => screen.getByRole('button', { name })
+const click = (el: Element) => { fireEvent.click(el) }
+const seed = () => docOf(
+  [node('a', 'ec2', 0, 0, { name: 'web' }), node('b', 'rds', 8, 0, { name: 'db' })], [edge('e', 'a', 'b')],
+  { name: 'Shop', areas: [{ id: 'r', x: -1, y: -1, w: 12, d: 4, name: 'VPC', color: '#8F6FF2', kind: 'vpc' }], labels: [{ id: 'l', x: 0, y: -4, text: 'Title', size: 20, dir: 'x' }] },
+)
+/** Open a saved blueprint. `state` is applied once it has loaded (loading resets the session). */
+function open(state: object = {}, doc = seed()) {
+  saveDoc(doc)
+  resetStore({ showLib: false, showInsp: true, focusName: S().focusName })
+  const r = render(<Editor id={doc.id} />)
+  if (Object.keys(state).length) act(() => { useStore.setState(state) })
+  return r
+}
+
+beforeEach(() => {
+  // the rename counter only ever goes up in the app; winding it back would look like a new rename request
+  resetStore({ focusName: S().focusName })
+  Object.assign(cam, { w: 1200, h: 800, left: 0, top: 0 })
+  ;(window as any).innerWidth = 1024
+})
+afterEach(async () => {
+  vi.useRealTimers()
+  ;(window as any).innerWidth = 1024
+  // camera animations are module-level: let a queued frame land, then stop whatever is still running
+  await new Promise((r) => setTimeout(r, 25))
+  beginOrbit()
+})
+
+describe('opening a blueprint', () => {
+  it('loads it from storage with a fresh history and the home camera', () => {
+    const doc = seed()
+    saveDoc(doc)
+    resetStore({ focusName: S().focusName, showLib: true, showInsp: true, yaw: 200, pitch: 80, flat: true, selection: ['zzz'], past: [docOf()], panel: 'advisor', modal: 'export', tool: 'area', placing: 'ec2', lens: 'cost' })
+    render(<Editor id={doc.id} />)
+    expect(S().doc.name).toBe('Shop')
+    expect(S()).toMatchObject({ selection: [], past: [], future: [], saved: true, panel: 'inspect', modal: null, yaw: 45, flat: false, tool: 'select', placing: null, lens: 'none' })
+    expect(screen.getByLabelText('Blueprint name')).toHaveValue('Shop')
+    expect(document.title).toBe('Shop · CloudMill Graph')
+    expect(document.querySelectorAll('.canvas-svg [data-kind="node"]')).toHaveLength(2)
+    expect(screen.getByText('Saved')).toBeInTheDocument()
+    expect(document.querySelector('.editor')).toHaveAttribute('data-lib', 'true')
+    expect(document.querySelector('.panel.palette')).not.toBeNull()
+  })
+  it('goes back to the list when the blueprint does not exist', () => {
+    resetStore({ focusName: S().focusName })
+    render(<Editor id="missing" />)
+    expect(location.hash).toBe('#/')
+    expect(document.querySelector('.boot')).not.toBeNull()
+    expect(document.querySelector('.editor')).toBeNull()
+  })
+  it('keeps the blueprint already in memory rather than reloading it', () => {
+    const doc = seed()
+    resetStore({ focusName: S().focusName, doc, past: [docOf()] })
+    render(<Editor id={doc.id} />)
+    expect(S().past).toHaveLength(1)
+  })
+  it('titles an unnamed blueprint "Untitled"', () => {
+    open({}, { ...seed(), name: '' })
+    expect(document.title).toBe('Untitled · CloudMill Graph')
+  })
+  it('draws the logo at the requested size', () => {
+    const { container } = render(<Logo size={30} />)
+    expect(container.querySelector('svg')).toHaveAttribute('width', '30')
+  })
+})
+
+describe('saving', () => {
+  it('autosaves shortly after a change and shows the state', () => {
+    vi.useFakeTimers()
+    open()
+    act(() => { S().addNode('s3', 20, 20) })
+    expect(screen.getByText('Saving')).toBeInTheDocument()
+    expect(loadDoc('doc1')!.nodes).toHaveLength(2)
+    act(() => { vi.advanceTimersByTime(500) })
+    expect(loadDoc('doc1')!.nodes).toHaveLength(3)
+    expect(screen.getByText('Saved')).toBeInTheDocument()
+  })
+  it('saves pending work when leaving the editor or closing the tab', () => {
+    vi.useFakeTimers()
+    const { unmount } = open()
+    act(() => { S().addNode('s3', 20, 20) })
+    fireEvent(window, new Event('beforeunload'))
+    expect(loadDoc('doc1')!.nodes).toHaveLength(3)
+    act(() => { S().addNode('sqs', 30, 20) })
+    unmount()
+    expect(loadDoc('doc1')!.nodes).toHaveLength(4)
+    // once closed, later store changes are not written to this blueprint
+    act(() => { S().addNode('sns', 40, 20); vi.advanceTimersByTime(1000) })
+    expect(loadDoc('doc1')!.nodes).toHaveLength(4)
+  })
+  it('renames from the top bar as one undo step and retitles the tab', async () => {
+    open()
+    const name = screen.getByLabelText('Blueprint name')
+    await userEvent.type(name, ' v2{Enter}')
+    expect(S().doc.name).toBe('Shop v2')
+    expect(S().past).toHaveLength(1)
+    expect(name).not.toHaveFocus()
+    expect(document.title).toBe('Shop v2 · CloudMill Graph')
+  })
+})
+
+describe('top bar', () => {
+  it('goes back to all blueprints', async () => {
+    open()
+    click(btn('All blueprints'))
+    expect(location.hash).toBe('#/')
+  })
+  it('enables undo and redo only when there is something to step through', async () => {
+    open()
+    expect(btn('Undo')).toBeDisabled()
+    expect(btn('Redo')).toBeDisabled()
+    act(() => { S().addNode('s3', 20, 20) })
+    click(btn('Undo'))
+    expect(S().doc.nodes).toHaveLength(2)
+    expect(btn('Undo')).toBeDisabled()
+    click(btn('Redo'))
+    expect(S().doc.nodes).toHaveLength(3)
+  })
+  it.each([['Version history', 'Version history'], ['Import', 'Import'], ['Export', 'Export'], ['Shortcuts', 'Keyboard shortcuts'], ['Share', 'Share blueprint']])('%s opens its dialog and Escape closes it', async (button, dialog) => {
+    open()
+    click(btn(button))
+    expect(screen.getByRole('dialog', { name: dialog })).toBeInTheDocument()
+    await userEvent.keyboard('{Escape}')
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(S().modal).toBeNull()
+  })
+  it('opens the command palette from the search field', async () => {
+    open()
+    click(btn(/Search or run a command/))
+    expect(screen.getByRole('dialog', { name: 'Command palette' })).toBeInTheDocument()
+  })
+  it('switches between the 3D and plan views', async () => {
+    open()
+    expect(screen.getByRole('radio', { name: '3D' })).toHaveAttribute('aria-checked', 'true')
+    click(screen.getByRole('radio', { name: '2D' }))
+    await waitFor(() => expect(S().flat).toBe(true), { timeout: 3000 })
+    expect(screen.getByRole('radio', { name: '2D' })).toHaveAttribute('aria-checked', 'true')
+    click(screen.getByRole('radio', { name: '3D' }))
+    await waitFor(() => expect(S().pitch).toBeCloseTo(35.264, 2), { timeout: 3000 })
+    expect(S().flat).toBe(false)
+  })
+  it('switches theme', async () => {
+    open()
+    click(btn('Light theme'))
+    expect(S().theme).toBe('light')
+    click(btn('Dark theme'))
+    expect(S().theme).toBe('dark')
+  })
+  it('shows and hides the side panels', async () => {
+    open({ showLib: true })
+    expect(document.querySelector('.panel.palette')).not.toBeNull()
+    expect(btn('Library')).toHaveAttribute('aria-pressed', 'true')
+    click(btn('Library'))
+    expect(document.querySelector('.panel.palette')).toBeNull()
+    expect(document.querySelector('.editor')).toHaveAttribute('data-lib', 'false')
+    click(btn('Inspector'))
+    expect(document.querySelector('.panel.right')).toBeNull()
+    click(btn('Inspector'))
+    click(btn('Library'))
+    expect(S()).toMatchObject({ showLib: true, showInsp: true })
+  })
+  it('keeps only one panel open on a narrow screen', async () => {
+    ;(window as any).innerWidth = 700
+    open({ showLib: true, showInsp: false })
+    click(btn('Inspector'))
+    expect(S()).toMatchObject({ showLib: false, showInsp: true })
+    click(btn('Library'))
+    expect(S()).toMatchObject({ showLib: true, showInsp: false })
+    key(']')
+    expect(S()).toMatchObject({ showLib: false, showInsp: true })
+    key('[')
+    expect(S()).toMatchObject({ showLib: true, showInsp: false })
+    key('[')
+    expect(S()).toMatchObject({ showLib: false, showInsp: false })
+  })
+})
+
+describe('canvas chrome', () => {
+  it('switches tools and shows a hint for each', async () => {
+    open()
+    expect(btn('Select')).toHaveAttribute('aria-pressed', 'true')
+    expect(document.querySelector('.hint-pill')).toBeNull()
+    for (const [name, tool, hint] of [['Connect', 'connect', 'Drag from one component to another'], ['Area', 'area', 'Drag on the ground to draw an area'], ['Text', 'text', 'Click to drop a label'], ['Orbit view', 'orbit', /^Drag to orbit/]] as const) {
+      click(btn(name))
+      expect(S().tool).toBe(tool)
+      expect(btn(name)).toHaveAttribute('aria-pressed', 'true')
+      expect(document.querySelector('.hint-pill')).toHaveTextContent(hint)
+    }
+    act(() => S().set({ placing: 'ec2' }))
+    expect(document.querySelector('.hint-pill')).toHaveTextContent(/^Release on the canvas to place/)
+    click(btn('Select'))
+    expect(S()).toMatchObject({ tool: 'select', placing: null })
+  })
+  it('toggles traffic, grid and names, and tidies the layout', async () => {
+    open()
+    click(btn('Traffic animation'))
+    expect(S().flow).toBe(false)
+    expect(document.querySelector('.edge-flow')).toBeNull()
+    click(btn('Grid'))
+    expect(S().showGrid).toBe(false)
+    click(btn('Component names'))
+    expect(document.querySelector('.nd-label')).toBeNull()
+    click(btn('Tidy layout'))
+    expect(S().past).toHaveLength(1)
+    expect(S().toasts.at(-1)!.text).toBe('Layout tidied')
+  })
+  it('does not tidy an empty blueprint', async () => {
+    open({}, docOf())
+    click(btn('Tidy layout'))
+    expect(S().toasts).toHaveLength(0)
+    expect(document.querySelector('.minimap')).toBeNull()
+  })
+  it('zooms in steps, resets to 100% and fits', async () => {
+    open()
+    act(() => { useStore.setState({ view: { x: 0, y: 0, k: 1 } }) })
+    expect(document.querySelector('.zoom-pct')).toHaveTextContent('100%')
+    click(btn('Zoom in'))
+    await waitFor(() => expect(S().view.k).toBeCloseTo(1.3), { timeout: 3000 })
+    expect(document.querySelector('.zoom-pct')).toHaveTextContent('130%')
+    click(document.querySelector('.zoom-pct')!)
+    await waitFor(() => expect(S().view.k).toBe(1), { timeout: 3000 })
+    click(btn('Zoom out'))
+    await waitFor(() => expect(S().view.k).toBeCloseTo(1 / 1.3), { timeout: 3000 })
+    click(btn('Fit'))
+    await waitFor(() => expect(S().view.k).not.toBeCloseTo(1 / 1.3), { timeout: 3000 })
+  })
+  it('shows the running total and opens the budget from it', async () => {
+    open({ showInsp: false })
+    const total = money(docCost(seed()).total, true)
+    await waitFor(() => expect(document.querySelector('.hud .cost')).toHaveTextContent(total + '/mo'), { timeout: 3000 })
+    expect(document.querySelector('.hud')).toHaveTextContent('N02')
+    expect(document.querySelector('.hud')).toHaveTextContent('L01')
+    expect(document.querySelector('.hud')).toHaveTextContent('AZ045°')
+    expect(document.querySelector('.hud')).toHaveTextContent('EL35°')
+    click(document.querySelector('.hud .cost')!)
+    expect(S()).toMatchObject({ panel: 'budget', showInsp: true })
+    expect(screen.getByRole('tab', { name: 'Budget' })).toHaveAttribute('aria-selected', 'true')
+    expect(document.querySelector('.heat-legend')).toBeNull()
+    act(() => S().set({ lens: 'cost' }))
+    expect(document.querySelector('.heat-legend')).not.toBeNull()
+  })
+  it('switches the right panel between tabs and badges serious findings', async () => {
+    open()
+    expect(screen.getByRole('tab', { name: 'Inspect' })).toHaveAttribute('aria-selected', 'true')
+    expect(screen.getByRole('tab', { name: /Advisor/ })).toHaveTextContent('Advisor1') // the single-zone database
+    click(screen.getByRole('tab', { name: /Advisor/ }))
+    expect(screen.getByRole('button', { name: 'Enable Multi-AZ' })).toBeInTheDocument()
+    click(screen.getByRole('button', { name: 'Enable Multi-AZ' }))
+    expect(screen.getByRole('tab', { name: /Advisor/ })).toHaveTextContent(/^Advisor$/)
+    click(screen.getByRole('tab', { name: 'Budget' }))
+    expect(screen.getByText('Pricing model')).toBeInTheDocument()
+  })
+  it('jumps the view from the minimap', () => {
+    open()
+    const map = document.querySelector('.minimap')!
+    expect(map.querySelectorAll('polygon')).toHaveLength(3) // one area, two components
+    vi.spyOn(map, 'getBoundingClientRect').mockReturnValue({ left: 0, top: 0, width: 180, height: 120, right: 180, bottom: 120, x: 0, y: 0, toJSON() {} })
+    fireEvent.pointerDown(map, { pointerId: 1, clientX: 20, clientY: 20 })
+    const a = S().view
+    fireEvent.pointerMove(map, { pointerId: 1, buttons: 1, clientX: 160, clientY: 100 })
+    const b = S().view
+    expect(b.x).toBeLessThan(a.x) // looking further right means the scene shifts left
+    expect(b.y).toBeLessThan(a.y)
+    expect(b.k).toBe(a.k)
+    fireEvent.pointerMove(map, { pointerId: 1, buttons: 0, clientX: 20, clientY: 20 })
+    expect(S().view).toEqual(b)
+  })
+  it('turns and resets the camera from the view cube', async () => {
+    open()
+    click(btn('Turn left'))
+    await waitFor(() => expect(S().yaw).toBe(90), { timeout: 3000 })
+    click(btn('Turn right'))
+    await waitFor(() => expect(S().yaw).toBe(45), { timeout: 3000 })
+    const cube = document.querySelector('.viewcube svg')!
+    const face = (id: string) => cube.querySelector(`[data-face="${id}"]`)!
+    expect([...cube.querySelectorAll('text')].map((t) => t.textContent).sort()).toEqual(['FRONT', 'RIGHT', 'TOP'])
+    fireEvent.pointerDown(face('top'), { pointerId: 1, clientX: 10, clientY: 10 })
+    fireEvent.pointerUp(cube, { pointerId: 1, clientX: 10, clientY: 10 })
+    await waitFor(() => expect(S().flat).toBe(true), { timeout: 3000 })
+    click(btn('Home view'))
+    await waitFor(() => expect(S().pitch).toBeCloseTo(35.264, 2), { timeout: 3000 })
+    fireEvent.pointerDown(face('y'), { pointerId: 1, clientX: 10, clientY: 10 })
+    fireEvent.pointerUp(cube, { pointerId: 1, clientX: 10, clientY: 10 })
+    await waitFor(() => { expect(S().pitch).toBeCloseTo(22, 6); expect(S().yaw).toBeCloseTo(0, 6) }, { timeout: 3000 })
+    fireEvent.pointerDown(face('x'), { pointerId: 1, clientX: 10, clientY: 10 })
+    fireEvent.pointerUp(cube, { pointerId: 1, clientX: 10, clientY: 10 })
+    await waitFor(() => expect(S().yaw).toBeCloseTo(90, 6), { timeout: 3000 })
+  })
+  it('orbits by dragging the view cube, and a drag is not a click', () => {
+    open()
+    const cube = document.querySelector('.viewcube svg')!
+    fireEvent.pointerMove(cube, { pointerId: 1, clientX: 50, clientY: 50 }) // no drag in progress
+    fireEvent.pointerUp(cube, { pointerId: 1 })
+    fireEvent.pointerDown(cube.querySelector('[data-face="top"]')!, { pointerId: 1, clientX: 10, clientY: 10 })
+    fireEvent.pointerMove(cube, { pointerId: 1, clientX: 11, clientY: 10 })
+    expect(S().yaw).toBe(45)
+    fireEvent.pointerMove(cube, { pointerId: 1, clientX: 60, clientY: 30 })
+    fireEvent.pointerUp(cube, { pointerId: 1, clientX: 60, clientY: 30 })
+    expect(S().yaw).toBeCloseTo(45 - 50 * 1.6 * 0.35)
+    expect(S().pitch).toBeGreaterThan(35.3)
+    expect(S().flat).toBe(false)
+  })
+  it('labels the cube faces for the side the camera is on', () => {
+    open()
+    act(() => { useStore.setState({ yaw: 225, pitch: 35 }) })
+    expect([...document.querySelectorAll('.viewcube text')].map((t) => t.textContent).sort()).toEqual(['BACK', 'LEFT', 'TOP'])
+  })
+})
+
+describe('keyboard shortcuts', () => {
+  it('picks tools', () => {
+    open()
+    for (const [k, tool] of [['c', 'connect'], ['a', 'area'], ['t', 'text'], ['o', 'orbit'], ['o', 'select'], ['C', 'connect'], ['v', 'select']] as const) { key(k); expect(S().tool).toBe(tool) }
+  })
+  it('Escape cancels placing, then the tool, then the selection', () => {
+    open({ placing: 'ec2', tool: 'area' })
+    act(() => S().select(['a']))
+    key('Escape')
+    expect(S()).toMatchObject({ placing: null, tool: 'area', selection: ['a'] })
+    key('Escape')
+    expect(S()).toMatchObject({ tool: 'select', selection: ['a'] })
+    key('Escape')
+    expect(S().selection).toEqual([])
+  })
+  it('deletes the selection with Delete or Backspace', () => {
+    open()
+    act(() => S().select(['a']))
+    key('Delete')
+    expect(S().doc.nodes.map((n) => n.id)).toEqual(['b'])
+    expect(S().doc.edges).toHaveLength(0)
+    act(() => S().select(['b']))
+    key('Backspace')
+    expect(S().doc.nodes).toHaveLength(0)
+    key('Delete')
+    expect(S().past).toHaveLength(2) // nothing selected: nothing happens
+  })
+  it('undoes and redoes', () => {
+    open()
+    act(() => { S().addNode('s3', 20, 20) })
+    ctrl('z')
+    expect(S().doc.nodes).toHaveLength(2)
+    ctrl('z', { shiftKey: true })
+    expect(S().doc.nodes).toHaveLength(3)
+    key('z', { metaKey: true })
+    expect(S().doc.nodes).toHaveLength(2)
+    ctrl('y')
+    expect(S().doc.nodes).toHaveLength(3)
+  })
+  it('duplicates, copies, cuts, pastes and selects all', () => {
+    open()
+    act(() => S().select(['a']))
+    ctrl('d')
+    expect(S().doc.nodes).toHaveLength(3)
+    act(() => S().select(['a', 'b']))
+    ctrl('c')
+    expect(S().toasts.at(-1)!.text).toBe('Copied 2 item(s)')
+    ctrl('v')
+    expect(S().doc.nodes).toHaveLength(5)
+    expect(S().doc.edges).toHaveLength(2) // the connection between the copied pair comes along
+    ctrl('x')
+    expect(S().doc.nodes).toHaveLength(3)
+    ctrl('v')
+    expect(S().doc.nodes).toHaveLength(5)
+    ctrl('a')
+    expect(S().selection).toHaveLength(5 + 1 + 1) // components, the area and the label
+  })
+  it('nudges along the screen axes, further with Shift, whatever way the camera faces', () => {
+    open()
+    act(() => S().select(['a']))
+    key('ArrowRight')
+    expect(S().doc.nodes[0]).toMatchObject({ x: 1, y: 0 })
+    key('ArrowDown', { shiftKey: true })
+    expect(S().doc.nodes[0]).toMatchObject({ x: 1, y: 4 })
+    key('ArrowLeft'); key('ArrowUp')
+    expect(S().doc.nodes[0]).toMatchObject({ x: 0, y: 3 })
+    act(() => { useStore.setState({ yaw: 225 }) })
+    key('ArrowRight')
+    expect(S().doc.nodes[0]).toMatchObject({ x: -1, y: 3 })
+    act(() => S().select([]))
+    key('ArrowRight')
+    expect(S().doc.nodes[0]).toMatchObject({ x: -1, y: 3 })
+  })
+  it('Enter asks to rename the selection and focuses its name', async () => {
+    open({ panel: 'budget' })
+    const before = S().focusName
+    key('Enter')
+    expect(S().focusName).toBe(before)
+    act(() => S().select(['a']))
+    key('Enter')
+    expect(S()).toMatchObject({ focusName: before + 1, panel: 'inspect' })
+    await waitFor(() => expect(screen.getByDisplayValue('web')).toHaveFocus())
+  })
+  it('toggles panels, grid, names and the heatmap', () => {
+    open()
+    act(() => S().set({ showLib: true }))
+    key('['); expect(S().showLib).toBe(false)
+    key(']'); expect(S().showInsp).toBe(false)
+    key('\\'); expect(S()).toMatchObject({ showLib: true, showInsp: true })
+    key('\\'); expect(S()).toMatchObject({ showLib: false, showInsp: false })
+    key('g'); expect(S().showGrid).toBe(false)
+    key('l'); expect(S().showLabels).toBe(false)
+    key('h'); expect(S().lens).toBe('cost')
+    key('h'); expect(S().lens).toBe('none')
+  })
+  it('zooms, fits and turns the camera', async () => {
+    open()
+    act(() => { useStore.setState({ view: { x: 0, y: 0, k: 1 } }) })
+    key('+')
+    await waitFor(() => expect(S().view.k).toBeCloseTo(1.3), { timeout: 3000 })
+    key('-')
+    await waitFor(() => expect(S().view.k).toBeCloseTo(1), { timeout: 3000 })
+    key('=')
+    await waitFor(() => expect(S().view.k).toBeCloseTo(1.3), { timeout: 3000 })
+    key('q')
+    await waitFor(() => expect(S().yaw).toBe(90), { timeout: 3000 })
+    key('e')
+    await waitFor(() => expect(S().yaw).toBe(45), { timeout: 3000 })
+    key('2')
+    await waitFor(() => expect(S().flat).toBe(true), { timeout: 3000 })
+    key('3')
+    await waitFor(() => expect(S().flat).toBe(false), { timeout: 3000 })
+    await waitFor(() => expect(S().pitch).toBeCloseTo(35.264, 2), { timeout: 3000 })
+    const whole = S().view.k
+    act(() => S().select(['a', 'r']))
+    key('f')
+    await waitFor(() => expect(S().view.k).not.toBe(whole), { timeout: 3000 })
+    const close = S().view.k
+    act(() => S().select([]))
+    key('f')
+    await waitFor(() => expect(S().view.k).toBeLessThan(close), { timeout: 3000 })
+  })
+  it('opens dialogs', () => {
+    open()
+    key('?')
+    expect(S().modal).toBe('shortcuts')
+    act(() => S().set({ modal: null }))
+    ctrl('e')
+    expect(S().modal).toBe('export')
+  })
+  it('toggles the command palette with Ctrl+K from anywhere, even another dialog', () => {
+    open({ modal: 'export' })
+    ctrl('k')
+    expect(S().modal).toBe('command')
+    ctrl('K')
+    expect(S().modal).toBeNull()
+    key('k', { metaKey: true })
+    expect(S().modal).toBe('command')
+  })
+  it('saves a version with Ctrl+S, even while typing', () => {
+    open()
+    expect(ctrl('s')).toBe(false) // the browser's own save dialog is suppressed
+    key('s', { ctrlKey: true }, screen.getByLabelText('Blueprint name'))
+    expect(listSnapshots('doc1')).toHaveLength(2)
+    expect(S().toasts.at(-1)!.text).toBe('Version saved')
+  })
+  it('ignores shortcuts while a dialog is open', () => {
+    open({ modal: 'shortcuts' })
+    act(() => S().select(['a']))
+    key('Delete'); key('g'); ctrl('z'); ctrl('s'); ctrl('e')
+    expect(S().doc.nodes).toHaveLength(2)
+    expect(S().showGrid).toBe(true)
+    expect(S().modal).toBe('shortcuts')
+    expect(listSnapshots('doc1')).toHaveLength(0)
+  })
+  it('leaves keys alone while typing in a field', () => {
+    open()
+    act(() => S().select(['a']))
+    const field = screen.getByLabelText('Blueprint name')
+    key('Delete', {}, field); key('g', {}, field); key('a', { ctrlKey: true }, field); key('ArrowRight', {}, field)
+    expect(S().doc.nodes).toHaveLength(2)
+    expect(S().showGrid).toBe(true)
+    expect(S().selection).toEqual(['a'])
+    expect(S().doc.nodes[0].x).toBe(0)
+  })
+  it('holds keys typed just after a rename was requested for the name field', () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance', 'Date'] })
+    const exec = vi.spyOn(document, 'execCommand').mockReturnValue(true)
+    open()
+    act(() => S().select(['a']))
+    key('Enter')
+    expect(key('g')).toBe(false)
+    key('l')
+    expect(S()).toMatchObject({ showGrid: true, showLabels: true }) // not read as shortcuts
+    act(() => { vi.advanceTimersByTime(60) })
+    expect(screen.getByDisplayValue('web')).toHaveFocus()
+    expect(exec).toHaveBeenCalledWith('insertText', false, 'gl')
+    act(() => { vi.advanceTimersByTime(400) })
+    key('g')
+    expect(S().showGrid).toBe(false)
+  })
+  it('stops listening when the editor closes', () => {
+    const { unmount } = open()
+    unmount()
+    key('g')
+    expect(S().showGrid).toBe(true)
+  })
+})
