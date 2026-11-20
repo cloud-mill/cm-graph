@@ -1,6 +1,7 @@
 import { CATALOG_LIST, EC2_FAMILY, RDS_CLASS, REGIONS, SIZE_MULT, defOf, defaultProps, nodeName, roleOf } from './catalog'
 import { autoLayout } from './layout'
 import { type Doc, type NodeT, emptyDoc, uid } from './types'
+import { guessKind, kindInfo } from './links'
 
 interface Res {
   key: string
@@ -172,7 +173,7 @@ export function importTerraform(source: string, name = 'Imported from Terraform'
     const k = from.id + '>' + to.id
     if (pairs.has(k) || pairs.has(to.id + '>' + from.id)) return
     pairs.add(k)
-    doc.edges.push({ id: uid(), from, to, style: 'solid', arrow: 'end', width: 2 } as any)
+    doc.edges.push({ id: uid(), from, to, style: 'solid', arrow: 'end', width: 2, origin: 'imported' } as any)
   }
   const isConnector = (r?: Res) => !!r && !typeFor(r.type) && !NETWORK.test(r.type) && !STRUCTURAL.test(r.type) && !IGNORED.test(r.type)
 
@@ -218,7 +219,7 @@ export function importTerraform(source: string, name = 'Imported from Terraform'
     const k = from.id + '>' + to.id
     if (pairs.has(k) || pairs.has(to.id + '>' + from.id)) continue
     pairs.add(k)
-    doc.edges.push({ id: uid(), from, to, style: 'solid', arrow: 'end', width: 2 } as any)
+    doc.edges.push({ id: uid(), from, to, style: 'solid', arrow: 'end', width: 2, origin: 'imported' } as any)
   }
   for (const r of res) {
     if (!isConnector(r) || seen.has(r.key)) continue
@@ -244,7 +245,8 @@ export function importTerraform(source: string, name = 'Imported from Terraform'
       for (let i = 0; i < comp.length; i++) for (let j = i + 1; j < comp.length; j++) if (tier(comp[i]) !== tier(comp[j])) link(comp[i], comp[j])
     }
   }
-  doc.edges = doc.edges.map((e: any) => ({ ...e, from: e.from.id, to: e.to.id }))
+  // a reference in code says two resources are related and which refers to which; what kind of relationship is a guess from what they are
+  doc.edges = doc.edges.map((e: any) => { const kind = guessKind(e.from, e.to), k = kindInfo(kind)!; return { ...e, from: e.from.id, to: e.to.id, kind, style: k.style, arrow: k.arrow } })
 
   // synthetic client so the request path reads left to right
   const hasIn = new Set(doc.edges.map((e) => e.to))
@@ -252,7 +254,7 @@ export function importTerraform(source: string, name = 'Imported from Terraform'
   if (entries.length) {
     const users: NodeT = { id: uid(), type: 'users', x: 0, y: 0, name: 'Users', props: {} }
     doc.nodes.push(users)
-    for (const e of entries) doc.edges.push({ id: uid(), from: users.id, to: e.id, style: roleOf(e.type) === 'route53' ? 'dashed' : 'solid', arrow: 'end', width: 2 })
+    for (const e of entries) doc.edges.push({ id: uid(), from: users.id, to: e.id, style: roleOf(e.type) === 'route53' ? 'dashed' : 'solid', arrow: 'end', width: 2, kind: 'request', origin: 'inferred' })
   }
 
   // --- VPC membership via structural references

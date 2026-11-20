@@ -127,6 +127,15 @@ export function coerceDoc(raw: any): Doc | null {
         id: idOf(e.id), from: e.from, to: e.to, label: opt(e.label), color: opt(e.color),
         style: ['solid', 'dashed', 'dotted'].includes(e.style) ? e.style : 'solid',
         arrow: ['none', 'end', 'both'].includes(e.arrow) ? e.arrow : 'end', width: n(e.width) > 0 && n(e.width) <= 20 ? n(e.width) : 2,
+        // what the line means and how it was shaped: all optional, so older files read as plain automatic connections
+        ...(['request', 'data', 'event', 'replication', 'dependency'].includes(e.kind) ? { kind: e.kind } : {}),
+        ...(opt(e.protocol) ? { protocol: String(e.protocol).slice(0, 40) } : {}),
+        ...(opt(e.port) ? { port: String(e.port).slice(0, 40) } : {}),
+        ...(['drawn', 'imported', 'inferred'].includes(e.origin) ? { origin: e.origin } : {}),
+        ...(Array.isArray(e.via) && e.via.length && e.via.length <= 64 && e.via.every((p: any) => Array.isArray(p) && p.length === 2 && Number.isFinite(p[0]) && Number.isFinite(p[1]))
+          ? { via: e.via.map((p: any) => [p[0], p[1]] as [number, number]) } : {}),
+        ...(['n', 'e', 's', 'w'].includes(e.fromSide) ? { fromSide: e.fromSide } : {}),
+        ...(['n', 'e', 's', 'w'].includes(e.toSide) ? { toSide: e.toSide } : {}),
       })),
     areas: list(raw.areas).map((a) => ({
       id: idOf(a.id), x: n(a.x), y: n(a.y), w: Math.max(1, n(a.w, 4)), d: Math.max(1, n(a.d, 4)), name: s(a.name, 'Area'),

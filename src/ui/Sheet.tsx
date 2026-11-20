@@ -1,7 +1,19 @@
 import { type ReactNode, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { X } from 'lucide-react'
-import { chrome, fitView } from '../canvas/camera'
-import { useStore } from '../core/store'
+import { animateView, chrome, fitView, headedTo, reveal } from '../canvas/camera'
+import { useBackLayer } from '../core/nav'
+import { type View, useStore } from '../core/store'
+
+/** Frame the whole diagram and say where the view will end up. */
+function frameAll(): View | null {
+  const before = useStore.getState().view
+  fitView(undefined, false)
+  const to = useStore.getState().view
+  useStore.setState({ view: before })
+  if (Math.abs(to.x - before.x) < 1 && Math.abs(to.y - before.y) < 1 && Math.abs(to.k - before.k) < 0.001) return null
+  animateView(to)
+  return to
+}
 
 /**
  * A bottom sheet for phones: it rises over the canvas, can be pulled taller or
@@ -11,36 +23,66 @@ import { useStore } from '../core/store'
  * Only the header drags the sheet. The content scrolls on its own, so a scroll
  * is never mistaken for a dismissal.
  */
-export function Sheet({ label, title, onClose, children, startTall }: {
+export function Sheet({ label, title, onClose, children, startTall, roomy }: {
   label: string; title?: ReactNode; onClose: () => void; children: ReactNode; startTall?: boolean
+  /** opens at two thirds of the screen rather than half: for content that is mostly a long list */
+  roomy?: boolean
 }) {
   const [tall, setTall] = useState(!!startTall)
   const el = useRef<HTMLElement>(null)
   const drag = useRef<{ y: number; dy: number; t: number; id: number; control: boolean; held: boolean } | null>(null)
 
+  // where the view was before the sheet moved it, and where the sheet put it
+  const moved = useRef<{ from: View; to: View } | null>(null)
+
   // tell the camera how much of the canvas is covered, and bring the selection back into view
   useLayoutEffect(() => {
     const measure = () => {
       const r = el.current!.getBoundingClientRect()
-      const side = r.height >= innerHeight * 0.9 && r.width < innerWidth * 0.7
+      // upright the sheet spans the screen along the bottom; sideways it is a column down the right edge
+      const side = r.width < innerWidth * 0.7
       chrome.bottom = side ? 0 : r.height
       chrome.right = side ? r.width : 0
     }
     measure()
-    const sel = useStore.getState().selection
-    const ids = useStore.getState().doc.nodes.filter((n) => sel.includes(n.id)).map((n) => n.id)
-    // with something selected, keep it in sight at the zoom the user chose; otherwise re-frame the whole diagram in the room left
-    const t = setTimeout(() => { measure(); if (ids.length) fitView(ids, true, useStore.getState().view.k); else fitView() }, 60)
+    const t = setTimeout(() => {
+      measure()
+      const st = useStore.getState()
+      const ids = st.doc.nodes.filter((n) => st.selection.includes(n.id)).map((n) => n.id)
+      // with something selected, slide it into sight at the zoom the user chose, and only if the sheet
+      // hides it; with nothing selected, re-frame the whole diagram in the room that is left
+      const to = ids.length ? reveal(ids) : frameAll()
+      if (to) moved.current = { from: moved.current?.from ?? st.view, to }
+    }, 60)
     window.addEventListener('resize', measure)
     return () => { clearTimeout(t); window.removeEventListener('resize', measure); chrome.bottom = 0; chrome.right = 0 }
   }, [tall])
 
-  // a field taking focus means typing: give the content all the room there is
+  // the phone's Back button puts the sheet away before it leaves the page
+  useBackLayer(true, onClose)
+
+  // putting the sheet away puts the view back, unless the user has moved it since
+  useEffect(() => () => {
+    // a sheet put away while the view is still gliding to make room for it counts as not moved: judge by where the glide was going
+    const m = moved.current, v = headedTo() ?? useStore.getState().view
+    if (m && Math.abs(v.x - m.to.x) < 1 && Math.abs(v.y - m.to.y) < 1 && Math.abs(v.k - m.to.k) < 0.001) animateView(m.from, 320)
+  }, [])
+
+  // a field taking focus means typing: give the content all the room there is, and hand it back when the typing is over
+  const grew = useRef(false)
   useEffect(() => {
-    const grow = (e: FocusEvent) => { if (/INPUT|TEXTAREA/.test((e.target as HTMLElement).tagName)) setTall(true) }
+    const field = (t: EventTarget | null) => /INPUT|TEXTAREA/.test((t as HTMLElement | null)?.tagName ?? '')
+    const grow = (e: FocusEvent) => { if (field(e.target)) setTall((t) => { if (!t) grew.current = true; return true }) }
+    const shrink = (e: FocusEvent) => {
+      // moving from one field to the next is still typing
+      if (!field(e.target) || field(e.relatedTarget) || !grew.current) return
+      grew.current = false
+      setTall(false)
+    }
     const node = el.current!
     node.addEventListener('focusin', grow)
-    return () => node.removeEventListener('focusin', grow)
+    node.addEventListener('focusout', shrink)
+    return () => { node.removeEventListener('focusin', grow); node.removeEventListener('focusout', shrink) }
   }, [])
 
   const settle = () => { if (el.current) { el.current.style.transition = ''; el.current.style.transform = '' } }
@@ -70,6 +112,7 @@ export function Sheet({ label, title, onClose, children, startTall }: {
     settle()
     const fast = Math.abs(d.dy) / Math.max(1, performance.now() - d.t) > 0.6
     if (!d.held) return // a plain tap on a tab or the close button: theirs to handle
+    grew.current = false // from here the height is the user's choice
     if (Math.abs(d.dy) < 6) setTall((t) => !t) // a tap on the handle toggles the height
     // a pull down steps a tall sheet back to half height; a long pull or a flick sends it away
     else if (d.dy > (fast ? 30 : 110)) { if (tall && !fast && d.dy < 300) setTall(false); else onClose() }
@@ -77,7 +120,7 @@ export function Sheet({ label, title, onClose, children, startTall }: {
   }
 
   return (
-    <section ref={el} className={'sheet' + (tall ? ' tall' : '')} role="dialog" aria-label={label}>
+    <section ref={el} className={'sheet' + (roomy ? ' roomy' : '') + (tall ? ' tall' : '')} role="dialog" aria-label={label}>
       <header className="sheet-head" onPointerDown={down} onPointerMove={move} onPointerUp={up} onPointerCancel={up}>
         <i className="sheet-grip" aria-hidden="true" />
         <div className="sheet-title">{title}</div>

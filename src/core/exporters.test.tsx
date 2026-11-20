@@ -79,16 +79,19 @@ describe('budgetCsv', () => {
     const d = docOf([node('a', 'ec2', 0, 0, { name: 'web', props: { ...defaultProps('ec2'), family: 'm5', size: 'large', count: 1, disk: 100 } }), node('u', 'users')], [], { region: 'us-east-1' })
     const csv = budgetCsv(d, 'ondemand')
     expect(rows(csv)).toEqual([
-      'Component,Service,Category,Line item,Monthly (USD),Yearly (USD)',
-      'web,EC2,compute,1 × m5.large,70.08,840.96',
-      'web,EC2,compute,100 GB gp3,8.00,96.00',
-      'Total,,,us-east-1 · ondemand,78.08,936.96',
+      'Component,Service,Category,Line item,Monthly (USD),Yearly (USD),Basis,Note',
+      'web,EC2,compute,1 × m5.large,70.08,840.96,"Published rate, provisioned capacity",',
+      'web,EC2,compute,100 GB gp3,8.00,96.00,"Published rate, provisioned capacity",',
+      expect.stringMatching(/^Total,,,us-east-1 · ondemand,78\.08,936\.96,,"AWS prices: AWS Price List Bulk API, read \d{4}-\d\d-\d\d\. Excludes tax/),
     ])
     expect(csv.endsWith('\n')).toBe(true)
   })
   it('follows the pricing model and region', () => {
     const d = docOf([node('a', 'ec2', 0, 0, { props: { ...defaultProps('ec2'), family: 'm5', size: 'large', count: 1, disk: 0 } })], [], { region: 'eu-central-1' })
-    expect(rows(budgetCsv(d, 'commit3')).at(-1)).toBe(`Total,,,eu-central-1 · commit3,${(70.08 * 1.15 * 0.5).toFixed(2)},${(70.08 * 1.15 * 0.5 * 12).toFixed(2)}`)
+    // Frankfurt's 3-year no-upfront reserved price for m5.large is $0.05 an hour
+    const last = rows(budgetCsv(d, 'commit3')).at(-1)!
+    expect(last.startsWith(`Total,,,eu-central-1 · commit3,${(0.05 * 730).toFixed(2)},${(0.05 * 730 * 12).toFixed(2)},`)).toBe(true)
+    expect(rows(budgetCsv(d, 'commit3'))[1]).toMatch(/Reserved for 3 years/)
   })
   it('totals match the budget for every template', () => {
     for (const t of TEMPLATES) for (const model of ['ondemand', 'commit1', 'commit3'] as const) {
@@ -115,12 +118,15 @@ describe('budgetCsv', () => {
     const d = docOf(['=HYPERLINK("http://evil","x")', '+1+1', '-2+3', '@SUM(A1)', '\tTab'].map((name, i) => node('n' + i, 'saas', 0, 0, { name, props: { fee: 1 } })))
     const lines = rows(budgetCsv(d, 'ondemand')).slice(1, 6)
     for (const l of lines) expect(l).toMatch(/^"?'/)
-    expect(lines[0]).toBe(`"'=HYPERLINK(""http://evil"",""x"")",External service,external,Subscription,1.00,12.00`)
+    expect(lines[0].startsWith(`"'=HYPERLINK(""http://evil"",""x"")",External service,external,Subscription,1.00,12.00,`)).toBe(true)
     // ordinary names and the numeric columns are untouched
     expect(budgetCsv(docOf([node('a', 'saas', 0, 0, { name: 'plain-name', props: { fee: 1 } })]), 'ondemand')).toContain('plain-name,External service')
   })
   it('an empty or free blueprint yields a header and a zero total', () => {
-    expect(rows(budgetCsv(docOf(), 'ondemand'))).toEqual(['Component,Service,Category,Line item,Monthly (USD),Yearly (USD)', 'Total,,,us-east-1 · ondemand,0.00,0.00'])
+    const empty = rows(budgetCsv(docOf(), 'ondemand'))
+    expect(empty[0]).toBe('Component,Service,Category,Line item,Monthly (USD),Yearly (USD),Basis,Note')
+    expect(empty[1].startsWith('Total,,,us-east-1 · ondemand,0.00,0.00,')).toBe(true)
+    expect(empty).toHaveLength(2)
     expect(rows(budgetCsv(docOf([node('u', 'users'), node('g', 'igw')]), 'ondemand'))).toHaveLength(2)
   })
 })

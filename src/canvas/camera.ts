@@ -66,6 +66,7 @@ export function glide(vx: number, vy: number) {
 }
 /** Stop every camera movement in flight: a finger on the glass always wins. */
 export function holdStill() {
+  heading = null
   cancelAnimationFrame(glideRaf); glideRaf = 0
   cancelAnimationFrame(raf)
   cancelAnimationFrame(orbitRaf)
@@ -75,8 +76,12 @@ export function holdStill() {
 }
 
 let raf = 0
+let heading: View | null = null
+/** Where a view animation in flight will end, or null when the view is at rest (or under a finger). */
+export const headedTo = () => heading
 export function animateView(to: View, ms = 420) {
   cancelAnimationFrame(raf)
+  heading = to
   cancelAnimationFrame(glideRaf); glideRaf = 0
   cancelAnimationFrame(orbitRaf)
   orbitActive = false
@@ -88,6 +93,7 @@ export function animateView(to: View, ms = 420) {
     // land exactly on the target: the eased sum can be a hair off
     useStore.setState({ view: t < 1 ? { x: from.x + (to.x - from.x) * e, y: from.y + (to.y - from.y) * e, k: from.k + (to.k - from.k) * e } : { ...to } })
     if (t < 1) raf = requestAnimationFrame(step)
+    else heading = null
   }
   raf = requestAnimationFrame(step)
 }
@@ -139,6 +145,7 @@ export const ORBIT_SPEED = 0.35 // degrees per pixel
  * travel; the ground point under (sx, sy) stays put, like grabbing the scene.
  */
 export function beginOrbit(sx = center()[0], sy = center()[1]) {
+  heading = null
   cancelAnimationFrame(orbitRaf)
   orbitActive = false
   pendingFit = null
@@ -155,6 +162,7 @@ let orbitActive = false
 let pendingFit: [string[] | undefined, number] | null = null
 /** Animate to a camera angle along the shortest turn, pivoting on the viewport centre. */
 export function orbitTo(yaw: number, pitch: number, ms = 560) {
+  heading = null
   cancelAnimationFrame(orbitRaf)
   cancelAnimationFrame(raf)
   cancelAnimationFrame(glideRaf); glideRaf = 0
@@ -199,6 +207,24 @@ export function recover() {
   if (isTurned(s.yaw, s.pitch)) viewHome()
   fitView()
 }
+/**
+ * Slide the view, at the zoom it has, so the given components sit in the part of
+ * the canvas that is not covered. Does nothing when they already do. Returns
+ * where the view is headed, or null when it stays put.
+ */
+export function reveal(ids: string[]): View | null {
+  const s = useStore.getState()
+  const nodes = s.doc.nodes.filter((n) => ids.includes(n.id))
+  if (!nodes.length) return null
+  const b = sceneBounds({ ...s.doc, nodes, areas: [], labels: [] }, projNow(), 0), v = s.view, i = insets()
+  const x0 = b.x * v.k + v.x, x1 = (b.x + b.w) * v.k + v.x, y0 = b.y * v.k + v.y, y1 = (b.y + b.h) * v.k + v.y
+  if (x0 >= i.l && x1 <= cam.w - i.r && y0 >= i.t && y1 <= cam.h - i.b) return null
+  const [cx, cy] = center()
+  const to = { k: v.k, x: cx - (b.x + b.w / 2) * v.k, y: cy - (b.y + b.h / 2) * v.k }
+  animateView(to)
+  return to
+}
+
 /** Can any of the diagram be seen in the part of the canvas that is not covered? */
 export function inSight() {
   const s = useStore.getState()
@@ -213,6 +239,7 @@ let zoomTarget = 0
 let zoomAt: [number, number] = [0, 0]
 /** Wheel notches glide to their target instead of jumping; the point under the cursor stays put. */
 export function smoothZoom(factor: number, cx: number, cy: number) {
+  heading = null
   const s = useStore.getState()
   cancelAnimationFrame(raf)
   if (!zoomRaf) zoomTarget = s.view.k

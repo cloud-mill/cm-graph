@@ -1,25 +1,27 @@
 import { useEffect, useMemo, useRef } from 'react'
 import {
   Activity, Box, ChevronLeft, Home, PanelLeft, PanelRight, Rotate3d, RotateCcw, RotateCw, CircleHelp, Command, Download, Grid3x3, History, Layers, LayoutGrid, Minus, Moon, MousePointer2,
-  Plus, Redo2, Scan, Share2, SquareDashed, Sun, Tag, Type, Undo2, Upload, Waypoints,
+  Plus, Redo2, Scan, Share2, SquareDashed, Sun, Tag, Type, Undo2, Upload, Waypoints, X,
 } from 'lucide-react'
 import { Canvas } from '../canvas/Canvas'
 import { animateView, beginOrbit, cam, fitView, hud, orbitTo, setFlat, turn, viewHome, viewTop, zoomBy } from '../canvas/camera'
 import { sceneBounds } from '../canvas/Scene'
 import { analyze } from '../core/advisor'
-import { docCost, money, nodeColor } from '../core/catalog'
+import { docCost, money, nodeColor, nodeName } from '../core/catalog'
 import { makeCam, normYaw, poly, pt, upright } from '../core/iso'
 import { type Panel, type Tool, coalesce, enableAutosave, flushSave, useStore } from '../core/store'
 import { getPref, loadDoc, setPref } from '../core/storage'
 import { IconBtn, Segmented, useTween, focusPending, keys, typeAhead } from './atoms'
-import { go, saveVersion, selectAll, tidy } from './actions'
+import { saveVersion, selectAll, tidy } from './actions'
 import { AdvisorPanel } from './AdvisorPanel'
 import { BudgetPanel } from './BudgetPanel'
 import { CommandPalette } from './CommandPalette'
 import { ExportDialog, HistoryDialog, ImportDialog, ShareDialog, ShortcutsDialog } from './Dialogs'
 import { Inspector } from './Inspector'
-import { Palette } from './Palette'
+import { CloudSeg, Palette } from './Palette'
 import { footOf } from '../core/types'
+import { describe, traceFlow } from '../core/links'
+import { goHome, navigate, useBackLayer } from '../core/nav'
 import { usePhone } from './device'
 import { GestureGuide, MobileDock, ViewFabs } from './MobileDock'
 import { Sheet } from './Sheet'
@@ -50,7 +52,7 @@ function TopBar({ phone }: { phone?: boolean }) {
   if (phone) return (
     <header className="topbar">
       <div className="island">
-        <button className="home" onClick={() => go('#/')} aria-label="All blueprints"><ChevronLeft size={16} /><Logo size={20} /></button>
+        <button className="home" onClick={goHome} aria-label="All blueprints"><ChevronLeft size={16} /><Logo size={20} /></button>
         <input className="doc-name" value={name} spellCheck={false} aria-label="Blueprint name" enterKeyHint="done"
           onChange={(e) => coalesce('docname', (d) => ({ ...d, name: e.target.value }))} onKeyDown={(e) => e.key === 'Enter' && e.currentTarget.blur()} />
         <span className={'save-dot' + (saveFailed ? ' failed' : saved ? '' : ' busy')} role="status" aria-label={saveFailed ? 'Not saved' : saved ? 'Saved' : 'Saving'} />
@@ -65,7 +67,7 @@ function TopBar({ phone }: { phone?: boolean }) {
   return (
     <header className="topbar">
       <div className="island">
-        <button className="home" onClick={() => go('#/')} aria-label="All blueprints"><ChevronLeft size={14} /><Logo size={20} /><span className="tip">All blueprints</span></button>
+        <button className="home" onClick={goHome} aria-label="All blueprints"><ChevronLeft size={14} /><Logo size={20} /><span className="tip">All blueprints</span></button>
         <span className="crumb">/</span>
         <input className="doc-name" value={name} spellCheck={false} aria-label="Blueprint name"
           onChange={(e) => coalesce('docname', (d) => ({ ...d, name: e.target.value }))} onKeyDown={(e) => e.key === 'Enter' && e.currentTarget.blur()}
@@ -252,6 +254,28 @@ function Hud() {
   )
 }
 
+/** Shown while a flow is being followed: what is being followed, how far it reaches, and the way out. */
+function TraceBar() {
+  const trace = useStore((s) => s.trace)
+  const doc = useStore((s) => s.doc)
+  const flow = useMemo(() => (trace ? traceFlow(doc, trace) : null), [doc, trace])
+  const stop = () => useStore.getState().set({ trace: null })
+  // Back steps out of it, like any other temporary state
+  useBackLayer(!!flow, stop)
+  // what was being followed has gone
+  useEffect(() => { if (trace && !flow) stop() }, [trace, flow])
+  if (!flow || !trace) return null
+  const edge = doc.edges.find((e) => e.id === trace), node = doc.nodes.find((n) => n.id === trace)
+  const what = edge ? describe(doc, edge) : node ? nodeName(node) : ''
+  const n = (k: number, word: string) => (k ? `${k} ${word}` : `nothing ${word}`)
+  return (
+    <div className="trace-bar" role="status">
+      <span>Following <b>{what}</b> · {n(flow.up.size, 'upstream')}, {n(flow.down.size, 'downstream')}</span>
+      <button className="btn sm" onClick={stop}><X size={13} />Stop</button>
+    </div>
+  )
+}
+
 function CanvasChrome({ phone }: { phone?: boolean }) {
   const k = useStore((s) => s.view.k)
   const tool = useStore((s) => s.tool)
@@ -261,12 +285,13 @@ function CanvasChrome({ phone }: { phone?: boolean }) {
     : tool === 'area' ? 'Drag on the ground to draw an area'
     : tool === 'text' ? 'Click to drop a label'
     : tool === 'orbit' ? 'Drag to orbit · right-drag orbits from any tool' : null
-  if (phone) return <><ViewCube /><Hud /><ViewFabs /></>
+  if (phone) return <><ViewCube /><Hud /><ViewFabs /><TraceBar /></>
   return (
     <>
       <ViewCube />
       <Toolbar />
       {hint && <div className="hint-pill" key={hint}>{hint}</div>}
+      <TraceBar />
       <Hud />
       <div className="zoom">
         <Minimap />
@@ -355,6 +380,7 @@ function useShortcuts() {
       switch (e.key) {
         case 'Escape':
           if (s.placing) s.set({ placing: null })
+          else if (s.trace) s.set({ trace: null })
           else if (s.tool !== 'select') s.set({ tool: 'select' })
           else s.select([])
           break
@@ -404,7 +430,8 @@ export function Editor({ id }: { id: string }) {
     // (re)load whenever the store is not holding this blueprint, e.g. after a hot reload
     if (useStore.getState().doc.id !== id) {
       const doc = loadDoc(id)
-      if (!doc) { go('#/'); return }
+      // replaced, not added: Back from the dashboard must not land on the missing blueprint and be bounced again
+      if (!doc) { navigate('#/', { replace: true }); return }
       enableAutosave(false)
       useStore.getState().load(doc)
       useStore.setState({ yaw: 45, pitch: 35.264, flat: false })
@@ -435,7 +462,7 @@ export function Editor({ id }: { id: string }) {
       </main>
       <TopBar phone={phone} />
       {phone && <MobileDock />}
-      {phone && showLib && <Sheet label="Library" title="Add a component" onClose={() => s.set({ showLib: false })}><Palette /></Sheet>}
+      {phone && showLib && <Sheet label="Library" roomy title={<CloudSeg />} onClose={() => s.set({ showLib: false })}><Palette /></Sheet>}
       {phone && showInsp && <InspectSheet onClose={() => s.set({ showInsp: false })} />}
       {!phone && showLib && <Palette />}
       {!phone && showInsp && <RightPanel />}

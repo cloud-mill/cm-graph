@@ -447,3 +447,18 @@ describe('round trip', () => {
     }
   })
 })
+
+describe('import: where connections come from', () => {
+  it('lines read from references are marked as from code, with a kind guessed from what they join', () => {
+    const { doc } = importTerraform(SAMPLE_TF)
+    const real = doc.edges.filter((e) => e.origin === 'imported')
+    expect(real.length).toBeGreaterThan(2)
+    for (const e of real) expect(['request', 'data', 'event', 'replication']).toContain(e.kind)
+    const users = doc.nodes.find((n) => n.type === 'users')
+    if (users) for (const e of doc.edges.filter((x) => x.from === users.id)) expect(e.origin).toBe('inferred')
+  })
+  it('nothing imported claims to be observed traffic', () => {
+    const { doc } = importTerraform(SAMPLE_TF)
+    for (const e of doc.edges) expect(['imported', 'inferred']).toContain(e.origin)
+  })
+})

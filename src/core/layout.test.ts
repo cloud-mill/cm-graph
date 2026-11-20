@@ -163,3 +163,18 @@ describe('autoLayout', () => {
     expect(overlapFree(l)).toBe(true)
   })
 })
+
+describe('autoLayout and hand-shaped connections', () => {
+  it('re-plans every line, since every component has moved', () => {
+    const doc = docOf([node('a', 'ec2', 0, 0), node('b', 'rds', 30, 30)], [edge('e', 'a', 'b', { via: [[4, 4]], fromSide: 's', kind: 'data', label: 'x' }), edge('f', 'b', 'a')])
+    const out = autoLayout(doc)
+    expect(out.edges[0].via).toBeUndefined()
+    expect(out.edges[0].fromSide).toBeUndefined()
+    expect(out.edges[0]).toMatchObject({ kind: 'data', label: 'x' }) // what it means is untouched
+    expect(out.edges[1]).toBe(doc.edges[1])
+  })
+  it('leaves the list of connections alone when none was shaped', () => {
+    const doc = docOf([node('a', 'ec2', 0, 0), node('b', 'rds', 30, 30)], [edge('e', 'a', 'b')])
+    expect(autoLayout(doc).edges).toBe(doc.edges)
+  })
+})

@@ -281,3 +281,54 @@ test.describe('share, history, shortcuts and command palette', () => {
     await expect(app.selBar()).toBeVisible() // Escape closed the palette only, the selection stays
   })
 })
+
+/** The browser's own Back and Forward, on a desktop: the same rule as on a phone. */
+test.describe('browser Back on a desktop', () => {
+  const visit = async (page: import('@playwright/test').Page, app: any) => {
+    await app.seed(TRIO())
+    await page.goto('about:blank')
+    await page.goto('/')
+    await page.getByRole('button', { name: 'Open E2E blueprint' }).click()
+    await app.ready()
+  }
+  test('Back closes a dialog, a drop-down and a context menu before it leaves the blueprint', async ({ page, app }) => {
+    await visit(page, app)
+    await page.keyboard.press('ControlOrMeta+e')
+    await expect(page.getByRole('dialog', { name: 'Export' })).toBeVisible()
+    await page.goBack()
+    await expect(page.getByRole('dialog', { name: 'Export' })).toHaveCount(0)
+    await expect(page.locator('.canvas-svg')).toBeVisible()
+
+    await app.pick('b')
+    await page.locator('.panel.right .select').first().click()
+    await expect(page.locator('.select-list')).toBeVisible()
+    await page.goBack()
+    await expect(page.locator('.select-list')).toHaveCount(0)
+    await expect(page.locator('.canvas-svg')).toBeVisible()
+
+    const ground = await app.world(4, 4)
+    await page.mouse.click(ground.x, ground.y, { button: 'right' })
+    await expect(page.locator('.ctx-menu')).toBeVisible()
+    await page.goBack()
+    await expect(page.locator('.ctx-menu')).toHaveCount(0)
+    await expect(page.locator('.canvas-svg')).toBeVisible()
+    expect((await app.settled()).nodes).toHaveLength(3)
+  })
+  test('the side panels are part of the page, not layers: Back with them open leaves as usual, and Forward returns', async ({ page, app }) => {
+    await visit(page, app)
+    await expect(page.locator('.panel.palette')).toBeVisible()
+    await page.goBack()
+    await expect(page.getByRole('button', { name: 'New blueprint' }).first()).toBeVisible()
+    await page.goForward()
+    await app.ready()
+    await expect(page.locator('.panel.palette')).toBeVisible()
+  })
+  test('closing dialogs with Escape leaves history clean: one Back still leaves, and the arrow home does not strand the blueprint behind the dashboard', async ({ page, app }) => {
+    await visit(page, app)
+    for (let i = 0; i < 4; i++) { await page.keyboard.press('ControlOrMeta+e'); await expect(page.getByRole('dialog', { name: 'Export' })).toBeVisible(); await page.keyboard.press('Escape'); await expect(page.getByRole('dialog', { name: 'Export' })).toHaveCount(0) }
+    await page.getByRole('button', { name: 'All blueprints' }).click()
+    await expect(page.getByRole('button', { name: 'New blueprint' }).first()).toBeVisible()
+    await page.goBack()
+    expect(page.url()).toBe('about:blank')
+  })
+})

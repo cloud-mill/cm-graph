@@ -25,10 +25,10 @@ beforeEach(() => resetStore())
 describe('ContextMenu', () => {
   it('offers the right actions for each kind of target', () => {
     open('node', ['a'])
-    expect(names()).toEqual(['Duplicate', 'Copy', 'Wrap in group', 'Zoom to selection', 'Edit properties', 'Delete'])
+    expect(names()).toEqual(['Duplicate', 'Copy', 'Wrap in group', 'Zoom to selection', 'Follow the flow', 'Edit properties', 'Delete'])
     document.body.innerHTML = ''
     open('edge', ['e'])
-    expect(names()).toEqual(['Reverse direction', 'Edit properties', 'Delete'])
+    expect(names()).toEqual(['Follow the flow', 'Reverse direction', 'Add a bend', 'Edit properties', 'Delete'])
     document.body.innerHTML = ''
     open('area', ['r'])
     expect(names()).toEqual(['Duplicate', 'Copy', 'Fit to contents', 'Edit properties', 'Delete'])

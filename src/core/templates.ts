@@ -1,4 +1,5 @@
 import { defaultProps, translateDoc } from './catalog'
+import { guessKind, kindInfo } from './links'
 import { type AreaKind, type Doc, type EdgeT, emptyDoc, uid } from './types'
 
 export class Builder {
@@ -12,7 +13,10 @@ export class Builder {
     return id
   }
   e(from: string, to: string, label?: string, o: Partial<EdgeT> = {}) {
-    this.doc.edges.push({ id: uid(), from, to, label, style: 'solid', arrow: 'end', width: 2, ...o })
+    const a = this.doc.nodes.find((n) => n.id === from), b = this.doc.nodes.find((n) => n.id === to)
+    // each line says what it is; a style given explicitly for a template still wins
+    const kind = a && b ? guessKind(a, b) : undefined, k = kindInfo(kind)
+    this.doc.edges.push({ id: uid(), from, to, label, style: k?.style ?? 'solid', arrow: k?.arrow ?? 'end', width: 2, kind, origin: 'drawn', ...o })
   }
   area(kind: AreaKind, name: string, x: number, y: number, w: number, d: number, color: string) {
     this.doc.areas.push({ id: uid(), kind, name, x, y, w, d, color })

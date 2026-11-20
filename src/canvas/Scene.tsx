@@ -1,6 +1,8 @@
-import { memo, useMemo } from 'react'
+import { memo, useMemo, useState } from 'react'
 import { type Proj, type Pt, U, alpha, f, planeMatrixUV, poly, pt, upright, uprightAlong } from '../core/iso'
-import { arrowAt, labelAnchor, pathOf, route } from '../core/routing'
+import { captionOf, type Flow } from '../core/links'
+import { type Routed, routeAll } from '../core/router'
+import { arrowAt, labelAnchor, pathOf } from '../core/routing'
 import { nodeColor, nodeName } from '../core/catalog'
 import { type AreaT, type Doc, type EdgeT, type LabelT, type NodeT, centerOf, footOf } from '../core/types'
 import { Model, SceneDefs } from './models'
@@ -39,6 +41,28 @@ export interface SceneProps {
   lens?: Map<string, { color: string; note?: string }> | null
   /** id of a component that was just added, so it can animate in */
   fresh?: string | null
+  /** connection routes, when whoever draws the scene has already worked them out */
+  routes?: Map<string, Routed>
+  /** a flow being followed: everything off its paths steps back */
+  focus?: Flow | null
+}
+
+/**
+ * Routes for a diagram that keep their identity while they keep their shape, so
+ * moving one component only redraws the lines that actually changed.
+ */
+export function useRoutes(doc: Doc): Map<string, Routed> {
+  // a holder that lives as long as the component does; what it holds is only ever touched while working out routes
+  const [keep] = useState(() => ({ last: new Map<string, Routed>() }))
+  return useMemo(() => {
+    const next = routeAll(doc.nodes, doc.edges)
+    for (const [id, r] of next) {
+      const was = keep.last.get(id)
+      if (was && was.fromSide === r.fromSide && was.toSide === r.toSide && was.pts.length === r.pts.length && was.pts.every((p, i) => p[0] === r.pts[i][0] && p[1] === r.pts[i][1]) && was.leg.join() === r.leg.join()) next.set(id, was)
+    }
+    keep.last = next
+    return next
+  }, [doc.nodes, doc.edges, keep])
 }
 
 /** L-shaped registration marks at the corners of a ground rectangle. */
@@ -73,40 +97,45 @@ const AreaView = memo(function AreaView({ a, proj }: { a: AreaT; proj: Proj; the
   )
 })
 
-const EdgeView = memo(function EdgeView({ e, a, b, proj, theme, flow }: { e: EdgeT; a: NodeT; b: NodeT; proj: Proj; theme: SceneTheme; flow?: boolean }) {
-  const pts = route(a, b)
+const EdgeView = memo(function EdgeView({ e, r, proj, theme, flow, state }: { e: EdgeT; r: Routed; proj: Proj; theme: SceneTheme; flow?: boolean; state?: 'on' | 'off' }) {
+  const pts = r.pts
   const n = pts.length
+  if (n < 2) return null
   const color = e.color || theme.edge
   const hasEnd = e.arrow !== 'none'
   const hasStart = e.arrow === 'both'
   const d = pathOf(proj, pts, hasStart ? 0.26 : 0, hasEnd ? 0.26 : 0)
   const full = pathOf(proj, pts)
   const dash = e.style === 'dashed' ? '5 5' : e.style === 'dotted' ? '0.5 5' : undefined
-  const la = e.label ? labelAnchor(pts) : null
+  const caption = captionOf(e)
+  const la = caption ? labelAnchor(pts) : null
   const lb = la ? uprightAlong(proj, la.dir) : null
   const arrow = (tip: [number, number], from: [number, number]) =>
     <polygon points={poly(arrowAt(tip, from, 0.34).map((q) => pt(proj, q[0], q[1]) as Pt))} fill={color} stroke={color} strokeWidth={1} strokeLinejoin="round" pointerEvents="none" />
+  // a line on a path being followed always shows its direction; a dependency never moves, because nothing travels along it
+  // and while a flow is being followed, only its own lines move
+  const moving = (state ? state === 'on' : !!flow) && e.kind !== 'dependency' && e.arrow !== 'none'
   return (
-    <g className="edge">
+    <g className={'edge' + (state ? ' ' + state : '')}>
       {/* a dark channel under the line keeps it legible where it crosses areas and other lines */}
       <path d={full} fill="none" stroke={theme.bg} strokeOpacity={0.85} strokeWidth={e.width + 5} strokeLinecap="round" strokeLinejoin="round" pointerEvents="none" />
       <path d={d} className="edge-line" fill="none" stroke={color} strokeWidth={e.width * 0.75} strokeDasharray={dash} strokeLinecap="round" strokeLinejoin="round" pointerEvents="none" />
-      {flow && <path d={full} className="edge-flow" fill="none" stroke={e.color || theme.flow} strokeWidth={e.width + 0.4} strokeLinecap="round" pointerEvents="none" />}
+      {moving && <path d={full} className={'edge-flow' + (hasStart ? ' both' : '')} fill="none" stroke={e.color || theme.flow} strokeWidth={e.width + 0.4} strokeLinecap="round" pointerEvents="none" />}
       {hasEnd && arrow(pts[n - 1], pts[n - 2])}
       {hasStart && arrow(pts[0], pts[1])}
-      <path d={full} fill="none" stroke="transparent" strokeWidth={16} data-kind="edge" data-id={e.id} style={{ cursor: 'pointer' }} />
+      <path d={full} className="edge-hit" fill="none" stroke="transparent" strokeWidth={16} strokeLinejoin="round" data-kind="edge" data-id={e.id} style={{ cursor: 'pointer' }} />
       {la && lb && (
         <text transform={planeMatrixUV(proj, la.at[0], la.at[1], 0, 1 / U, lb.u, lb.v)} fontFamily={MONO} fontSize={8.5} fontWeight={500} letterSpacing={0.5} fill={theme.textDim}
           textAnchor="middle" y={-7} stroke={theme.bg} strokeWidth={4} paintOrder="stroke" strokeLinejoin="round" pointerEvents="none">
-          {e.label!.toUpperCase()}
+          {caption.toUpperCase()}
         </text>
       )}
     </g>
   )
 })
 
-const NodeView = memo(function NodeView({ n, proj, theme, showLabels, color, note, fresh, order }: {
-  n: NodeT; proj: Proj; theme: SceneTheme; showLabels?: boolean; color?: string; note?: string; fresh?: boolean; order: number
+const NodeView = memo(function NodeView({ n, proj, theme, showLabels, color, note, fresh, order, off }: {
+  n: NodeT; proj: Proj; theme: SceneTheme; showLabels?: boolean; color?: string; note?: string; fresh?: boolean; order: number; off?: boolean
 }) {
   const [tx, ty] = pt(proj, n.x, n.y)
   const k = n.scale ?? 1 // the body is drawn at unit size and scaled; the name stays the same size
@@ -117,7 +146,7 @@ const NodeView = memo(function NodeView({ n, proj, theme, showLabels, color, not
   const gid = 'nl' + tint.replace('#', '')
   const count = n.props.count > 1 ? n.props.count : n.props.tasks > 1 && n.type === 'ecs' ? n.props.tasks : 0
   return (
-    <g transform={`translate(${f(tx)} ${f(ty)})`} data-kind="node" data-id={n.id} className={'nd' + (fresh ? ' nd-new' : '')} style={{ cursor: 'grab', ['--i' as any]: order }}>
+    <g transform={`translate(${f(tx)} ${f(ty)})`} data-kind="node" data-id={n.id} className={'nd' + (fresh ? ' nd-new' : '') + (off ? ' off' : '')} style={{ cursor: 'grab', ['--i' as any]: order }}>
       {/* each component throws a faint pool of its own colour on the ground, then a soft contact shadow */}
       {theme.glow > 0 && (
         <>
@@ -166,8 +195,9 @@ const LabelView = memo(function LabelView({ l, proj, theme }: { l: LabelT; proj:
 const KIND_ORDER = { vpc: 0, zone: 1, group: 2, subnet: 3 }
 
 /** The diagram itself: pure, so it is reused for the editor, thumbnails and exports. */
-export const Scene = memo(function Scene({ doc, proj, theme, showLabels = true, flow, lens, fresh }: SceneProps) {
-  const byId = useMemo(() => new Map(doc.nodes.map((n) => [n.id, n])), [doc.nodes])
+export const Scene = memo(function Scene({ doc, proj, theme, showLabels = true, flow, lens, fresh, routes, focus }: SceneProps) {
+  const own = useRoutes(doc)
+  const paths = routes ?? own
   // painter's order: far to near along the camera's ground direction
   const sorted = useMemo(() => [...doc.nodes].sort((a, b) => { const p = centerOf(a), q = centerOf(b); return p[0] * proj.c + p[1] * proj.d - (q[0] * proj.c + q[1] * proj.d) || a.x - b.x }), [doc.nodes, proj])
   const areas = useMemo(() => [...doc.areas].sort((a, b) => KIND_ORDER[a.kind] - KIND_ORDER[b.kind] || b.w * b.d - a.w * a.d), [doc.areas])
@@ -176,13 +206,13 @@ export const Scene = memo(function Scene({ doc, proj, theme, showLabels = true, 
       <SceneDefs />
       {areas.map((a) => <AreaView key={a.id} a={a} proj={proj} theme={theme} />)}
       {doc.edges.map((e) => {
-        const a = byId.get(e.from), b = byId.get(e.to)
-        return a && b ? <EdgeView key={e.id} e={e} a={a} b={b} proj={proj} theme={theme} flow={flow} /> : null
+        const r = paths.get(e.id)
+        return r ? <EdgeView key={e.id} e={e} r={r} proj={proj} theme={theme} flow={flow} state={focus ? (focus.edges.has(e.id) ? 'on' : 'off') : undefined} /> : null
       })}
       {doc.labels.map((l) => <LabelView key={l.id} l={l} proj={proj} theme={theme} />)}
       {sorted.map((n, i) => {
         const o = lens?.get(n.id)
-        return <NodeView key={n.id} n={n} proj={proj} theme={theme} showLabels={showLabels} color={o?.color} note={o?.note} fresh={fresh === n.id} order={i} />
+        return <NodeView key={n.id} n={n} proj={proj} theme={theme} showLabels={showLabels} color={o?.color} note={o?.note} fresh={fresh === n.id} order={i} off={!!focus && !focus.start.has(n.id) && !focus.up.has(n.id) && !focus.down.has(n.id)} />
       })}
     </g>
   )

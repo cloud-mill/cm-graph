@@ -2,10 +2,12 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { Copy, Group, Scan, Trash2, Waypoints } from 'lucide-react'
 import { MAX_PITCH, MIN_PITCH, type Proj, U, f, makeCam, mix, normYaw, planeMatrix, poly, pt, unproject, upright } from '../core/iso'
 import { costOf, defOf, defaultProps, docCost, money, nodeName } from '../core/catalog'
-import { pathOf, route } from '../core/routing'
+import { traceFlow } from '../core/links'
+import { legOfRun, nearestSide, routePair } from '../core/router'
+import { pathOf } from '../core/routing'
 import { type View, kindOf, moveItems, useStore } from '../core/store'
 import { type AreaT, type Doc, type NodeT, MAX_SCALE, MIN_SCALE, centerOf, footOf } from '../core/types'
-import { Scene, THEMES, brackets } from './Scene'
+import { Scene, THEMES, brackets, useRoutes } from './Scene'
 import { Model } from './models'
 import { animateView, beginOrbit, cam, center, fitView, flushFrame, glide, holdStill, hud, onFrame, projNow, smoothZoom, zoomBy } from './camera'
 import { type Finger, type Gesture, MAX_K, MIN_K, type Trail, fling, gestureMove, gestureRebase, gestureStart, isTwoFingerTap, track } from './touch'
@@ -25,6 +27,10 @@ type Drag =
   | { mode: 'resize'; id: string; corner: number; base: AreaT; active: boolean }
   | { mode: 'nresize'; id: string; corner: number; base: NodeT; active: boolean }
   | { mode: 'connect'; from: string }
+  // a waypoint of a connection being dragged; `fresh` means it was created by this drag
+  | { mode: 'via'; id: string; index: number; active: boolean; sx: number; sy: number }
+  // one end of a connection being dragged to another component, or to another side of the same one
+  | { mode: 'relink'; id: string; end: 'from' | 'to'; active: boolean; sx: number; sy: number }
   | { mode: 'marquee'; sx: number; sy: number }
   | { mode: 'area'; wx: number; wy: number }
   | { mode: 'orbit'; sx: number; sy: number; moved: boolean; button: number; update: (dx: number, dy: number) => void }
@@ -102,6 +108,9 @@ export function Canvas() {
   useEffect(() => { if (tool !== 'connect' && useStore.getState().linkFrom) useStore.setState({ linkFrom: null }) }, [tool])
 
   const sel = useMemo(() => new Set(selection), [selection])
+  const routes = useRoutes(doc)
+  const trace = useStore((s) => s.trace)
+  const focus = useMemo(() => (trace ? traceFlow(doc, trace) : null), [doc, trace])
 
   const lensMap = useMemo(() => {
     if (lens !== 'cost') return null
@@ -247,6 +256,32 @@ export function Canvas() {
     if (handle === 'connect') {
       drag.current = { mode: 'connect', from: st.selection[0] }
       setWire({ to: [wx, wy], target: null })
+      return
+    }
+    if (handle && /^[wm]\d+$/.test(handle)) {
+      const e = st.doc.edges.find((x) => x.id === st.selection[0])
+      if (!e) return
+      let index = Number(handle.slice(1))
+      if (handle[0] === 'm') {
+        // pulling on a straight run puts a waypoint there: from now on the line goes through it
+        const r = routes.get(e.id)
+        if (!r) return
+        index = legOfRun(r, index)
+        const at: [number, number] = [Math.round(wx * 2) / 2, Math.round(wy * 2) / 2]
+        const via = [...(e.via ?? [])]
+        via.splice(index, 0, at)
+        st.checkpoint()
+        st.apply((d) => ({ ...d, edges: d.edges.map((x) => (x.id === e.id ? { ...x, via } : x)) }), true)
+        drag.current = { mode: 'via', id: e.id, index, active: true, sx: 0, sy: 0 }
+        setMoving(true)
+        return
+      }
+      drag.current = { mode: 'via', id: e.id, index, active: false, sx: 0, sy: 0 }
+      return
+    }
+    if (handle === 'ea' || handle === 'eb') {
+      const e = st.doc.edges.find((x) => x.id === st.selection[0])
+      if (e) drag.current = { mode: 'relink', id: e.id, end: handle === 'ea' ? 'from' : 'to', active: false, sx: 0, sy: 0 }
       return
     }
     if (handle && handle.startsWith('n')) {
@@ -433,6 +468,15 @@ export function Canvas() {
     } else if (d.mode === 'connect') {
       const t = nodeAt(e.clientX, e.clientY)
       setWire({ to: toWorld(e.clientX, e.clientY), target: t && t !== d.from ? t : null })
+    } else if (d.mode === 'via') {
+      if (!d.active) { d.active = true; setMoving(true); st.checkpoint() }
+      // waypoints sit on the half-cell grid, like everything else, so runs line up without effort
+      const at = toWorld(e.clientX, e.clientY).map((v) => Math.round(v * 2) / 2) as [number, number]
+      st.apply((doc) => ({ ...doc, edges: doc.edges.map((x) => (x.id === d.id && x.via ? { ...x, via: x.via.map((p, i) => (i === d.index ? at : p)) } : x)) }), true)
+    } else if (d.mode === 'relink') {
+      if (!d.active) { d.active = true; setMoving(true) }
+      const t = nodeAt(e.clientX, e.clientY)
+      setWire({ to: toWorld(e.clientX, e.clientY), target: t })
     } else if (d.mode === 'marquee') {
       const r = ref.current!.getBoundingClientRect()
       setMarquee({ x: Math.min(d.sx, e.clientX) - r.left, y: Math.min(d.sy, e.clientY) - r.top, w: Math.abs(e.clientX - d.sx), h: Math.abs(e.clientY - d.sy) })
@@ -508,6 +552,34 @@ export function Canvas() {
       if (!d.moved && d.button === 2) openMenuAt(e.clientX, e.clientY)
       return
     }
+    if (d.mode === 'via') {
+      if (!d.active) return
+      // a waypoint dropped back onto the line it bends adds nothing: take it out, which is also how one is removed by dragging
+      const edge = st.doc.edges.find((x) => x.id === d.id), r = routes.get(d.id)
+      if (edge?.via && r) {
+        const p = edge.via[d.index], prev = d.index > 0 ? edge.via[d.index - 1] : r.pts[0], next = d.index < edge.via.length - 1 ? edge.via[d.index + 1] : r.pts[r.pts.length - 1]
+        const near = (q: [number, number]) => Math.hypot(q[0] - p[0], q[1] - p[1]) < 0.75
+        const inLine = (prev[0] === p[0] && p[0] === next[0]) || (prev[1] === p[1] && p[1] === next[1])
+        if (near(prev as [number, number]) || near(next as [number, number]) || inLine) {
+          st.apply((doc) => ({ ...doc, edges: doc.edges.map((x) => (x.id === d.id ? { ...x, via: x.via!.length > 1 ? x.via!.filter((_, i) => i !== d.index) : undefined } : x)) }), true)
+          if (e.pointerType === 'touch') haptic(8)
+        }
+      }
+      return
+    }
+    if (d.mode === 'relink') {
+      setWire(null)
+      if (!d.active) return
+      const t = nodeAt(e.clientX, e.clientY)
+      const target = t ? st.doc.nodes.find((n) => n.id === t) : null
+      if (!target) return
+      const [px, py] = toWorld(e.clientX, e.clientY), fs = footOf(target)
+      // dropped near an edge of the component: pin that side. Dropped in its middle: let the router choose
+      const off = Math.max(Math.abs(px - (target.x + fs / 2)), Math.abs(py - (target.y + fs / 2))) / (fs / 2)
+      if (st.reconnect(d.id, d.end, target.id, off > 0.45 ? nearestSide(target, [px, py]) : undefined)) haptic(10)
+      else st.toast('A connection needs two different components', 'warn')
+      return
+    }
     if (d.mode === 'pan' && !d.moved) { st.select([]); if (st.linkFrom) st.set({ linkFrom: null }) }
     else if (d.mode === 'connect') {
       const t = nodeAt(e.clientX, e.clientY)
@@ -567,6 +639,13 @@ export function Canvas() {
     const hit = (document.elementFromPoint(e.clientX, e.clientY)?.closest('[data-kind]') ?? (e.target as HTMLElement).closest('[data-kind]')) as HTMLElement | null
     // while several things are being picked, two quick taps are two picks, not a request to edit
     if (useStore.getState().multi) return
+    // a waypoint: twice means take it out
+    const way = ((document.elementFromPoint(e.clientX, e.clientY)?.closest('[data-handle]') ?? (e.target as HTMLElement).closest('[data-handle]')) as HTMLElement | null)?.dataset.handle
+    if (way && /^w\d+$/.test(way)) {
+      const st = useStore.getState(), id = st.selection[0], i = Number(way.slice(1))
+      st.apply((doc) => ({ ...doc, edges: doc.edges.map((x) => (x.id === id && x.via ? { ...x, via: x.via.length > 1 ? x.via.filter((_, k) => k !== i) : undefined } : x)) }))
+      return
+    }
     // opens the inspector if it was put away, since a rename has to happen somewhere
     if (hit?.dataset.id) useStore.setState((s) => ({ panel: 'inspect', showInsp: true, ...(innerWidth <= 760 ? { showLib: false } : {}), focusName: s.focusName + 1 }))
   }
@@ -581,7 +660,8 @@ export function Canvas() {
   const foot = (x: number, y: number, o = 0.06, s = 2) => poly([pt(proj, x - o, y - o), pt(proj, x + s + o, y - o), pt(proj, x + s + o, y + s + o), pt(proj, x - o, y + s + o)])
   const gridOpacity = Math.max(0, Math.min(1, (view.k - 0.3) / 0.35))
   const cursor = orbiting ? 'move' : panning ? 'grabbing' : tool === 'orbit' ? 'move' : placing ? 'copy' : tool === 'connect' || tool === 'area' ? 'crosshair' : tool === 'text' ? 'text' : 'default'
-  const wireFrom = wire && drag.current?.mode === 'connect' ? byId.get(drag.current.from) : null
+  const relinking = drag.current?.mode === 'relink' ? doc.edges.find((x) => x.id === (drag.current as { id: string }).id) : null
+  const wireFrom = wire && drag.current?.mode === 'connect' ? byId.get(drag.current.from) : wire && relinking ? byId.get((drag.current as { end: string }).end === 'from' ? relinking.to : relinking.from) : null
   const wireTarget = wire?.target ? byId.get(wire.target) : null
   const linkNode = linkFrom ? byId.get(linkFrom) : null
 
@@ -650,16 +730,64 @@ export function Canvas() {
               </g>
             )}
           </g>
-          <Scene doc={doc} proj={proj} theme={theme} showLabels={showLabels} flow={flow} lens={lensMap} fresh={fresh} />
+          <Scene doc={doc} proj={proj} theme={theme} showLabels={showLabels} flow={flow} lens={lensMap} fresh={fresh} routes={routes} focus={focus} />
           <g className="overlay">
             {selEdges.map((e) => {
-              const a = byId.get(e.from), b = byId.get(e.to)
-              if (!a || !b) return null
-              const d = pathOf(proj, route(a, b))
+              const a = byId.get(e.from), b = byId.get(e.to), r = routes.get(e.id)
+              if (!a || !b || !r) return null
+              const d = pathOf(proj, r.pts)
+              const editing = selection.length === 1 && tool === 'select'
+              const P = (q: [number, number]) => pt(proj, q[0], q[1])
+              // fingers get a generous invisible target around each small visible handle
+              const grab = (c: [number, number], name: string) => coarse && <circle cx={c[0]} cy={c[1]} r={17 / view.k} fill="transparent" data-handle={name} />
+              const last = r.pts.length - 1
               return (
-                <g key={e.id} pointerEvents="none">
-                  <path d={d} fill="none" stroke={ACCENT} strokeWidth={e.width + 5} strokeOpacity={0.35} strokeLinecap="round" filter="url(#glow)" />
-                  <path d={d} fill="none" stroke={ACCENT} strokeWidth={e.width} strokeLinecap="round" strokeLinejoin="round" />
+                <g key={e.id}>
+                  <g pointerEvents="none">
+                    <path d={d} fill="none" stroke={ACCENT} strokeWidth={e.width + 5} strokeOpacity={0.35} strokeLinecap="round" filter="url(#glow)" />
+                    <path d={d} fill="none" stroke={ACCENT} strokeWidth={e.width} strokeLinecap="round" strokeLinejoin="round" />
+                    {/* both ends of the selected connection are marked, so it is plain what it joins */}
+                    {[a, b].map((n) => <path key={n.id} d={fp(n.x, n.y, 0.12, footOf(n))} fill="none" stroke={ACCENT} strokeWidth={2} strokeOpacity={0.8} strokeLinecap="round" strokeLinejoin="round" />)}
+                  </g>
+                  {editing && !moving && r.pts.slice(0, -1).map((p, i) => {
+                    // a faint dot in the middle of each straight run: pull it to bend the line there
+                    const q = r.pts[i + 1], len = Math.abs(q[0] - p[0]) + Math.abs(q[1] - p[1])
+                    if (len < 1.2) return null
+                    const c = P([(p[0] + q[0]) / 2, (p[1] + q[1]) / 2])
+                    return (
+                      <g key={'m' + i}>
+                        {grab(c, 'm' + i)}
+                        <circle cx={c[0]} cy={c[1]} r={3.6 / view.k} fill={theme.bg} stroke={ACCENT} strokeOpacity={0.6} strokeWidth={1.2 / view.k} data-handle={'m' + i} className="handle bend-add" style={{ cursor: 'grab' }} />
+                      </g>
+                    )
+                  })}
+                  {editing && (e.via ?? []).map((v, i) => {
+                    // corners are drawn rounded, so a waypoint at a corner sits on the curve, not out at the sharp point the curve cuts off
+                    const j = r.pts.findIndex((q) => q[0] === v[0] && q[1] === v[1])
+                    let on: [number, number] = v
+                    if (j > 0 && j < last) {
+                      const a = r.pts[j - 1], b = r.pts[j + 1], la = Math.hypot(a[0] - v[0], a[1] - v[1]), lb = Math.hypot(b[0] - v[0], b[1] - v[1])
+                      const rr = Math.min(0.32, la / 2, lb / 2)
+                      on = [v[0] + 0.25 * rr * ((a[0] - v[0]) / la + (b[0] - v[0]) / lb), v[1] + 0.25 * rr * ((a[1] - v[1]) / la + (b[1] - v[1]) / lb)]
+                    }
+                    const c = P(on)
+                    return (
+                      <g key={'w' + i}>
+                        {grab(c, 'w' + i)}
+                        <rect x={c[0] - 5 / view.k} y={c[1] - 5 / view.k} width={10 / view.k} height={10 / view.k} rx={2.5 / view.k} fill={ACCENT} stroke={theme.bg} strokeWidth={1.5 / view.k}
+                          data-handle={'w' + i} className="handle bend" style={{ cursor: 'grab' }} />
+                      </g>
+                    )
+                  })}
+                  {editing && ([['ea', r.pts[0]], ['eb', r.pts[last]]] as const).map(([name, p]) => {
+                    const c = P(p as [number, number])
+                    return (
+                      <g key={name}>
+                        {grab(c, name)}
+                        <circle cx={c[0]} cy={c[1]} r={5.5 / view.k} fill={theme.bg} stroke={ACCENT} strokeWidth={2 / view.k} data-handle={name} className="handle link-end" style={{ cursor: 'crosshair' }} />
+                      </g>
+                    )
+                  })}
                 </g>
               )
             })}
@@ -692,8 +820,8 @@ export function Canvas() {
               </g>
             )}
             {wire && wireFrom && (() => {
-              const d = wireTarget
-                ? pathOf(proj, route(wireFrom, wireTarget))
+              const d = wireTarget && wireTarget.id !== wireFrom.id
+                ? pathOf(proj, routePair(wireFrom, wireTarget, doc.nodes))
                 : (() => { const a = pt(proj, ...centerOf(wireFrom)), b = pt(proj, wire.to[0], wire.to[1]); return `M${f(a[0])} ${f(a[1])}L${f(b[0])} ${f(b[1])}` })()
               return <path d={d} fill="none" stroke={ACCENT} strokeWidth={2} strokeDasharray="5 6" strokeLinecap="round" pointerEvents="none" className="wire" />
             })()}

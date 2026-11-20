@@ -65,12 +65,98 @@ src/ui       editor shell, panels, dialogs, dashboard
 `<Scene/>` is a pure function of the document and a projection, so the same
 renderer drives the editor, dashboard thumbnails, dialog previews and exports.
 
+## Pricing
+
+Cost estimates are for comparing designs, and they say how far each figure can
+be trusted.
+
+**Where the prices come from.** AWS rates are not typed in by hand. `node
+scripts/build-rate-card.mjs` reads the public AWS Price List Bulk API for all
+eight regions and writes `src/core/pricing/aws-rates.json`, with each price
+file's publication date beside it. Re-run it to refresh. On-demand and reserved
+(standard, no upfront) rates are both loaded, per instance type and per region,
+so a region or a commitment changes each line by its own published price rather
+than by a blanket percentage. Azure rates were checked against the Azure Retail
+Prices API and Google Cloud rates against the published pricing pages; both are
+held as US list prices.
+
+**What each line rests on.** Every cost line is one of:
+
+| | Meaning |
+| --- | --- |
+| Fixed | A published rate for capacity that runs all month: instances, allocated storage, gateways. |
+| Usage-based | A published rate times a volume you entered: requests, gigabytes, invocations. |
+| Estimated | The rate is not verified here: a service or region whose price list is not loaded, or a size that is not sold. Shown with `~` and a note saying what was used instead. |
+
+**Free allowances** (Lambda's first million requests, CloudFront's first
+terabyte, and so on) belong to the account, not to each resource, so they are
+taken off once for the whole blueprint and listed in the Budget panel.
+
+**Assumptions.** 730 hours a month; US dollars; list price; first pricing tier
+for usage-priced services. Not included: data transfer between zones and
+services, support plans, backups, tax. Google Cloud and Azure components in a
+non-US region are priced at US rates and marked as estimates.
+
+## Connections
+
+A line between two components is a claim about the system, so it carries
+meaning as well as a path.
+
+**What a line says.** Each connection has a relationship (request, data, event,
+replication or dependency), optionally a protocol and a port, and a record of
+where it came from: drawn by hand, read from infrastructure code, or inferred
+while importing. The relationship sets the default line style and the sentence
+shown in the inspector ("web reads and writes db over PostgreSQL 5432"). None of
+it is measured traffic, and the interface says so. A dependency never animates,
+because nothing travels along it.
+
+**How a line runs.** `src/core/router.ts` routes every connection in right
+angles on the ground:
+
+- each end leaves from a port on the side facing where the line is going;
+- lines that share a side are spread along it in the order of where they lead,
+  and turn in channels of their own, so they fan out instead of piling up;
+- between the ports the route is the shortest one with the fewest turns that
+  does not pass through any component;
+- the result is deterministic and cached, so nothing jumps between redraws.
+
+**Shaping one by hand.** Select a connection and pull the dot on any straight
+run to bend it there; drag a waypoint to move it, drop it back on the line (or
+double-click it) to remove it; drag an end onto another component to reconnect
+it, or onto another side of the same one to pin that side. A line you have
+shaped is yours: it keeps its waypoints when components move and is never
+re-planned, until you choose "Route automatically" (or tidy the whole layout).
+Every step is one undo step, and undo keeps the line selected.
+
+**Following the flow.** "Follow the flow" on a component or a connection lights
+everything upstream and downstream of it and steps the rest of the diagram back.
+Escape, the Stop button or the phone's Back button ends it.
+
+**On a phone** the same handles have finger-sized invisible targets, a tap near
+a line selects it at any zoom, and the dock offers Edit, Follow, Bend and
+Reverse.
+
+Older blueprints open unchanged: every new field is optional, and a connection
+without them is a plain automatic one.
+
 ## On a phone
 
 A narrow screen gets its own layout rather than a squeezed desktop one.
 
 - **Dock.** One bar in the thumb's reach with three faces: tools, a prompt while
   a tool is in use, and the actions for whatever is selected.
+- **Adding components.** The library is a sheet built for a thumb: the cloud
+  switch in its header, one search field that looks across all three clouds, a
+  row of category chips to flick through, then the catalogue. A finger anywhere
+  on the list scrolls it; a tap adds the component where you can see it. Pictures
+  are drawn as their tiles come near the screen, so the sheet opens at once.
+- **Back.** The phone's Back button (or the edge swipe) takes away whatever is
+  open before it takes away the page: a drop-down, then the sheet it was in,
+  then a dialog, a menu, a tool waiting for a tap. One press, one layer. With
+  nothing open it is the browser's ordinary Back. All of it goes through
+  `src/core/nav.ts`, the only code that touches browser history: pages are real
+  history entries, and while anything is open there is exactly one extra entry
+  on top, so history never fills with dead steps.
 - **Sheets.** The library and the inspector rise over the canvas, can be pulled
   taller or flicked away, and leave the canvas live above them. Sideways, they
   dock to the right edge. The on-screen keyboard lifts them instead of covering them.

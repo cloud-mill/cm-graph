@@ -175,7 +175,9 @@ describe('cost rules', () => {
     expect(ids(docOf([node('vm', 'ec2', 0, 0, P('ec2', { family: 't3', size: 'nano' }))]))).toEqual([])
     // sized by region: the saving follows the regional price
     const tokyo = { ...vm('m5'), region: 'ap-northeast-1' }
-    expect(find(tokyo, 'graviton:')!.saving).toBeCloseTo(cur.f.saving! * 1.24)
+    // Tokyo publishes m5.large at $0.124 and m7g.large at $0.1054 an hour
+    expect(find(tokyo, 'graviton:')!.saving).toBeCloseTo(2 * (0.124 - 0.1054) * 730, 2)
+    expect(find(tokyo, 'graviton:')!.saving).toBeGreaterThan(cur.f.saving!)
   })
   it('database classes with a Graviton equivalent', () => {
     const db = (extra = {}) => docOf([node('db', 'rds', 0, 0, P('rds', { family: 'r5', size: 'xlarge', multiAZ: true, ...extra }))])

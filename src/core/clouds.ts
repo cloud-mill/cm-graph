@@ -1,5 +1,6 @@
 import type { Category, CompDef, ModelKind, PropDef, Provider } from './catalog'
-import type { CostLine } from './types'
+import type { Quote } from './pricing'
+import type { CostBasis, CostLine, PricingModel } from './types'
 
 /**
  * Google Cloud, Azure and the long tail of AWS.
@@ -22,8 +23,25 @@ type Base = Pick<CompDef, 'provider' | 'type' | 'svc' | 'tf'> & Partial<Pick<Com
 type Raw = Omit<CompDef, 'color'> & { color?: string }
 
 // ---- rich factories for the components people size carefully -----------------
+//
+// Google Cloud and Azure are priced at their US list rates in every region:
+// neither cloud's regional price lists are loaded. Rates marked verified were
+// checked on 2026-11-20 against the Compute Engine, Cloud SQL, Cloud Run, Firestore,
+// Identity Platform, Pub/Sub, Cloud Tasks and API Gateway pricing pages
+// (cloud.google.com, Iowa) and the Azure Retail Prices API (prices.azure.com, East US).
+// Everything else is an estimate and is labelled as one.
 
-const vm = (b: Base, machines: Record<string, number>, dflt: string, diskRate: number, diskName: string, sizeAttr: string): Raw => ({
+/** a reserved or committed-use discount, by pricing model */
+type Commit = Partial<Record<PricingModel, number>>
+const off = (c: Commit | undefined, q: Quote) => c?.[q.model] ?? 0
+const commitNote = (c: Commit | undefined, q: Quote, what: string) =>
+  q.model === 'ondemand' ? undefined : off(c, q) ? `${what} of ${Math.round(off(c, q) * 100)}% applied.` : 'No commitment price is verified for this, so it stays on-demand.'
+
+/** hourly price: Linux, or [Linux, Windows] where the Windows price is published */
+type Machines = Record<string, number | [number, number]>
+interface VmOpts { disk: number; diskName: string; diskVerified?: boolean; attr: string; commit?: (machine: string) => Commit | undefined; commitName: string; windows?: string }
+
+const vm = (b: Base, machines: Machines, dflt: string, o: VmOpts): Raw => ({
   name: 'Virtual machine', category: 'compute', model: 'tower', glyph: 'server', tier: 3, role: 'ec2', keywords: 'instance server vm', ...b,
   props: [
     sel('machine', 'Machine type', dflt, opts(...Object.keys(machines))),
@@ -31,26 +49,35 @@ const vm = (b: Base, machines: Record<string, number>, dflt: string, diskRate: n
     num('count', 'Instances', 1, undefined, { min: 1, max: 500 }),
     num('disk', 'Boot disk', 30, 'GB'),
   ],
-  cost: (p) => [
-    { label: `${p.count} × ${p.machine}`, monthly: (machines[p.machine] ?? 0.1) * (p.os === 'windows' ? 1.48 : 1) * HOURS * p.count, commit: true },
-    { label: `${p.disk * p.count} GB ${diskName}`, monthly: p.disk * p.count * diskRate },
-  ],
+  cost: (p, q) => {
+    const m = machines[p.machine], linux = Array.isArray(m) ? m[0] : m ?? 0.1, win = Array.isArray(m) ? m[1] : undefined
+    const windows = p.os === 'windows'
+    const c = windows ? undefined : o.commit?.(p.machine)
+    // a Windows price that is not published is the Linux price plus the licence, which is an estimate
+    const hourly = windows ? win ?? linux * 1.48 : linux
+    return [
+      { label: `${p.count} × ${p.machine}${windows ? ' (Windows)' : ''}`, monthly: hourly * (1 - off(c, q)) * HOURS * p.count, basis: (windows && win === undefined) || m === undefined ? 'estimate' : 'fixed',
+        note: [windows && win === undefined ? o.windows ?? 'Windows licence estimated at 48% over the Linux price.' : '', windows && q.model !== 'ondemand' ? 'Windows is shown on-demand.' : windows ? '' : commitNote(c, q, o.commitName)].filter(Boolean).join(' ') || undefined },
+      { label: `${p.disk * p.count} GB ${o.diskName}`, monthly: p.disk * p.count * o.disk, basis: o.diskVerified ? 'fixed' : 'estimate' },
+    ]
+  },
   summary: (p) => `${p.count > 1 ? p.count + ' × ' : ''}${p.machine}`,
-  tfAttrs: (p) => [p.count > 1 && `count = ${p.count}`, `${sizeAttr} = "${p.machine}"`],
+  tfAttrs: (p) => [p.count > 1 && `count = ${p.count}`, `${o.attr} = "${p.machine}"`],
 })
 
-const fn = (b: Base, reqRate: number, gbsRate: number): Raw => ({
+const fn = (b: Base, reqRate: number, gbsRate: number, o: { meter: string; gbsVerified?: boolean; note?: string }): Raw => ({
   name: 'Function', category: 'compute', model: 'tile', glyph: 'lambda', tier: 3, role: 'lambda', keywords: 'serverless faas', ...b,
   props: [
     num('requests', 'Invocations', 5, 'M / mo', { step: 0.5 }),
     num('duration', 'Avg duration', 120, 'ms', { step: 10 }),
     sel('memory', 'Memory', '512', opts(['256', '256 MB'], ['512', '512 MB'], ['1024', '1 GB'], ['2048', '2 GB'], ['4096', '4 GB'], ['8192', '8 GB'])),
   ],
+  // list price for this function alone: the monthly free grant belongs to the account, so it is taken off once for the whole blueprint
   cost: (p) => {
     const gbs = p.requests * 1e6 * (p.duration / 1000) * (Number(p.memory) / 1024)
     return [
-      { label: `${p.requests}M invocations`, monthly: Math.max(0, p.requests - 2) * reqRate },
-      { label: `${Math.round(gbs).toLocaleString()} GB-seconds`, monthly: Math.max(0, gbs - 400000) * gbsRate },
+      { label: `${p.requests}M invocations`, monthly: p.requests * reqRate, basis: 'usage', meter: { key: o.meter + '.req', qty: p.requests * 1e6, rate: reqRate / 1e6 } },
+      { label: `${Math.round(gbs).toLocaleString()} GB-seconds`, monthly: gbs * gbsRate, basis: o.gbsVerified ? 'usage' : 'estimate', note: o.note, meter: { key: o.meter + '.gbs', qty: gbs, rate: gbsRate } },
     ]
   },
   summary: (p) => `${p.memory} MB · ${p.requests}M/mo`,
@@ -65,47 +92,60 @@ const containers = (b: Base, vcpuH: number, gbH: number, unit: string): Raw => (
   ],
   cost: (p) => [{
     label: `${p.tasks} × ${p.vcpu} vCPU / ${p.mem} GB`,
-    monthly: p.tasks * (Number(p.vcpu) * vcpuH + Number(p.mem) * gbH) * HOURS, commit: true,
+    monthly: p.tasks * (Number(p.vcpu) * vcpuH + Number(p.mem) * gbH) * HOURS, basis: 'estimate',
+    note: 'Assumes every instance runs all month. Indicative rate, not checked against the current price list.',
   }],
   summary: (p) => `${p.tasks} × ${p.vcpu} vCPU`,
 })
 
-const k8s = (b: Base, machines: Record<string, number>, dflt: string): Raw => ({
+const k8s = (b: Base, machines: Machines, dflt: string, o: { plane: CostLine; commit?: (machine: string) => Commit | undefined; commitName: string }): Raw => ({
   name: 'Kubernetes cluster', category: 'compute', model: 'cluster', glyph: 'wheel', tier: 3, role: 'eks', color: '#5B6CF0', keywords: 'k8s kubernetes', ...b,
   props: [
     num('nodes', 'Worker nodes', 3, undefined, { min: 0 }),
     sel('machine', 'Node type', dflt, opts(...Object.keys(machines))),
   ],
-  cost: (p) => [
-    { label: 'Control plane', monthly: 0.1 * HOURS },
-    { label: `${p.nodes} × ${p.machine}`, monthly: (machines[p.machine] ?? 0.1) * HOURS * p.nodes, commit: true },
-  ],
+  cost: (p, q) => {
+    const m = machines[p.machine], hourly = Array.isArray(m) ? m[0] : m ?? 0.1, c = o.commit?.(p.machine)
+    return [
+      o.plane,
+      { label: `${p.nodes} × ${p.machine}`, monthly: hourly * (1 - off(c, q)) * HOURS * p.nodes, basis: m === undefined ? 'estimate' : 'fixed', note: commitNote(c, q, o.commitName) },
+    ]
+  },
   summary: (p) => `${p.nodes} × ${p.machine}`,
 })
 
-const sql = (b: Base, tiers: [string, string, number][], dflt: string, engines: [string, string, number][], storageRate: number, haLabel: string, tierAttr: string): Raw => ({
+interface SqlOpts { storage: number; storageVerified?: boolean; ha: string; attr: string; commit?: Commit; commitName: string }
+/** tiers: [id, label, USD per hour, verified]; engines: [id, label, multiplier on the tier price, verified] */
+const sql = (b: Base, tiers: [string, string, number, boolean?][], dflt: string, engines: [string, string, number, boolean?][], o: SqlOpts): Raw => ({
   name: 'Relational database', category: 'database', model: 'cylinder', glyph: 'db', tier: 6, role: 'rds', keywords: 'postgres mysql sql', ...b,
   props: [
     sel('engine', 'Engine', engines[0][0], opts(...engines.map((e) => [e[0], e[1]] as [string, string]))),
     sel('tier', 'Tier', dflt, opts(...tiers.map((t) => [t[0], t[1]] as [string, string]))),
-    tog('multiAZ', haLabel, false),
+    tog('multiAZ', o.ha, false),
     num('replicas', 'Read replicas', 0, undefined, { max: 15 }),
     num('storage', 'Storage', 100, 'GB'),
   ],
-  cost: (p) => {
-    const h = (tiers.find((t) => t[0] === p.tier)?.[2] ?? 0.14) * (engines.find((e) => e[0] === p.engine)?.[2] ?? 1)
+  cost: (p, q) => {
+    const t = tiers.find((x) => x[0] === p.tier), e = engines.find((x) => x[0] === p.engine)
+    const verified = !!t?.[3] && !!e?.[3]
+    const c = verified ? o.commit : undefined
+    const h = (t?.[2] ?? 0.14) * (e?.[2] ?? 1) * (1 - off(c, q))
+    const basis: CostBasis = verified ? 'fixed' : 'estimate'
+    const note = [verified ? '' : 'Indicative rate for this tier or engine, not checked against the current price list.', commitNote(c, q, o.commitName)].filter(Boolean).join(' ') || undefined
     const lines: CostLine[] = [
-      { label: `${p.tier}${p.multiAZ ? ' (HA)' : ''}`, monthly: h * HOURS * (p.multiAZ ? 2 : 1), commit: true },
-      { label: `${p.storage} GB storage`, monthly: p.storage * storageRate * (p.multiAZ ? 2 : 1) },
+      // high availability runs a second instance and keeps a second copy of the storage
+      { label: `${p.tier}${p.multiAZ ? ' (HA)' : ''}`, monthly: h * HOURS * (p.multiAZ ? 2 : 1), basis, note },
+      { label: `${p.storage} GB storage${p.multiAZ ? ' (HA)' : ''}`, monthly: p.storage * o.storage * (p.multiAZ ? 2 : 1), basis: o.storageVerified ? 'fixed' : 'estimate' },
     ]
-    if (p.replicas > 0) lines.push({ label: `${p.replicas} read replica${p.replicas > 1 ? 's' : ''}`, monthly: h * HOURS * p.replicas, commit: true })
+    if (p.replicas > 0) lines.push({ label: `${p.replicas} read replica${p.replicas > 1 ? 's' : ''}`, monthly: h * HOURS * p.replicas, basis, note })
     return lines
   },
   summary: (p) => `${p.engine} · ${p.tier}`,
-  tfAttrs: (p) => [tierAttr.includes('.') ? `${tierAttr.split('.')[0]} {\n    ${tierAttr.split('.')[1]} = "${p.tier}"\n  }` : `${tierAttr} = "${p.tier}"`],
+  tfAttrs: (p) => [o.attr.includes('.') ? `${o.attr.split('.')[0]} {\n    ${o.attr.split('.')[1]} = "${p.tier}"\n  }` : `${o.attr} = "${p.tier}"`],
 })
 
-const obj = (b: Base, classes: [string, string, number][], reqRate: number, egressRate: number): Raw => ({
+/** classes: [id, label, USD per GB-month, verified] */
+const obj = (b: Base, classes: [string, string, number, boolean?][], reqRate: number, egressRate: number, o: { reqVerified?: boolean } = {}): Raw => ({
   name: 'Object storage', category: 'storage', model: 'bucket', glyph: 'bucket', tier: 6, role: 's3', keywords: 'bucket blob files', ...b,
   props: [
     num('storage', 'Storage', 500, 'GB'),
@@ -116,9 +156,9 @@ const obj = (b: Base, classes: [string, string, number][], reqRate: number, egre
   cost: (p) => {
     const c = classes.find((x) => x[0] === p.class) ?? classes[0]
     return [
-      { label: `${p.storage} GB ${c[1]}`, monthly: p.storage * c[2] },
-      { label: `${p.requests}M requests`, monthly: p.requests * reqRate },
-      { label: `${p.egress} GB egress`, monthly: Math.max(0, p.egress - 100) * egressRate },
+      { label: `${p.storage} GB ${c[1]}`, monthly: p.storage * c[2], basis: c[3] ? 'fixed' : 'estimate' },
+      { label: `${p.requests}M read requests`, monthly: p.requests * reqRate, basis: o.reqVerified ? 'usage' : 'estimate' },
+      { label: `${p.egress} GB to the internet`, monthly: p.egress * egressRate, basis: 'estimate', note: 'Indicative first-tier internet egress rate. Free monthly egress, where the provider gives any, is not taken off.' },
     ]
   },
   summary: (p) => `${p.storage} GB · ${(classes.find((x) => x[0] === p.class) ?? classes[0])[1]}`,
@@ -126,20 +166,31 @@ const obj = (b: Base, classes: [string, string, number][], reqRate: number, egre
 
 // ---- metered services: one row each ----------------------------------------------
 
-/** [label, unit, default, USD per unit per month] */
-type Meter = [string, string, number, number]
-interface Extra { role?: string; tf?: string; tfAlso?: string[]; color?: string; base?: number; commit?: boolean; dlq?: boolean }
+/** [label, unit, default, USD per unit per month, free-allowance key?, how many base units one unit is?] */
+type Meter = [string, string, number, number, string?, number?]
+interface Extra {
+  role?: string; tf?: string; tfAlso?: string[]; color?: string; base?: number; commit?: boolean; dlq?: boolean
+  /** the rates were checked against the provider's own price list (see the note at the top of this file) */
+  verified?: boolean
+  note?: string
+}
 
 function svc(provider: Provider, type: string, name: string, service: string, category: Category, model: ModelKind, glyph: string, tier: number, keywords: string, meters: Meter[], x: Extra = {}): Raw {
   const props: PropDef[] = meters.map((m, i) => num('m' + i, m[0], m[2], m[1] || undefined))
   if (x.dlq) props.push(tog('dlq', 'Dead-letter queue', false))
   const fmt = (v: number, unit: string) => `${Number(v).toLocaleString()}${unit ? ' ' + unit.replace(' / mo', '/mo') : ''}`
+  // a meter counted per month is usage the user entered; anything else is capacity that is simply there
+  const basisOf = (unit: string): CostBasis => (!x.verified ? 'estimate' : unit.includes('/ mo') || /MAU/.test(unit) ? 'usage' : 'fixed')
+  const note = x.note ?? (x.verified ? undefined : 'Indicative rate, not checked against the current price list.')
   return {
     provider, type, name, svc: service, category, model, glyph, tier, keywords, props,
     role: x.role, tf: x.tf, tfAlso: x.tfAlso, color: x.color,
     cost: (p) => {
-      const lines: CostLine[] = x.base ? [{ label: 'Base fee', monthly: x.base, commit: x.commit }] : []
-      meters.forEach((m, i) => lines.push({ label: `${fmt(p['m' + i], m[1])} ${m[0].toLowerCase()}`, monthly: Number(p['m' + i]) * m[3], commit: x.commit && !x.base }))
+      const lines: CostLine[] = x.base ? [{ label: 'Base fee', monthly: x.base, basis: x.verified ? 'fixed' : 'estimate', note }] : []
+      meters.forEach((m, i) => {
+        const qty = Number(p['m' + i])
+        lines.push({ label: `${fmt(qty, m[1])} ${/[A-Z0-9]/.test(m[0].slice(1)) ? m[0] : m[0].toLowerCase()}`, monthly: qty * m[3], basis: basisOf(m[1]), note, ...(m[4] ? { meter: { key: m[4], qty: qty * (m[5] ?? 1), rate: m[3] / (m[5] ?? 1) } } : {}) })
+      })
       return lines
     },
     summary: meters.length ? (p) => fmt(p.m0, meters[0][1]) : () => (x.base ? 'Flat rate' : 'No direct charge'),
@@ -188,26 +239,33 @@ const AWS: Raw[] = [
 
 // ---- Google Cloud -------------------------------------------------------------------
 
-const GCE: Record<string, number> = {
+// Compute Engine on-demand, Iowa. Verified against cloud.google.com/products/compute/pricing (c3 and g2 not re-checked).
+const GCE: Machines = {
   'e2-micro': 0.0084, 'e2-small': 0.0168, 'e2-medium': 0.0335, 'e2-standard-2': 0.067, 'e2-standard-4': 0.134, 'e2-standard-8': 0.268,
   'n2-standard-2': 0.0971, 'n2-standard-4': 0.1942, 'n2-standard-8': 0.3885, 'n2-highmem-4': 0.262, 'c3-standard-4': 0.2088,
   't2a-standard-2': 0.077, 't2a-standard-4': 0.154, 'g2-standard-4': 0.7068,
 }
+const GCE_CUD = (m: string): Commit | undefined => (/^(e2|n2)-/.test(m) ? { commit1: 0.37, commit3: 0.55 } : undefined)
 const G = (type: string, service: string, tf: string, more: Partial<Base> = {}): Base => ({ provider: 'gcp', type: 'gcp-' + type, svc: service, tf, ...more })
 
 const GCP: Raw[] = [
-  vm(G('gce', 'Compute Engine', 'google_compute_instance', { tfAlso: ['google_compute_instance_group_manager', 'google_compute_instance_template'] }), GCE, 'e2-standard-2', 0.1, 'balanced PD', 'machine_type'),
-  fn(G('functions', 'Cloud Run functions', 'google_cloudfunctions2_function', { tfAlso: ['google_cloudfunctions_function'] }), 0.4, 0.0000165),
+  vm(G('gce', 'Compute Engine', 'google_compute_instance', { tfAlso: ['google_compute_instance_group_manager', 'google_compute_instance_template'] }), GCE, 'e2-standard-2',
+    { disk: 0.1, diskName: 'balanced PD', diskVerified: true, attr: 'machine_type', commit: GCE_CUD, commitName: 'Committed-use discount', windows: 'Windows licence estimated at 48% over the Linux price; Google bills it per vCPU.' }),
+  fn(G('functions', 'Cloud Run functions', 'google_cloudfunctions2_function', { tfAlso: ['google_cloudfunctions_function'] }), 0.4, 0.0000165,
+    { meter: 'gcp.run', note: 'Compute is billed per vCPU-second and per GiB-second; this folds both into one GB-second rate, assuming CPU scales with memory.' }),
   containers(G('run', 'Cloud Run', 'google_cloud_run_v2_service', { tfAlso: ['google_cloud_run_service'] }), 0.0864, 0.009, 'Instances'),
-  k8s(G('gke', 'GKE', 'google_container_cluster'), GCE, 'e2-standard-4'),
+  k8s(G('gke', 'GKE', 'google_container_cluster'), GCE, 'e2-standard-4',
+    { plane: { label: 'Cluster management fee', monthly: 0.1 * HOURS, basis: 'fixed', note: 'Each billing account gets a $74.40 monthly credit, enough for one zonal or Autopilot cluster; it is not taken off here.' }, commit: GCE_CUD, commitName: 'Committed-use discount' }),
   svc('gcp', 'gcp-appengine', 'Web app platform', 'App Engine', 'compute', 'tile', 'window', 3, 'paas web app', [['Instances', '', 2, 36.5], ['Requests', 'M' + M, 5, 0]], { role: 'paas', tf: 'google_app_engine_standard_app_version', tfAlso: ['google_app_engine_application'], commit: true }),
   svc('gcp', 'gcp-batch', 'Batch compute', 'Batch', 'compute', 'rack', 'cpu', 3, 'jobs hpc', [['vCPU hours', 'h' + M, 2000, 0.034]], { role: 'batch', tf: 'google_cloud_run_v2_job', color: '#D97A2B' }),
   sql(G('sql', 'Cloud SQL', 'google_sql_database_instance'),
-    [['db-f1-micro', 'db-f1-micro', 0.0105], ['db-custom-1-3840', '1 vCPU · 3.75 GB', 0.0693], ['db-custom-2-7680', '2 vCPU · 7.5 GB', 0.1386], ['db-custom-4-15360', '4 vCPU · 15 GB', 0.2772], ['db-custom-8-30720', '8 vCPU · 30 GB', 0.5544], ['db-custom-16-61440', '16 vCPU · 60 GB', 1.1088]],
-    'db-custom-2-7680', [['postgres', 'PostgreSQL', 1], ['mysql', 'MySQL', 1], ['sqlserver', 'SQL Server', 1.9]], 0.17, 'High availability', 'settings.tier'),
+    // Enterprise edition, Iowa: $0.0413 per vCPU-hour and $0.007 per GiB-hour (cloud.google.com/sql/pricing)
+    [['db-f1-micro', 'db-f1-micro', 0.0105], ['db-custom-1-3840', '1 vCPU · 3.75 GB', 0.06755, true], ['db-custom-2-7680', '2 vCPU · 7.5 GB', 0.1351, true], ['db-custom-4-15360', '4 vCPU · 15 GB', 0.2702, true], ['db-custom-8-30720', '8 vCPU · 30 GB', 0.5404, true], ['db-custom-16-61440', '16 vCPU · 60 GB', 1.0808, true]],
+    'db-custom-2-7680', [['postgres', 'PostgreSQL', 1, true], ['mysql', 'MySQL', 1, true], ['sqlserver', 'SQL Server', 1.9]],
+    { storage: 0.17, ha: 'High availability', attr: 'settings.tier', commit: { commit1: 0.25, commit3: 0.52 }, commitName: 'Committed-use discount' }),
   svc('gcp', 'gcp-alloydb', 'PostgreSQL cluster', 'AlloyDB', 'database', 'cylinder', 'db', 6, 'postgres htap aurora', [['vCPUs', '', 4, 48.3], ['Storage', 'GB', 100, 0.3]], { role: 'aurora', tf: 'google_alloydb_cluster', commit: true, color: '#4668E0' }),
   svc('gcp', 'gcp-spanner', 'Global SQL database', 'Spanner', 'database', 'rack', 'globe', 6, 'newsql distributed global consistent', [['Processing units', '×100', 10, 65.7], ['Storage', 'GB', 100, 0.3]], { role: 'newsql', tf: 'google_spanner_instance', commit: true, color: '#3F6FE6' }),
-  svc('gcp', 'gcp-firestore', 'NoSQL document store', 'Firestore', 'database', 'stack', 'table', 6, 'document nosql datastore', [['Reads', 'M' + M, 20, 0.06], ['Writes', 'M' + M, 5, 0.18], ['Storage', 'GB', 25, 0.18]], { role: 'dynamodb', tf: 'google_firestore_database' }),
+  svc('gcp', 'gcp-firestore', 'NoSQL document store', 'Firestore', 'database', 'stack', 'table', 6, 'document nosql datastore', [['Reads', 'M' + M, 20, 0.3, 'gcp.firestore.read', 1e6], ['Writes', 'M' + M, 5, 0.9, 'gcp.firestore.write', 1e6], ['Storage', 'GB', 25, 0.15, 'gcp.firestore.storage']], { role: 'dynamodb', tf: 'google_firestore_database', verified: true }),
   svc('gcp', 'gcp-bigtable', 'Wide-column store', 'Bigtable', 'database', 'rack', 'table', 6, 'hbase wide column time series', [['Nodes', '', 3, 474.5], ['SSD storage', 'GB', 500, 0.17]], { role: 'tsdb', tf: 'google_bigtable_instance', commit: true, color: '#3F8CE8' }),
   svc('gcp', 'gcp-memorystore', 'In-memory cache', 'Memorystore', 'database', 'slab', 'bolt', 5, 'redis valkey memcached cache', [['Capacity', 'GB', 5, 35.8]], { role: 'elasticache', tf: 'google_redis_instance', tfAlso: ['google_memcache_instance'], commit: true, color: '#3D9BF0' }),
   obj(G('gcs', 'Cloud Storage', 'google_storage_bucket'), [['standard', 'Standard', 0.02], ['infrequent-access', 'Nearline', 0.01], ['glacier-instant', 'Coldline', 0.004], ['deep-archive', 'Archive', 0.0012]], 0.4, 0.12),
@@ -217,14 +275,14 @@ const GCP: Raw[] = [
   svc('gcp', 'gcp-lb', 'Load balancer', 'Cloud Load Balancing', 'network', 'slab', 'balance', 2, 'alb https global balancer', [['Forwarding rules', '', 1, 18.25], ['Data processed', 'GB', 500, 0.008]], { role: 'alb', tf: 'google_compute_backend_service', tfAlso: ['google_compute_global_forwarding_rule', 'google_compute_forwarding_rule', 'google_compute_url_map'] }),
   svc('gcp', 'gcp-cdn', 'CDN', 'Cloud CDN', 'network', 'disc', 'globe', 1, 'edge cache', [['Data transfer', 'GB' + M, 500, 0.08], ['Requests', 'M' + M, 20, 0.75]], { role: 'cloudfront', tf: 'google_compute_backend_bucket' }),
   svc('gcp', 'gcp-dns', 'DNS', 'Cloud DNS', 'network', 'disc', 'compass', 0, 'domain zone', [['Managed zones', '', 1, 0.2], ['Queries', 'M' + M, 10, 0.4]], { role: 'route53', tf: 'google_dns_managed_zone', color: '#A367E8' }),
-  svc('gcp', 'gcp-apigw', 'API gateway', 'API Gateway / Apigee', 'network', 'gate', 'code', 2, 'rest http api apigee', [['Requests', 'M' + M, 10, 3]], { role: 'apigw', tf: 'google_api_gateway_gateway', tfAlso: ['google_api_gateway_api', 'google_apigee_organization'] }),
+  svc('gcp', 'gcp-apigw', 'API gateway', 'API Gateway / Apigee', 'network', 'gate', 'code', 2, 'rest http api apigee', [['Requests', 'M' + M, 10, 3, 'gcp.apigw', 1e6]], { role: 'apigw', verified: true, tf: 'google_api_gateway_gateway', tfAlso: ['google_api_gateway_api', 'google_apigee_organization'] }),
   svc('gcp', 'gcp-nat', 'NAT gateway', 'Cloud NAT', 'network', 'gate', 'swap', 4, 'egress outbound', [['Data processed', 'GB' + M, 200, 0.045]], { role: 'nat', tf: 'google_compute_router_nat', base: 32, color: '#7C7FE8' }),
   svc('gcp', 'gcp-vpn', 'VPN gateway', 'Cloud VPN', 'network', 'gate', 'link', 1, 'ipsec tunnel hybrid', [['Tunnels', '', 2, 36.5], ['Data out', 'GB', 100, 0.12]], { role: 'vpn', tf: 'google_compute_ha_vpn_gateway', tfAlso: ['google_compute_vpn_tunnel'], color: '#7F86EE' }),
   svc('gcp', 'gcp-interconnect', 'Dedicated link', 'Cloud Interconnect', 'network', 'gate', 'link', 1, 'private line hybrid fiber', [['10 Gbps circuits', '', 1, 1700], ['Data out', 'GB', 500, 0.02]], { role: 'interconnect', tf: 'google_compute_interconnect_attachment', color: '#6E74D8' }),
   svc('gcp', 'gcp-ncc', 'Network hub', 'Network Connectivity Center', 'network', 'disc', 'hub', 2, 'transit hub spoke peering', [['Spokes', '', 3, 36.5], ['Data processed', 'GB', 500, 0.02]], { role: 'nethub', tf: 'google_network_connectivity_hub', color: '#9A7CF0' }),
   svc('gcp', 'gcp-psc', 'Private endpoint', 'Private Service Connect', 'network', 'tile', 'lock', 4, 'private endpoint', [['Endpoints', '', 2, 7.3], ['Data processed', 'GB', 200, 0.01]], { role: 'privatelink', tf: 'google_compute_service_attachment', color: '#8478E6' }),
-  svc('gcp', 'gcp-pubsub', 'Pub/sub topic', 'Pub/Sub', 'messaging', 'slab', 'broadcast', 4, 'topic subscription fanout messaging', [['Throughput', 'GB' + M, 50, 0.04]], { role: 'sns', tf: 'google_pubsub_topic', color: '#EA6F8B' }),
-  svc('gcp', 'gcp-tasks', 'Queue', 'Cloud Tasks', 'messaging', 'stack', 'queue', 4, 'task queue', [['Operations', 'M' + M, 10, 0.4]], { role: 'sqs', tf: 'google_cloud_tasks_queue', dlq: true }),
+  svc('gcp', 'gcp-pubsub', 'Pub/sub topic', 'Pub/Sub', 'messaging', 'slab', 'broadcast', 4, 'topic subscription fanout messaging', [['Throughput', 'GB' + M, 50, 0.039, 'gcp.pubsub']], { role: 'sns', verified: true, tf: 'google_pubsub_topic', color: '#EA6F8B' }),
+  svc('gcp', 'gcp-tasks', 'Queue', 'Cloud Tasks', 'messaging', 'stack', 'queue', 4, 'task queue', [['Operations', 'M' + M, 10, 0.4, 'gcp.tasks', 1e6]], { role: 'sqs', verified: true, tf: 'google_cloud_tasks_queue', dlq: true }),
   svc('gcp', 'gcp-eventarc', 'Event bus', 'Eventarc', 'messaging', 'tile', 'hub', 4, 'events triggers', [['Events', 'M' + M, 5, 1]], { role: 'eventbridge', tf: 'google_eventarc_trigger', color: '#D858C8' }),
   svc('gcp', 'gcp-workflows', 'Workflow', 'Workflows', 'messaging', 'tile', 'flow', 4, 'orchestration steps', [['Steps', 'M' + M, 2, 10]], { role: 'workflow', tf: 'google_workflows_workflow', color: '#E0559A' }),
   svc('gcp', 'gcp-scheduler', 'Scheduler', 'Cloud Scheduler', 'messaging', 'tile', 'clock', 4, 'cron schedule jobs', [['Jobs', '', 10, 0.1]], { role: 'scheduler', tf: 'google_cloud_scheduler_job', color: '#D66AA8' }),
@@ -241,7 +299,7 @@ const GCP: Raw[] = [
   svc('gcp', 'gcp-vision', 'Vision AI', 'Vision AI', 'ai', 'tile', 'eye', 5, 'image ocr labels document ai', [['Images', 'k' + M, 500, 1.5]], { role: 'vision', tf: 'google_document_ai_processor', color: '#B26AE8' }),
   svc('gcp', 'gcp-speech', 'Speech AI', 'Speech-to-Text', 'ai', 'tile', 'wave', 5, 'speech to text voice tts', [['Audio', 'h' + M, 500, 0.96]], { role: 'speech', tf: 'google_speech_recognizer', color: '#C56BD8' }),
   svc('gcp', 'gcp-armor', 'Web firewall', 'Cloud Armor', 'security', 'gate', 'shield', 1, 'waf ddos rules', [['Rules', '', 10, 1], ['Requests', 'M' + M, 20, 0.75]], { role: 'waf', tf: 'google_compute_security_policy', base: 5 }),
-  svc('gcp', 'gcp-identity', 'Identity provider', 'Identity Platform', 'security', 'tile', 'user', 2, 'auth login users oauth firebase', [['Monthly active users', 'k MAU', 25, 2.75]], { role: 'cognito', tf: 'google_identity_platform_config', color: '#E0705A' }),
+  svc('gcp', 'gcp-identity', 'Identity provider', 'Identity Platform', 'security', 'tile', 'user', 2, 'auth login users oauth firebase', [['Monthly active users', 'k MAU', 25, 5.5, 'gcp.identity', 1000]], { role: 'cognito', verified: true, note: 'Priced at the 50,000 to 100,000 user rate; larger pools pay less per user.', tf: 'google_identity_platform_config', color: '#E0705A' }),
   svc('gcp', 'gcp-secrets', 'Secrets & keys', 'Secret Manager / KMS', 'security', 'tile', 'key', 8, 'kms secret key encryption', [['Secrets', '', 12, 0.06], ['Keys', '', 3, 0.06]], { role: 'secrets', tf: 'google_secret_manager_secret', color: '#D4524E' }),
   svc('gcp', 'gcp-iam', 'Identity & access', 'Cloud IAM', 'security', 'tile', 'badge', 8, 'roles policies permissions service account', [], { role: 'iam', color: '#D9605A' }),
   svc('gcp', 'gcp-scc', 'Threat detection', 'Security Command Center', 'security', 'tile', 'eye', 8, 'siem detection findings', [['Protected vCPUs', '', 50, 5]], { role: 'threat', tf: 'google_scc_source', color: '#CF4F64' }),
@@ -255,30 +313,37 @@ const GCP: Raw[] = [
 
 // ---- Azure ----------------------------------------------------------------------------
 
-const AZVM: Record<string, number> = {
-  Standard_B1s: 0.0104, Standard_B2s: 0.0416, Standard_B2ms: 0.0832, Standard_D2s_v5: 0.096, Standard_D4s_v5: 0.192, Standard_D8s_v5: 0.384,
-  Standard_D2ps_v5: 0.077, Standard_D4ps_v5: 0.154, Standard_E4s_v5: 0.252, Standard_F4s_v2: 0.169, Standard_NC4as_T4_v3: 0.526,
+// Linux and Windows pay-as-you-go, East US, from the Azure Retail Prices API (prices.azure.com) on 2026-11-20
+const AZVM: Machines = {
+  Standard_B1s: [0.0104, 0.014], Standard_B2s: [0.0416, 0.0496], Standard_B2ms: [0.0832, 0.0912], Standard_D2s_v5: [0.096, 0.188], Standard_D4s_v5: [0.192, 0.376], Standard_D8s_v5: [0.384, 0.752],
+  Standard_D2ps_v5: 0.077, Standard_D4ps_v5: 0.154, Standard_E4s_v5: [0.252, 0.436], Standard_F4s_v2: [0.169, 0.354], Standard_NC4as_T4_v3: [0.526, 0.71],
 }
+// reserved instances, effective hourly against pay-as-you-go: 38% and 60% on Dsv5, 41% and 60–62% on Esv5, Dpsv5 and NCasT4 (same API). B- and F-series list none.
+const AZ_RI = (m: string): Commit | undefined => (/^Standard_D\d+s_v5$/.test(m) ? { commit1: 0.38, commit3: 0.6 } : /^Standard_(E\d+s_v5|D\d+ps_v5|NC)/.test(m) ? { commit1: 0.41, commit3: 0.6 } : undefined)
 const A = (type: string, service: string, tf: string, more: Partial<Base> = {}): Base => ({ provider: 'azure', type: 'az-' + type, svc: service, tf, ...more })
 
 const AZURE: Raw[] = [
-  vm(A('vm', 'Virtual Machines', 'azurerm_linux_virtual_machine', { tfAlso: ['azurerm_windows_virtual_machine', 'azurerm_linux_virtual_machine_scale_set', 'azurerm_windows_virtual_machine_scale_set', 'azurerm_virtual_machine'] }), AZVM, 'Standard_D2s_v5', 0.1, 'Premium SSD', 'size'),
-  fn(A('functions', 'Azure Functions', 'azurerm_linux_function_app', { tfAlso: ['azurerm_windows_function_app', 'azurerm_function_app'] }), 0.2, 0.000016),
+  vm(A('vm', 'Virtual Machines', 'azurerm_linux_virtual_machine', { tfAlso: ['azurerm_windows_virtual_machine', 'azurerm_linux_virtual_machine_scale_set', 'azurerm_windows_virtual_machine_scale_set', 'azurerm_virtual_machine'] }), AZVM, 'Standard_D2s_v5',
+    { disk: 0.1, diskName: 'Premium SSD', attr: 'size', commit: AZ_RI, commitName: 'Reserved-instance discount', windows: 'Windows is not sold on Arm (Dpsv5) sizes; licence estimated at 48% over the Linux price.' }),
+  fn(A('functions', 'Azure Functions', 'azurerm_linux_function_app', { tfAlso: ['azurerm_windows_function_app', 'azurerm_function_app'] }), 0.2, 0.000016, { meter: 'azure.fn', gbsVerified: true }),
   containers(A('containerapps', 'Container Apps', 'azurerm_container_app', { tfAlso: ['azurerm_container_group'] }), 0.0864, 0.0108, 'Replicas'),
-  k8s(A('aks', 'AKS', 'azurerm_kubernetes_cluster'), AZVM, 'Standard_D4s_v5'),
+  k8s(A('aks', 'AKS', 'azurerm_kubernetes_cluster'), AZVM, 'Standard_D4s_v5',
+    { plane: { label: 'Control plane (Standard tier)', monthly: 0.1 * HOURS, basis: 'estimate', note: 'The Free tier has no control-plane charge; the Standard tier, with its uptime SLA, is $0.10 an hour.' }, commit: AZ_RI, commitName: 'Reserved-instance discount' }),
   svc('azure', 'az-appservice', 'Web app platform', 'App Service', 'compute', 'tile', 'window', 3, 'paas web app', [['Instances', '', 2, 69.35], ['Requests', 'M' + M, 5, 0]], { role: 'paas', tf: 'azurerm_linux_web_app', tfAlso: ['azurerm_windows_web_app', 'azurerm_app_service', 'azurerm_static_web_app'], commit: true }),
   svc('azure', 'az-batch', 'Batch compute', 'Azure Batch', 'compute', 'rack', 'cpu', 3, 'jobs hpc', [['vCPU hours', 'h' + M, 2000, 0.048]], { role: 'batch', tf: 'azurerm_batch_account', color: '#D97A2B' }),
   sql(A('sql', 'Azure SQL / PostgreSQL', 'azurerm_postgresql_flexible_server', { tfAlso: ['azurerm_mysql_flexible_server', 'azurerm_mssql_server', 'azurerm_mssql_database', 'azurerm_sql_server'] }),
-    [['B_Standard_B1ms', 'Burstable B1ms', 0.026], ['B_Standard_B2s', 'Burstable B2s', 0.068], ['GP_Standard_D2ds_v5', 'D2ds v5 · 2 vCPU', 0.176], ['GP_Standard_D4ds_v5', 'D4ds v5 · 4 vCPU', 0.352], ['GP_Standard_D8ds_v5', 'D8ds v5 · 8 vCPU', 0.704], ['MO_Standard_E4ds_v5', 'E4ds v5 · memory', 0.478]],
-    'GP_Standard_D2ds_v5', [['postgres', 'PostgreSQL', 1], ['mysql', 'MySQL', 1], ['sqlserver', 'Azure SQL', 1.6]], 0.115, 'Zone-redundant HA', 'sku_name'),
+    // General Purpose Ddsv5 is $0.089 per vCore-hour in East US (Retail Prices API); burstable and memory-optimised tiers were not re-checked
+    [['B_Standard_B1ms', 'Burstable B1ms', 0.026], ['B_Standard_B2s', 'Burstable B2s', 0.068], ['GP_Standard_D2ds_v5', 'D2ds v5 · 2 vCPU', 0.178, true], ['GP_Standard_D4ds_v5', 'D4ds v5 · 4 vCPU', 0.356, true], ['GP_Standard_D8ds_v5', 'D8ds v5 · 8 vCPU', 0.712, true], ['MO_Standard_E4ds_v5', 'E4ds v5 · memory', 0.478]],
+    'GP_Standard_D2ds_v5', [['postgres', 'PostgreSQL', 1, true], ['mysql', 'MySQL', 1], ['sqlserver', 'Azure SQL', 1.6]],
+    { storage: 0.115, ha: 'Zone-redundant HA', attr: 'sku_name', commitName: 'Reserved-capacity discount' }),
   svc('azure', 'az-cosmos', 'NoSQL database', 'Cosmos DB', 'database', 'stack', 'table', 6, 'document nosql global mongo', [['Request units', 'M RU' + M, 100, 0.25], ['Storage', 'GB', 25, 0.25]], { role: 'dynamodb', tf: 'azurerm_cosmosdb_account' }),
-  svc('azure', 'az-redis', 'In-memory cache', 'Azure Cache for Redis', 'database', 'slab', 'bolt', 5, 'redis cache', [['Capacity', 'GB', 6, 25]], { role: 'elasticache', tf: 'azurerm_redis_cache', tfAlso: ['azurerm_managed_redis'], commit: true, color: '#3D9BF0' }),
+  svc('azure', 'az-redis', 'In-memory cache', 'Azure Cache for Redis', 'database', 'slab', 'bolt', 5, 'redis cache', [['Standard C3 caches (6 GB)', '', 1, 328.5]], { role: 'elasticache', tf: 'azurerm_redis_cache', tfAlso: ['azurerm_managed_redis'], verified: true, note: 'Standard tier, C3: a replicated 6 GB cache at $0.45 an hour.', color: '#3D9BF0' }),
   svc('azure', 'az-dataexplorer', 'Time-series database', 'Data Explorer', 'database', 'stack', 'clock', 6, 'kusto logs telemetry time series', [['Engine instances', '', 2, 175], ['Storage', 'GB', 500, 0.02]], { role: 'tsdb', tf: 'azurerm_kusto_cluster', commit: true, color: '#3F8CE8' }),
-  obj(A('blob', 'Blob Storage', 'azurerm_storage_account', { tfAlso: ['azurerm_storage_container'] }), [['standard', 'Hot', 0.018], ['infrequent-access', 'Cool', 0.01], ['glacier-instant', 'Cold', 0.0036], ['deep-archive', 'Archive', 0.00099]], 0.4, 0.087),
+  obj(A('blob', 'Blob Storage', 'azurerm_storage_account', { tfAlso: ['azurerm_storage_container'] }), [['standard', 'Hot', 0.0208, true], ['infrequent-access', 'Cool', 0.01], ['glacier-instant', 'Cold', 0.0036], ['deep-archive', 'Archive', 0.00099]], 0.4, 0.087, { reqVerified: true }),
   svc('azure', 'az-disk', 'Block volume', 'Managed Disks', 'storage', 'slab', 'disk', 6, 'disk volume ssd', [['Premium SSD', 'GB', 256, 0.15]], { role: 'ebs', tf: 'azurerm_managed_disk', color: '#35A89A' }),
   svc('azure', 'az-files', 'File system', 'Azure Files', 'storage', 'stack', 'folder', 6, 'smb nfs shared files netapp', [['Capacity', 'GB', 500, 0.16]], { role: 'efs', tf: 'azurerm_storage_share', color: '#5BBF5A' }),
   svc('azure', 'az-backup', 'Backup vault', 'Azure Backup', 'storage', 'slab', 'archive', 8, 'snapshot restore dr site recovery', [['Protected data', 'GB', 500, 0.05]], { role: 'backup', tf: 'azurerm_recovery_services_vault', tfAlso: ['azurerm_data_protection_backup_vault'], color: '#48A86C' }),
-  svc('azure', 'az-appgw', 'Load balancer', 'Application Gateway', 'network', 'slab', 'balance', 2, 'alb l7 load balancer', [['Gateways', '', 1, 179.6], ['Capacity units', '', 5, 5.84]], { role: 'alb', tf: 'azurerm_application_gateway', tfAlso: ['azurerm_lb'] }),
+  svc('azure', 'az-appgw', 'Load balancer', 'Application Gateway', 'network', 'slab', 'balance', 2, 'alb l7 load balancer', [['Gateways', '', 1, 146], ['Capacity units', '', 5, 5.84]], { role: 'alb', verified: true, tf: 'azurerm_application_gateway', tfAlso: ['azurerm_lb'] }),
   svc('azure', 'az-frontdoor', 'CDN', 'Front Door', 'network', 'disc', 'globe', 1, 'edge cache cdn global', [['Data transfer', 'GB' + M, 500, 0.083], ['Requests', 'M' + M, 20, 0.9]], { role: 'cloudfront', tf: 'azurerm_cdn_frontdoor_profile', tfAlso: ['azurerm_cdn_profile', 'azurerm_frontdoor'], base: 35 }),
   svc('azure', 'az-dns', 'DNS', 'Azure DNS', 'network', 'disc', 'compass', 0, 'domain zone traffic manager', [['Zones', '', 1, 0.5], ['Queries', 'M' + M, 10, 0.4]], { role: 'route53', tf: 'azurerm_dns_zone', color: '#A367E8' }),
   svc('azure', 'az-apim', 'API gateway', 'API Management', 'network', 'gate', 'code', 2, 'rest http api', [['Requests', 'M' + M, 10, 3.5]], { role: 'apigw', tf: 'azurerm_api_management' }),

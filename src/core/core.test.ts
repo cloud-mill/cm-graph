@@ -60,8 +60,9 @@ describe('catalog', () => {
     const n = { id: 'a', type: 'ec2', x: 0, y: 0, props: { ...defaultProps('ec2'), family: 'm5', size: 'xlarge', count: 2, disk: 0 } }
     const base = costOf(n, 'us-east-1').monthly
     expect(base).toBeCloseTo(0.096 * 2 * 730 * 2, 4)
-    expect(costOf(n, 'eu-central-1').monthly).toBeCloseTo(base * 1.15, 4)
-    expect(costOf(n, 'us-east-1', 'commit1').monthly).toBeCloseTo(base * 0.72, 4)
+    // Frankfurt publishes m5.xlarge at $0.23 an hour; a 1-year no-upfront reservation in N. Virginia is $0.121
+    expect(costOf(n, 'eu-central-1').monthly).toBeCloseTo(0.23 * 730 * 2, 4)
+    expect(costOf(n, 'us-east-1', 'commit1').monthly).toBeCloseTo(0.121 * 730 * 2, 4)
   })
 })
 

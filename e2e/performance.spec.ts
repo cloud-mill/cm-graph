@@ -1,3 +1,4 @@
+import { devices } from '@playwright/test'
 import { TRIO, expect, makeDoc, test } from './fixtures'
 
 /** A grid of connected components, big enough to show up any per-frame waste. */
@@ -163,5 +164,69 @@ test.describe('performance and stability', () => {
     const [dl] = await Promise.all([page.waitForEvent('download'), page.getByRole('button', { name: 'Download' }).click()])
     expect(dl.suggestedFilename()).toBe('e2e-blueprint.svg')
     await context.setOffline(false)
+  })
+})
+
+/**
+ * Phone timings, measured one at a time on a quiet machine with the CPU slowed
+ * four times over. Input is raw touch and the waits are plain sleeps, so nothing
+ * the test tool does lands inside the measured window.
+ */
+test.describe('performance on a slow phone', () => {
+  test.describe.configure({ mode: 'serial' })
+  const { defaultBrowserType: _, ...pixel } = devices['Pixel 7']
+  test.use(pixel)
+
+  test('the component library opens, scrolls and searches without a stall', async ({ page, app }) => {
+    await app.open(TRIO())
+    const cdp = await page.context().newCDPSession(page)
+    const touch = (type: 'touchStart' | 'touchMove' | 'touchEnd', pts: { x: number; y: number }[]) => cdp.send('Input.dispatchTouchEvent', { type, touchPoints: pts.map((p, id) => ({ x: Math.round(p.x), y: Math.round(p.y), id })) })
+    const add = (await page.locator('.dock').getByRole('button', { name: 'Add', exact: true }).boundingBox())!
+    await cdp.send('Emulation.setCPUThrottlingRate', { rate: 4 })
+    await page.evaluate(() => {
+      const w = window as any; w.__long = []; w.__frames = []
+      new PerformanceObserver((l) => l.getEntries().forEach((e) => w.__long.push(e.duration))).observe({ entryTypes: ['longtask'] })
+      let last = performance.now(); const tick = (t: number) => { w.__frames.push(t - last); last = t; requestAnimationFrame(tick) }; requestAnimationFrame(tick)
+    })
+    const reset = () => page.evaluate(() => { const w = window as any; w.__long = []; w.__frames = [] })
+    const worst = () => page.evaluate(() => { const w = window as any; return { task: Math.round(Math.max(0, ...w.__long)), frame: Math.round(Math.max(0, ...w.__frames)), slowFrames: w.__frames.filter((f: number) => f > 50).length } })
+    const note = (what: string, v: { task: number; frame: number; slowFrames: number }) => test.info().annotations.push({ type: what + ' at 4x CPU slowdown', description: `longest blocked stretch ${v.task} ms, worst frame ${v.frame} ms, frames over 50 ms: ${v.slowFrames}` })
+
+    await reset()
+    await touch('touchStart', [{ x: add.x + add.width / 2, y: add.y + add.height / 2 }]); await touch('touchEnd', [])
+    await page.waitForTimeout(1500)
+    const open = await worst()
+    note('opening the library', open)
+    await expect(page.getByRole('dialog', { name: 'Library' })).toBeVisible()
+
+    const list = page.locator('.palette-scroll'), box = (await list.boundingBox())!, x = box.x + box.width / 2
+    await reset()
+    for (let n = 0; n < 6; n++) {
+      await touch('touchStart', [{ x, y: box.y + box.height - 24 }])
+      for (let i = 1; i <= 5; i++) { await touch('touchMove', [{ x, y: box.y + box.height - 24 - ((box.height - 48) * i) / 5 }]); await page.waitForTimeout(12) }
+      await touch('touchEnd', []); await page.waitForTimeout(300)
+    }
+    const scroll = await worst()
+    note('flicking through the library', scroll)
+    expect(await list.evaluate((e) => e.scrollTop)).toBeGreaterThan(600)
+
+    const field = (await page.getByLabel('Search components').boundingBox())!
+    await touch('touchStart', [{ x: field.x + field.width / 2, y: field.y + field.height / 2 }]); await touch('touchEnd', [])
+    await page.waitForTimeout(700)
+    await reset()
+    await page.keyboard.type('queue', { delay: 60 })
+    await page.waitForTimeout(500)
+    const type = await worst()
+    note('typing a search', type)
+    await cdp.send('Emulation.setCPUThrottlingRate', { rate: 1 })
+    await expect(page.locator('.pal-item')).toHaveCount(3)
+
+    // Measured alone, opening blocks for about 60 ms here; it was about 140 ms when every picture was drawn up
+    // front (and 950 ms on the development build). The limit sits between normal run-to-run noise and that.
+    // The development build runs React's slow checks, so its limit is looser.
+    const limit = process.env.E2E_PROD ? 150 : 500
+    expect(open.task, 'opening').toBeLessThan(limit)
+    expect(scroll.task, 'scrolling').toBeLessThan(limit)
+    expect(type.task, 'typing').toBeLessThan(limit)
   })
 })

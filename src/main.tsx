@@ -4,12 +4,14 @@ import '@fontsource-variable/geist'
 import '@fontsource-variable/geist-mono'
 import './styles.css'
 import App from './App'
+import { watchHistory } from './core/nav'
 import { getPref } from './core/storage'
 import { sureTaps, watchViewport } from './ui/device'
 
 document.documentElement.dataset.theme = getPref('theme', 'dark')
 watchViewport()
 sureTaps()
+watchHistory()
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <App />

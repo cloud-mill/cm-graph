@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, render, screen, within } from '@testing-library/react'
+import { act, cleanup, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { analyze } from '../core/advisor'
@@ -158,7 +158,70 @@ describe('BudgetPanel', () => {
     await userEvent.click(screen.getByRole('option', { name: 'sa-east-1' }))
     expect(S().doc.region).toBe('sa-east-1')
     expect(S().past).toHaveLength(1)
-    expect(document.querySelector('.budget-center')).toHaveTextContent(money(docCost(doc).total * 1.55, true))
+    // every line moves by its own published São Paulo price, so the total is the blueprint re-priced there, not the old total times a factor
+    const there = docCost({ ...doc, region: 'sa-east-1' }).total
+    expect(there).toBeGreaterThan(docCost(doc).total * 1.2)
+    expect(document.querySelector('.budget-center')).toHaveTextContent(money(there, true))
+  })
+  // the three-tier template: fixed capacity, usage, and free allowances all in play
+  const doc = TEMPLATES.find((t) => t.id === 'three-tier')!.make()
+  it('splits the total by how far each part can be trusted, and the parts add up', () => {
+    resetStore({ doc })
+    render(<BudgetPanel />)
+    const c = docCost(doc)
+    const row = (name: string) => [...document.querySelectorAll('.basis-row')].find((r) => r.textContent!.startsWith(name))!
+    expect(row('Fixed')).toHaveTextContent(money(c.byBasis.fixed))
+    expect(row('Usage-based')).toHaveTextContent(money(c.byBasis.usage))
+    expect(row('Estimated')).toHaveTextContent(money(c.byBasis.estimate))
+    expect(c.byBasis.fixed + c.byBasis.usage + c.byBasis.estimate).toBeCloseTo(c.list, 6)
+    // the bar says the same thing to a screen reader
+    expect(screen.getByRole('img', { name: /Fixed .* Usage-based .* Estimated/ })).toBeInTheDocument()
+  })
+  it('lists the free allowances once, with what each is worth, and the headline is net of them', () => {
+    resetStore({ doc })
+    render(<BudgetPanel />)
+    const c = docCost(doc)
+    expect(c.credits.length).toBeGreaterThan(0)
+    const row = document.querySelector('.basis-row.credit')!
+    expect(row).toHaveTextContent('-' + money(c.list - c.total))
+    for (const k of c.credits) expect(row).toHaveTextContent(k.name)
+    expect(row).toHaveTextContent(/other workloads, they share these/)
+    expect(document.querySelector('.budget-center')).toHaveTextContent(money(c.total, true))
+  })
+  it('marks a component that rests on an estimated rate', () => {
+    resetStore({ doc: docOf([node('a', 'ec2', 0, 0, { name: 'web' }), node('b', 'msk', 4, 0, { name: 'kafka' })]) })
+    render(<BudgetPanel />)
+    const rows = [...document.querySelectorAll('.cost-row')]
+    expect(rows.find((r) => r.textContent!.includes('kafka'))!.querySelector('.cost-row-top .mono')).toHaveTextContent(/^~\$/)
+    expect(rows.find((r) => r.textContent!.includes('web'))!.querySelector('.cost-row-top .mono')).toHaveTextContent(/^\$/)
+  })
+  it('states its assumptions, what is left out, and where the prices came from and when', () => {
+    resetStore({ doc })
+    render(<BudgetPanel />)
+    expect(screen.getByText(/Everything runs all month: 730 hours/)).toBeInTheDocument()
+    expect(screen.getByText(/Not included: data transfer between zones and services/)).toBeInTheDocument()
+    expect(screen.getByText(/first pricing tier/)).toBeInTheDocument()
+    const link = screen.getByRole('link', { name: 'AWS Price List Bulk API' })
+    expect(link).toHaveAttribute('href', expect.stringContaining('docs.aws.amazon.com'))
+    expect(link.closest('li')).toHaveTextContent(/read \d{4}-\d\d-\d\d/)
+    expect(screen.getByText(/An estimate for comparing designs, not a quote/)).toBeInTheDocument()
+  })
+  it('explains what a commitment covers, only when one is chosen', async () => {
+    resetStore({ doc })
+    render(<BudgetPanel />)
+    expect(screen.queryByText(/published reserved rate/)).toBeNull()
+    await userEvent.click(screen.getByRole('radio', { name: '3-yr commit' }))
+    expect(screen.getByText(/published reserved rate with no upfront payment/)).toBeInTheDocument()
+    expect(document.querySelector('.save')).toHaveTextContent(/saves .*vs on-demand/)
+  })
+  it('says so when another cloud is priced at US rates in a region abroad', () => {
+    resetStore({ doc: { ...docOf([node('a', 'gcp-gce')]), region: 'eu-west-1' } })
+    render(<BudgetPanel />)
+    expect(screen.getByText(/Google Cloud and Azure components are priced at US rates here/)).toBeInTheDocument()
+    cleanup()
+    resetStore({ doc: { ...docOf([node('a', 'ec2')]), region: 'eu-west-1' } })
+    render(<BudgetPanel />)
+    expect(screen.queryByText(/priced at US rates here/)).toBeNull()
   })
   it('toggles the cost heatmap', async () => {
     resetStore({ doc: TEMPLATES[0].make() })
@@ -191,7 +254,7 @@ describe('BudgetPanel', () => {
     expect(file).toBe('three-tier-web-application-budget.csv')
     expect(blob!.type).toBe('text/csv')
     const text = await blob!.text()
-    expect(text.split('\n')[0]).toBe('Component,Service,Category,Line item,Monthly (USD),Yearly (USD)')
+    expect(text.split('\n')[0]).toBe('Component,Service,Category,Line item,Monthly (USD),Yearly (USD),Basis,Note')
     expect(text).toContain('Total,,,us-east-1 · ondemand,' + docCost(doc).total.toFixed(2))
     expect(S().toasts.at(-1)!.text).toBe('Budget exported as CSV')
     expect(document.querySelector('a[download]')).toBeNull() // the temporary link is cleaned up

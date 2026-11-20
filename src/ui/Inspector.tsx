@@ -1,13 +1,21 @@
 import { useMemo } from 'react'
-import { ArrowLeftRight, Copy, ExternalLink, Maximize2, Trash2 } from 'lucide-react'
+import { ArrowLeftRight, Copy, ExternalLink, Maximize2, RotateCcw, Route, Spline, Trash2 } from 'lucide-react'
 import { fitView } from '../canvas/camera'
 import { ModelIcon } from '../canvas/models'
-import { CATEGORIES, PROVIDERS, REGIONS, type PropDef, costOf, defOf, defaultProps, docCost, docProviders, money, nodeColor, nodeName, translateDoc } from '../core/catalog'
+import { CATEGORIES, HOURS, PROVIDERS, REGIONS, type PropDef, costOf, defOf, defaultProps, docCost, docProviders, money, nodeColor, nodeName, translateDoc } from '../core/catalog'
 import { ISO } from '../core/iso'
+import { KINDS, ORIGINS, captionOf, describe, kindInfo, linkProblems, traceFlow } from '../core/links'
 import { coalesce, useStore } from '../core/store'
-import { type AreaT, type EdgeT, type LabelT, type NodeT, centerOf } from '../core/types'
+import { type AreaT, type EdgeT, type LabelT, type LinkKind, type NodeT, centerOf } from '../core/types'
 import { NumberInput, Row, Segmented, Select, Swatches, TextInput, Toggle, keys } from './atoms'
 import { fitAreaToContents, translateTo } from './actions'
+
+/** what each kind of figure rests on, in a sentence */
+export const BASIS = {
+  fixed: 'Published rate for capacity that is provisioned all month',
+  usage: 'Published rate times the usage entered above',
+  estimate: 'Estimate: the rate is not verified here',
+} as const
 
 const upd = <T extends { id: string }>(list: T[], id: string, p: Partial<T>) => list.map((x) => (x.id === id ? { ...x, ...p } : x))
 
@@ -35,6 +43,8 @@ function NodeInspector({ nodes }: { nodes: NodeT[] }) {
   const total = nodes.reduce((sum, x) => sum + costOf(x, doc.region, pricing).monthly, 0)
   const cost = costOf(n, doc.region, pricing)
   const links = nodes.length === 1 ? doc.edges.filter((e) => e.from === n.id || e.to === n.id) : []
+  const tracing = useStore((st) => st.trace)
+  const reach = useMemo(() => (nodes.length === 1 && links.length ? traceFlow(doc, n.id) : null), [doc, n.id, nodes.length, links.length])
   const cat = CATEGORIES.find((c) => c.id === d.category)!
 
   return (
@@ -66,11 +76,20 @@ function NodeInspector({ nodes }: { nodes: NodeT[] }) {
         <h5>Estimated cost</h5>
         <div className="cost-card">
           {nodes.length === 1 && cost.lines.map((l, i) => (
-            <div key={i} className="cost-line"><span>{l.label}</span><span className="mono">{money(l.monthly)}</span></div>
+            <div key={i} className={'cost-line ' + (l.basis ?? 'estimate')}>
+              <span><i className="basis" title={BASIS[l.basis ?? 'estimate']} />{l.label}</span><span className="mono">{l.basis === 'estimate' ? '~' : ''}{money(l.monthly)}</span>
+              {l.note && <small>{l.note}</small>}
+            </div>
           ))}
           {nodes.length === 1 && !cost.lines.length && <div className="muted">No direct charge for this component.</div>}
           <div className="cost-total"><span>{nodes.length > 1 ? 'Selection total' : 'Monthly'}</span><span className="mono">{money(total)}<small>/mo</small></span></div>
         </div>
+        {nodes.length === 1 && cost.lines.length > 0 && (
+          <p className="insp-note">
+            List price in {REGIONS.find((r) => r.id === doc.region)?.name ?? doc.region}, all month ({HOURS} hours){pricing !== 'ondemand' ? ', with reserved rates where they are published' : ''}.
+            {cost.lines.some((l) => l.meter) && ' Free monthly allowances are taken off once for the whole blueprint, in Budget.'}
+          </p>
+        )}
       </section>
 
       <section className="sect">
@@ -99,18 +118,27 @@ function NodeInspector({ nodes }: { nodes: NodeT[] }) {
           {links.length > 0 && (
             <section className="sect">
               <h5>Connections <span className="count">{links.length}</span></h5>
+              {reach && (
+                <p className="insp-note">
+                  {reach.up.size ? `${reach.up.size} upstream` : 'Nothing upstream'}, {reach.down.size ? `${reach.down.size} downstream` : 'nothing downstream'}.{' '}
+                  {reach.up.size > 0 && 'Upstream components rely on this one, directly or through others.'}
+                </p>
+              )}
               <div className="conn-list">
                 {links.map((e) => {
                   const other = doc.nodes.find((x) => x.id === (e.from === n.id ? e.to : e.from))
                   if (!other) return null
                   return (
                     <button key={e.id} className="conn" onClick={() => s.select([e.id])}>
-                      <span className="conn-dir">{e.arrow === 'both' ? '↔' : e.from === n.id ? '→' : '←'}</span>
+                      <span className="conn-dir">{e.arrow === 'both' ? '↔' : e.arrow === 'none' ? '–' : e.from === n.id ? '→' : '←'}</span>
                       <span className="conn-name">{nodeName(other)}</span>
-                      <span className="muted">{e.label ?? defOf(other.type).svc}</span>
+                      <span className="muted">{captionOf(e) || kindInfo(e.kind)?.name || defOf(other.type).svc}</span>
                     </button>
                   )
                 })}
+              </div>
+              <div className="insp-actions inline">
+                <button className={'btn ghost' + (tracing === n.id ? ' on' : '')} onClick={() => s.set({ trace: tracing === n.id ? null : n.id })}><Route size={14} />{tracing === n.id ? 'Stop following' : 'Follow the flow'}</button>
               </div>
             </section>
           )}
@@ -132,28 +160,86 @@ function Actions({ ids, onZoom, noDup }: { ids: string[]; onZoom?: () => void; n
   )
 }
 
+const PROTOCOLS = ['HTTPS', 'HTTP', 'gRPC', 'TCP', 'UDP', 'WebSocket', 'PostgreSQL', 'MySQL', 'Redis', 'Kafka', 'AMQP', 'MQTT', 'DNS', 'S3 API']
+
 function EdgeInspector({ edges }: { edges: EdgeT[] }) {
   const s = useStore.getState()
   const doc = useStore((st) => st.doc)
   const focusName = useStore((st) => st.focusName)
+  const tracing = useStore((st) => st.trace)
   const e = edges[0]
   const ids = edges.map((x) => x.id)
+  const one = edges.length === 1
   const a = doc.nodes.find((n) => n.id === e.from), b = doc.nodes.find((n) => n.id === e.to)
+  const kind = kindInfo(e.kind)
+  const problems = one ? linkProblems(doc, e) : []
+  const shaped = edges.filter((x) => x.via?.length || x.fromSide || x.toSide)
+  const bends = e.via?.length ?? 0
   return (
     <>
       <div className="insp-hero slim">
         <div className="insp-hero-text">
-          <div className="title-static">{edges.length > 1 ? `${edges.length} connections` : 'Connection'}</div>
-          {edges.length === 1 && a && b && <div className="insp-sub">{nodeName(a)} → {nodeName(b)}</div>}
+          <div className="title-static">{one ? 'Connection' : `${edges.length} connections`}</div>
+          {one && a && b && <div className="insp-sub">{describe(doc, e)}</div>}
         </div>
       </div>
+      {one && a && b && (
+        <section className="sect">
+          <h5>Between</h5>
+          {/* each end is a way to the component itself */}
+          <div className="link-ends">
+            <button className="link-end" onClick={() => s.select([a.id])}><ModelIcon type={a.type} proj={ISO} size={26} color={nodeColor(a)} /><span><small>From</small><b>{nodeName(a)}</b></span></button>
+            <span className="link-arrow" aria-hidden="true">{e.arrow === 'both' ? '↔' : e.arrow === 'none' ? '–' : '→'}</span>
+            <button className="link-end" onClick={() => s.select([b.id])}><ModelIcon type={b.type} proj={ISO} size={26} color={nodeColor(b)} /><span><small>To</small><b>{nodeName(b)}</b></span></button>
+          </div>
+        </section>
+      )}
       <section className="sect">
-        {edges.length === 1 && (
-          <Row label="Label">
-            <TextInput label="Connection label" value={e.label ?? ''} placeholder="e.g. HTTPS, gRPC, events" autoFocusKey={focusName}
-              onChange={(v) => coalesce('elabel:' + e.id, (d) => ({ ...d, edges: upd(d.edges, e.id, { label: v || undefined }) }))} />
-          </Row>
+        <h5>What it is</h5>
+        <Row label="Relationship">
+          <Select label="Relationship" value={(e.kind ?? '') as string} onChange={(v) => (v ? s.setKind(ids, v as LinkKind) : s.patchEdge(ids, { kind: undefined }))}
+            options={[...(e.kind ? [] : [{ value: '', label: 'Not said' }]), ...KINDS.map((k) => ({ value: k.id as string, label: k.name }))]} />
+        </Row>
+        {kind && <p className="insp-note">{kind.blurb}.</p>}
+        {one && (
+          <>
+            <Row label="Protocol">
+              <TextInput label="Protocol" value={e.protocol ?? ''} placeholder="e.g. HTTPS" list="link-protocols"
+                onChange={(v) => coalesce('eproto:' + e.id, (d) => ({ ...d, edges: upd(d.edges, e.id, { protocol: v.trim() || undefined }) }))} />
+            </Row>
+            <Row label="Port">
+              <TextInput label="Port" value={e.port ?? ''} placeholder="e.g. 443" inputMode="numeric"
+                onChange={(v) => coalesce('eport:' + e.id, (d) => ({ ...d, edges: upd(d.edges, e.id, { port: v.trim() || undefined }) }))} />
+            </Row>
+            <Row label="Label">
+              <TextInput label="Connection label" value={e.label ?? ''} placeholder="e.g. orders, auth, nightly sync" autoFocusKey={focusName}
+                onChange={(v) => coalesce('elabel:' + e.id, (d) => ({ ...d, edges: upd(d.edges, e.id, { label: v || undefined }) }))} />
+            </Row>
+            <datalist id="link-protocols">{PROTOCOLS.map((p) => <option key={p} value={p}>{p}</option>)}</datalist>
+          </>
         )}
+        {problems.map((p) => <p key={p} className="insp-note warn" role="status">{p}</p>)}
+        {one && (
+          <p className="insp-note origin">
+            <b>{ORIGINS[e.origin ?? 'drawn'].name}.</b> {ORIGINS[e.origin ?? 'drawn'].blurb} Lines show how the system is meant to work; none of this is measured traffic.
+          </p>
+        )}
+      </section>
+      <section className="sect">
+        <h5>Path</h5>
+        <p className="insp-note">
+          {one
+            ? bends ? `Shaped by hand, through ${bends} ${bends === 1 ? 'point' : 'points'}. It keeps this shape when things move.` : e.fromSide || e.toSide ? 'Routed automatically, from the side you chose.' : 'Routed automatically around other components.'
+            : shaped.length ? `${shaped.length} of these ${shaped.length === 1 ? 'has' : 'have'} been shaped by hand.` : 'All routed automatically.'}
+          {one && ' Drag a dot on the line to bend it, or an end to move it to another component.'}
+        </p>
+        <div className="insp-actions inline">
+          {one && <button className="btn ghost" onClick={() => s.addBend(e.id)}><Spline size={14} />Add a bend</button>}
+          <button className="btn ghost" disabled={!shaped.length} onClick={() => s.resetRoute(ids)}><RotateCcw size={14} />Route automatically</button>
+        </div>
+      </section>
+      <section className="sect">
+        <h5>Look</h5>
         <Row label="Line">
           <Segmented size="sm" value={e.style} onChange={(v) => s.patchEdge(ids, { style: v })}
             options={[{ value: 'solid', label: 'Solid' }, { value: 'dashed', label: 'Dashed' }, { value: 'dotted', label: 'Dotted' }]} />
@@ -166,13 +252,12 @@ function EdgeInspector({ edges }: { edges: EdgeT[] }) {
           <Segmented size="sm" value={String(e.width) as any} onChange={(v) => s.patchEdge(ids, { width: Number(v) })}
             options={[{ value: '1.5', label: 'Thin' }, { value: '2', label: 'Regular' }, { value: '3.5', label: 'Bold' }]} />
         </Row>
-      </section>
-      <section className="sect">
-        <h5>Colour</h5>
         <Swatches allowReset value={e.color} onChange={(c) => s.patchEdge(ids, { color: c })} />
       </section>
       <div className="insp-actions">
-        <button className="btn ghost" onClick={() => s.apply((d) => ({ ...d, edges: d.edges.map((x) => (ids.includes(x.id) ? { ...x, from: x.to, to: x.from } : x)) }))}><ArrowLeftRight size={14} />Reverse</button>
+        {one && <button className={'btn ghost' + (tracing === e.id ? ' on' : '')} onClick={() => s.set({ trace: tracing === e.id ? null : e.id })}><Route size={14} />{tracing === e.id ? 'Stop following' : 'Follow the flow'}</button>}
+        <button className="btn ghost" onClick={() => s.reverseEdge(ids)}><ArrowLeftRight size={14} />Reverse</button>
+        {one && <button className="btn ghost" onClick={() => s.twinEdge(e.id)}><Copy size={14} />Second connection</button>}
         <button className="btn ghost danger" onClick={() => s.remove(ids)}><Trash2 size={14} />Delete</button>
       </div>
     </>

@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { costOf, money } from '../core/catalog'
 import { ISO_PITCH, ISO_YAW, pt, unproject } from '../core/iso'
@@ -1323,3 +1323,187 @@ describe('double-click', () => {
   })
 })
 
+describe('shaping a connection', () => {
+  const linked = (extra: object = {}, state: object = {}) => mount(
+    docOf([node('a', 'ec2', 0, 0, { name: 'web' }), node('b', 'rds', 8, 0, { name: 'db' }), node('c', 'sqs', 8, 8, { name: 'jobs' })], [edge('e', 'a', 'b', extra)]),
+    { selection: ['e'], ...state },
+  )
+  const E = () => S().doc.edges[0]
+  const handle = (name: string) => document.querySelector(`[data-handle="${name}"]`)!
+  const names = () => [...new Set([...document.querySelectorAll('[data-handle]')].map((h) => h.getAttribute('data-handle')!))].sort()
+
+  it('a selected connection shows its two ends, a dot on each straight run, and both components marked', () => {
+    linked()
+    expect(names()).toEqual(['ea', 'eb', 'm0'])
+    // the two components it joins are outlined along with the line
+    expect(document.querySelectorAll('.overlay path[stroke-opacity="0.8"]')).toHaveLength(2)
+  })
+  it('shows no handles when it is one of several things selected, or while another tool is up', () => {
+    linked({}, { selection: ['e', 'a'] })
+    expect(names().filter((n) => /^(ea|eb|m\d|w\d)$/.test(n))).toEqual([])
+    cleanup()
+    linked({}, { tool: 'connect' })
+    expect(names().filter((n) => /^(ea|eb|m\d|w\d)$/.test(n))).toEqual([])
+  })
+  it('pulling the dot on a run puts a waypoint there, snapped to the half grid, as one undo step', () => {
+    linked()
+    down(handle('m0'), 5, 1)
+    expect(E().via).toEqual([[5, 1]])
+    move(5.2, 4.3)
+    move(5.2, 4.8)
+    expect(E().via).toEqual([[5, 5]])
+    up(5.2, 4.8)
+    expect(E().via).toEqual([[5, 5]])
+    expect(names()).toContain('w0')
+    expect(S().past).toHaveLength(1)
+    act(() => S().undo())
+    expect(E().via).toBeUndefined()
+    expect(S().selection).toEqual(['e']) // still selected, handles still there
+  })
+  it('a waypoint drags to a new place', () => {
+    linked({ via: [[5, 5]] })
+    expect(names()).toContain('w0')
+    drag(handle('w0'), [5, 5], [3, 6.2])
+    expect(E().via).toEqual([[3, 6]])
+    expect(S().past).toHaveLength(1)
+  })
+  it('a press on a waypoint that never moves changes nothing', () => {
+    linked({ via: [[5, 5]] })
+    down(handle('w0'), 5, 5); up(5, 5)
+    expect(E().via).toEqual([[5, 5]])
+    expect(S().past).toHaveLength(0)
+  })
+  it('dropping a waypoint back on the line takes it out again', () => {
+    linked({ via: [[5, 5]] })
+    drag(handle('w0'), [5, 5], [5, 1]) // straight between the two ends
+    expect(E().via).toBeUndefined()
+  })
+  it('dropping one waypoint onto its neighbour merges them', () => {
+    linked({ via: [[4, 5], [7, 5]] })
+    drag(handle('w1'), [7, 5], [4.2, 5.1])
+    expect(E().via).toEqual([[4, 5]])
+  })
+  it('double-clicking a waypoint removes it', () => {
+    linked({ via: [[4, 5], [7, 5]] })
+    vi.mocked(document.elementFromPoint).mockReturnValue(handle('w0'))
+    fireEvent.doubleClick(svg(), at(4, 5))
+    expect(E().via).toEqual([[7, 5]])
+    vi.mocked(document.elementFromPoint).mockReturnValue(handle('w0'))
+    fireEvent.doubleClick(svg(), at(7, 5))
+    expect(E().via).toBeUndefined()
+  })
+  it('a new waypoint on a shaped line goes in between the right two', () => {
+    linked({ via: [[4, 6], [7, 6]] })
+    // the run between the two existing waypoints
+    const runs = names().filter((n) => n.startsWith('m'))
+    const middle = runs.find((n) => { const el = handle(n); return Math.abs(Number(el.getAttribute('cy')) - at(5.5, 6).clientY + S().view.y) < 400 })!
+    expect(middle).toBeTruthy()
+    const before = E().via!.length
+    down(handle(runs[Math.floor(runs.length / 2)]), 5.5, 6); move(5.5, 9); up(5.5, 9)
+    expect(E().via!.length).toBe(before + 1)
+    expect(E().via![0]).toEqual([4, 6])
+    expect(E().via!.at(-1)).toEqual([7, 6])
+  })
+  it('dragging an end onto another component reconnects it there', () => {
+    linked()
+    down(handle('eb'), 8, 1)
+    vi.mocked(document.elementFromPoint).mockReturnValue(hit('node', 'c'))
+    move(9, 9)
+    expect(document.querySelector('.wire')).not.toBeNull()
+    up(9, 9) // its middle: the router picks the side
+    expect(E()).toMatchObject({ from: 'a', to: 'c' })
+    expect(E().toSide).toBeUndefined()
+    expect(document.querySelector('.wire')).toBeNull()
+    expect(S().past).toHaveLength(1)
+  })
+  it('dropping an end near an edge of a component pins that side', () => {
+    linked()
+    down(handle('eb'), 8, 1)
+    vi.mocked(document.elementFromPoint).mockReturnValue(hit('node', 'b'))
+    move(9, 1.9); up(9, 1.9) // the bottom edge of the same component
+    expect(E()).toMatchObject({ to: 'b', toSide: 's' })
+  })
+  it('dropping an end on bare ground leaves the connection as it was', () => {
+    linked()
+    drag(handle('ea'), [2, 1], [4, 6])
+    expect(E()).toMatchObject({ from: 'a', to: 'b' })
+    expect(S().past).toHaveLength(0)
+  })
+  it('refuses to put both ends on one component, and says why', () => {
+    linked()
+    down(handle('eb'), 8, 1)
+    vi.mocked(document.elementFromPoint).mockReturnValue(hit('node', 'a'))
+    move(1, 1); up(1, 1)
+    expect(E()).toMatchObject({ from: 'a', to: 'b' })
+    expect(S().toasts.at(-1)!.text).toMatch(/two different components/)
+  })
+  it('a click on an end that never moves does nothing', () => {
+    linked()
+    down(handle('ea'), 2, 1); up(2, 1)
+    expect(E()).toMatchObject({ from: 'a', to: 'b' })
+    expect(document.querySelector('.wire')).toBeNull()
+  })
+  it('fingers get a generous invisible target around every handle', () => {
+    stubMedia(COARSE)
+    linked({ via: [[5, 5]] })
+    for (const n of ['ea', 'eb', 'w0']) {
+      const big = [...document.querySelectorAll(`[data-handle="${n}"]`)].find((el) => el.getAttribute('fill') === 'transparent')!
+      expect(Number(big.getAttribute('r'))).toBeGreaterThanOrEqual(17)
+    }
+  })
+  it('a finger drags a waypoint without panning the view', () => {
+    stubMedia(COARSE)
+    linked({ via: [[5, 5]] })
+    const view = S().view
+    const o = { pointerType: 'touch', pointerId: 31 }
+    down(handle('w0'), 5, 5, o); move(5, 8, o); up(5, 8, o)
+    expect(E().via).toEqual([[5, 8]])
+    expect(S().view).toEqual(view)
+  })
+})
+
+describe('following a flow on the canvas', () => {
+  const chain = (state: object = {}) => mount(
+    docOf([node('a', 'ec2', 0, 0, { name: 'web' }), node('b', 'rds', 8, 0, { name: 'db' }), node('c', 'sqs', 8, 8, { name: 'jobs' }), node('z', 's3', 20, 20, { name: 'apart' })], [edge('e', 'a', 'b'), edge('f', 'a', 'c')]),
+    state,
+  )
+  const nodeEl = (id: string) => hit('node', id) as Element
+  const edgeEl = (id: string) => hit('edge', id).closest('.edge')!
+  it('nothing steps back until a flow is being followed', () => {
+    chain()
+    expect(document.querySelectorAll('.nd.off, .edge.off, .edge.on')).toHaveLength(0)
+  })
+  it('what is on the paths stays lit and shows its direction; the rest steps back', () => {
+    chain({ trace: 'b' })
+    expect(nodeEl('a')).not.toHaveClass('off'); expect(nodeEl('b')).not.toHaveClass('off')
+    expect(nodeEl('c')).toHaveClass('off'); expect(nodeEl('z')).toHaveClass('off')
+    expect(edgeEl('e')).toHaveClass('on'); expect(edgeEl('f')).toHaveClass('off')
+    expect(edgeEl('e').querySelector('.edge-flow')).not.toBeNull()
+    expect(edgeEl('f').querySelector('.edge-flow')).toBeNull()
+  })
+  it('a dependency never shows movement, because nothing travels along it', () => {
+    mount(docOf([node('a'), node('b', 'rds', 8, 0)], [edge('e', 'a', 'b', { kind: 'dependency' })]), { trace: 'a', flow: true })
+    expect(edgeEl('e')).toHaveClass('on')
+    expect(edgeEl('e').querySelector('.edge-flow')).toBeNull()
+  })
+  it('a connection that no longer exists is simply not followed', () => {
+    chain({ trace: 'gone' })
+    expect(document.querySelectorAll('.nd.off, .edge.off')).toHaveLength(0)
+  })
+})
+
+describe('what a connection shows', () => {
+  it('writes its label, protocol and port along the line', () => {
+    mount(docOf([node('a'), node('b', 'rds', 8, 0)], [edge('e', 'a', 'b', { label: 'orders', protocol: 'PostgreSQL', port: '5432' })]))
+    expect(hit('edge', 'e').closest('.edge')!.querySelector('text')).toHaveTextContent('ORDERS · POSTGRESQL 5432')
+  })
+  it('previews a new connection along the route it would take', () => {
+    mount(docOf([node('a'), node('b', 'rds', 8, 0), node('w', 's3', 4, 0)]), { selection: ['a'] })
+    down(document.querySelector('[data-handle="connect"]')!, 1, 1)
+    vi.mocked(document.elementFromPoint).mockReturnValue(hit('node', 'b'))
+    move(9, 1)
+    // not a straight line through the component in between
+    expect(document.querySelector('.wire')!.getAttribute('d')!.match(/[LQ]/g)!.length).toBeGreaterThan(2)
+    up(9, 1)
+  })
+})

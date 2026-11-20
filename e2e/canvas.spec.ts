@@ -81,7 +81,8 @@ test.describe('canvas editing', () => {
     await app.drag(start, await app.world(7, 1))
     await expect(app.edges()).toHaveCount(1)
     await expect(page.locator('.title-static')).toHaveText('Connection')
-    await expect(page.locator('.insp-sub')).toHaveText('web-1 → orders-db')
+    // a new line into a database is read as data, and says so in a sentence
+    await expect(page.locator('.insp-sub')).toHaveText('web-1 reads and writes orders-db')
     // the reverse direction counts as the same connection
     await app.pick('b')
     const h2 = await page.locator('.connect-handle').boundingBox()

@@ -1,14 +1,14 @@
 import { describe, expect, it } from 'vitest'
 import {
-  CATALOG, CATALOG_LIST, CATEGORIES, COMMIT_DISCOUNT, EC2_FAMILY, HOURS, PROVIDERS, RDS_CLASS, REGIONS, SIZE_MULT,
-  costOf, defOf, defaultProps, docCost, docProviders, equivalent, money, nodeColor, nodeName, providerOf, roleOf, translateDoc,
+  CATALOG, CATALOG_LIST, CATEGORIES, EC2_FAMILY, PROVIDERS, RDS_CLASS, REGIONS,
+  costOf, defOf, defaultProps, docProviders, equivalent, money, nodeColor, nodeName, providerOf, roleOf, translateDoc,
 } from './catalog'
 import { CLOUD_DEFS } from './clouds'
+import { RATE_CARD } from './pricing'
 import { docOf, node } from '../test/helpers'
 
 const n = (type: string, props: Record<string, any> = {}) => node('x', type, 0, 0, { props: { ...defaultProps(type), ...props } })
 const cost = (type: string, props: Record<string, any> = {}, region = 'us-east-1', model: any = 'ondemand') => costOf(n(type, props), region, model)
-const line = (type: string, props: Record<string, any>, i: number) => cost(type, props).lines[i].monthly
 
 describe('catalog integrity', () => {
   it('lists every definition once, grouped by cloud', () => {
@@ -56,12 +56,11 @@ describe('catalog integrity', () => {
       expect(t).toMatch(d.provider === 'aws' ? /^aws_/ : d.provider === 'gcp' ? /^google_/ : /^azurerm_/)
     }
   })
-  it('has usable regions, providers and discounts', () => {
-    expect(REGIONS[0]).toMatchObject({ id: 'us-east-1', mult: 1 })
-    expect(new Set(REGIONS.map((r) => r.id)).size).toBe(REGIONS.length)
-    for (const r of REGIONS) { expect(r.mult).toBeGreaterThanOrEqual(1); expect(r.gcp && r.azure && r.name).toBeTruthy() }
+  it('has usable regions and providers', () => {
+    expect(REGIONS.map((r) => r.id)).toContain('us-east-1')
+    // every region the app offers has its own AWS price list loaded
+    for (const r of REGIONS) { expect(RATE_CARD.regions).toContain(r.id); expect(r.gcp).toBeTruthy(); expect(r.azure).toBeTruthy() }
     expect(PROVIDERS.map((p) => p.id)).toEqual(['aws', 'gcp', 'azure'])
-    expect(COMMIT_DISCOUNT).toEqual({ ondemand: 0, commit1: 0.28, commit3: 0.5 })
     for (const f of Object.values(EC2_FAMILY)) if (f.upgrade) expect(EC2_FAMILY[f.upgrade].arm).toBe(true)
     for (const c of Object.values(RDS_CLASS)) if (c.upgrade) expect(RDS_CLASS[c.upgrade]).toBeTruthy()
   })
@@ -98,191 +97,6 @@ describe('every component, with every option', () => {
         expect(Math.min(...prices)).toBeGreaterThan(0)
       }
     }
-  })
-})
-
-describe('AWS pricing', () => {
-  it('EC2: family × size × count, Windows surcharge, gp3 disk', () => {
-    expect(line('ec2', { family: 'm5', size: 'large', count: 1, disk: 0 }, 0)).toBeCloseTo(0.096 * HOURS)
-    expect(line('ec2', { family: 'm5', size: '2xlarge', count: 3, disk: 0 }, 0)).toBeCloseTo(0.096 * 4 * 3 * HOURS)
-    expect(line('ec2', { family: 'm5', size: 'nano', count: 1, disk: 0 }, 0)).toBeCloseTo((0.096 / 16) * HOURS)
-    expect(line('ec2', { family: 'm5', size: 'xlarge', os: 'windows', count: 1, disk: 0 }, 0)).toBeCloseTo((0.096 + 0.092) * 2 * HOURS)
-    expect(line('ec2', { count: 4, disk: 50 }, 1)).toBeCloseTo(200 * 0.08)
-    expect(cost('ec2', { count: 4, disk: 50 }).lines.map((l) => l.label)).toEqual(['4 × m7g.large', '200 GB gp3'])
-    for (const size of Object.keys(SIZE_MULT)) expect(line('ec2', { family: 't3', size, count: 1 }, 0)).toBeCloseTo(0.0832 * SIZE_MULT[size] * HOURS)
-  })
-  it('EC2 falls back to a sensible rate for an unknown family or size', () => {
-    expect(line('ec2', { family: 'zz9', size: 'large', count: 1, disk: 0 }, 0)).toBeCloseTo(0.1 * HOURS)
-    expect(line('ec2', { family: 'm5', size: 'colossal', count: 1, disk: 0 }, 0)).toBeCloseTo(0.096 * HOURS)
-  })
-  it('Lambda: requests plus GB-seconds, cheaper on arm64', () => {
-    const p = { requests: 10, duration: 200, memory: '1024' }
-    expect(line('lambda', { ...p, arch: 'x86_64' }, 0)).toBeCloseTo(2)
-    expect(line('lambda', { ...p, arch: 'x86_64' }, 1)).toBeCloseTo(2e6 * 0.0000166667)
-    expect(line('lambda', { ...p, arch: 'arm64' }, 1)).toBeCloseTo(2e6 * 0.0000133334)
-    expect(cost('lambda', { ...p, memory: '2048' }).lines[1].label).toBe('4,000,000 GB-seconds')
-    expect(cost('lambda', { requests: 0 }).lines).toEqual([])
-  })
-  it('ECS and EKS', () => {
-    expect(cost('ecs', { tasks: 4, vcpu: '2', mem: '8' }).monthly).toBeCloseTo(4 * (2 * 0.04048 + 8 * 0.004445) * HOURS)
-    const eks = cost('eks', { nodes: 5, family: 'm5', size: 'xlarge' })
-    expect(eks.lines[0]).toMatchObject({ label: 'Control plane', monthly: 73 })
-    expect(eks.lines[1].monthly).toBeCloseTo(0.096 * 2 * 5 * HOURS)
-    expect(cost('eks', { nodes: 0 }).lines.map((l) => l.label)).toEqual(['Control plane'])
-  })
-  it('RDS: engine multiplier, Multi-AZ doubling, replicas, storage', () => {
-    const base = { family: 'm5', size: 'large', storage: 100, engine: 'postgres' }
-    expect(line('rds', base, 0)).toBeCloseTo(0.171 * HOURS)
-    expect(line('rds', base, 1)).toBeCloseTo(11.5)
-    expect(line('rds', { ...base, engine: 'mysql' }, 0)).toBeCloseTo(0.171 * 0.96 * HOURS)
-    expect(line('rds', { ...base, engine: 'aurora' }, 0)).toBeCloseTo(0.171 * 1.2 * HOURS)
-    expect(line('rds', { ...base, engine: 'sqlserver' }, 0)).toBeCloseTo(0.171 * 2.1 * HOURS)
-    const ha = cost('rds', { ...base, multiAZ: true, replicas: 2 })
-    expect(ha.lines.map((l) => l.label)).toEqual(['db.m5.large (Multi-AZ)', '100 GB storage', '2 read replicas'])
-    expect(ha.lines[0].monthly).toBeCloseTo(0.171 * HOURS * 2)
-    expect(ha.lines[1].monthly).toBeCloseTo(23)
-    expect(ha.lines[2].monthly).toBeCloseTo(0.171 * HOURS * 2)
-    expect(cost('rds', { ...base, replicas: 1 }).lines[2].label).toBe('1 read replica')
-  })
-  it('storage and data services', () => {
-    expect(cost('dynamodb', { reads: 10, writes: 2, storage: 40 }).monthly).toBeCloseTo(1.25 + 1.25 + 10)
-    expect(cost('elasticache', { node: 'cache.t4g.micro', nodes: 3 }).monthly).toBeCloseTo(0.016 * HOURS * 3)
-    expect(cost('s3', { storage: 1000, class: 'standard', requests: 0, egress: 0 }).monthly).toBeCloseTo(23)
-    expect(cost('s3', { storage: 1000, class: 'deep-archive', requests: 0, egress: 0 }).monthly).toBeCloseTo(0.99)
-    // the first 100 GB of egress are free
-    expect(cost('s3', { storage: 0, requests: 0, egress: 100 }).lines).toEqual([])
-    expect(cost('s3', { storage: 0, requests: 0, egress: 300 }).monthly).toBeCloseTo(18)
-    expect(cost('ebs', { vol: 'io2', size: 100 }).monthly).toBeCloseTo(12.5)
-    expect(cost('efs', { storage: 10 }).monthly).toBeCloseTo(3)
-    expect(cost('redshift', { node: 'dc2.large', nodes: 2 }).monthly).toBeCloseTo(0.25 * HOURS * 2)
-    expect(cost('opensearch', { node: 't3.small.search', nodes: 2, storage: 10 }).monthly).toBeCloseTo(0.036 * HOURS * 2 + 20 * 0.122)
-    expect(cost('kinesis', { shards: 1, records: 0 }).lines).toMatchObject([{ label: '1 shard' }])
-    expect(cost('cloudwatch', { metrics: 10, logs: 4 }).monthly).toBeCloseTo(5)
-  })
-  it('network and messaging services, including free tiers', () => {
-    expect(cost('alb', { kind: 'application', lcu: 10 }).monthly).toBeCloseTo((0.0225 + 0.08) * HOURS)
-    expect(cost('alb', { kind: 'network', lcu: 10 }).monthly).toBeCloseTo((0.0225 + 0.06) * HOURS)
-    expect(cost('cloudfront', { transfer: 100, requests: 5 }).monthly).toBeCloseTo(13.5)
-    expect(cost('route53', { zones: 2, queries: 0 }).lines).toMatchObject([{ label: '2 hosted zones', monthly: 1 }])
-    expect(cost('route53', { zones: 1, queries: 0 }).lines[0].label).toBe('1 hosted zone')
-    expect(cost('apigw', { kind: 'http', requests: 10 }).monthly).toBeCloseTo(10)
-    expect(cost('apigw', { kind: 'rest', requests: 10 }).monthly).toBeCloseTo(35)
-    expect(cost('apigw', { kind: 'rest', requests: 10 }).lines[0].label).toBe('10M REST requests')
-    expect(cost('nat', { data: 100 }).monthly).toBeCloseTo(0.045 * HOURS + 4.5)
-    expect(cost('igw')).toEqual({ lines: [], monthly: 0 })
-    expect(cost('sqs', { requests: 1 }).monthly).toBe(0)
-    expect(cost('sqs', { requests: 11, kind: 'standard' }).monthly).toBeCloseTo(4)
-    expect(cost('sqs', { requests: 11, kind: 'fifo' }).monthly).toBeCloseTo(5)
-    expect(cost('sns', { messages: 0.5 }).monthly).toBe(0)
-    expect(cost('sns', { messages: 3 }).monthly).toBeCloseTo(1)
-    expect(cost('eventbridge', { events: 7 }).monthly).toBeCloseTo(7)
-    expect(cost('waf', { rules: 5, requests: 10 }).monthly).toBeCloseTo(16)
-    expect(cost('cognito', { mau: 10000 }).monthly).toBe(0)
-    expect(cost('cognito', { mau: 30000 }).monthly).toBeCloseTo(110)
-    expect(cost('secrets', { secrets: 10, keys: 2 }).monthly).toBeCloseTo(6)
-  })
-  it('external components cost only what you say they do', () => {
-    for (const t of ['users', 'internet', 'mobile', 'onprem']) expect(cost(t)).toEqual({ lines: [], monthly: 0 })
-    expect(cost('saas', { fee: 0 }).monthly).toBe(0)
-    expect(cost('saas', { fee: 99 })).toEqual({ lines: [{ label: 'Subscription', monthly: 99 }], monthly: 99 })
-    expect(cost('block', { fee: '250' }).monthly).toBe(250)
-    expect(cost('block', { fee: -5 }).monthly).toBe(0)
-  })
-})
-
-describe('Google Cloud and Azure pricing', () => {
-  it('virtual machines: machine rate, Windows uplift, boot disks', () => {
-    expect(line('gcp-gce', { machine: 'e2-standard-2', count: 2, disk: 0 }, 0)).toBeCloseTo(0.067 * HOURS * 2)
-    expect(line('gcp-gce', { machine: 'e2-standard-2', os: 'windows', count: 1, disk: 0 }, 0)).toBeCloseTo(0.067 * 1.48 * HOURS)
-    expect(line('az-vm', { machine: 'Standard_D4s_v5', count: 1, disk: 100 }, 1)).toBeCloseTo(10)
-    expect(cost('az-vm', { count: 3 }).lines[0].label).toBe('3 × Standard_D2s_v5')
-    expect(defOf('gcp-gce').summary!({ count: 1, machine: 'e2-micro' })).toBe('e2-micro')
-    expect(defOf('gcp-gce').summary!({ count: 3, machine: 'e2-micro' })).toBe('3 × e2-micro')
-    expect(defOf('gcp-gce').tfAttrs!({ count: 1, machine: 'e2-micro' })).toEqual([false, 'machine_type = "e2-micro"'])
-    expect(defOf('az-vm').tfAttrs!({ count: 2, machine: 'Standard_B1s' })).toEqual(['count = 2', 'size = "Standard_B1s"'])
-  })
-  it('functions have a free allowance', () => {
-    expect(cost('gcp-functions', { requests: 2, duration: 100, memory: '256' }).monthly).toBe(0)
-    const c = cost('gcp-functions', { requests: 12, duration: 1000, memory: '1024' })
-    expect(c.lines[0].monthly).toBeCloseTo(10 * 0.4)
-    expect(c.lines[1].monthly).toBeCloseTo((12e6 - 400000) * 0.0000165)
-    expect(cost('az-functions', { requests: 12, duration: 1000, memory: '1024' }).lines[0].monthly).toBeCloseTo(2)
-  })
-  it('containers and Kubernetes', () => {
-    expect(cost('gcp-run', { tasks: 2, vcpu: '1', mem: '2' }).monthly).toBeCloseTo(2 * (0.0864 + 0.018) * HOURS)
-    expect(cost('az-containerapps', { tasks: 1, vcpu: '0.5', mem: '1' }).monthly).toBeCloseTo((0.0432 + 0.0108) * HOURS)
-    expect(cost('gcp-gke', { nodes: 3, machine: 'e2-standard-4' }).monthly).toBeCloseTo(73 + 0.134 * HOURS * 3)
-    expect(cost('az-aks', { nodes: 0 }).monthly).toBeCloseTo(73)
-  })
-  it('managed SQL: tier × engine, HA doubling, replicas', () => {
-    const c = cost('gcp-sql', { tier: 'db-custom-4-15360', engine: 'sqlserver', multiAZ: true, replicas: 1, storage: 50 })
-    expect(c.lines.map((l) => l.label)).toEqual(['db-custom-4-15360 (HA)', '50 GB storage', '1 read replica'])
-    expect(c.lines[0].monthly).toBeCloseTo(0.2772 * 1.9 * HOURS * 2)
-    expect(c.lines[1].monthly).toBeCloseTo(50 * 0.17 * 2)
-    expect(c.lines[2].monthly).toBeCloseTo(0.2772 * 1.9 * HOURS)
-    expect(cost('az-sql', { tier: 'B_Standard_B1ms', engine: 'postgres', storage: 0 }).monthly).toBeCloseTo(0.026 * HOURS)
-    expect(cost('gcp-sql', { replicas: 3 }).lines[2].label).toBe('3 read replicas')
-    expect(defOf('gcp-sql').tfAttrs!({ tier: 'db-f1-micro' })).toEqual(['settings {\n    tier = "db-f1-micro"\n  }'])
-    expect(defOf('az-sql').tfAttrs!({ tier: 'B_Standard_B2s' })).toEqual(['sku_name = "B_Standard_B2s"'])
-    expect(defOf('az-sql').summary!({ engine: 'mysql', tier: 'X' })).toBe('mysql · X')
-  })
-  it('object storage uses each cloud\'s own class names and falls back to the first class', () => {
-    expect(cost('gcp-gcs', { storage: 1000, class: 'infrequent-access', requests: 0, egress: 0 }).lines).toEqual([{ label: '1000 GB Nearline', monthly: 10 }])
-    expect(cost('az-blob', { storage: 1000, class: 'standard', requests: 5, egress: 200 }).monthly).toBeCloseTo(18 + 2 + 8.7)
-    expect(cost('az-blob', { storage: 1000, class: 'bogus', requests: 0, egress: 0 }).lines[0].label).toBe('1000 GB Hot')
-    expect(defOf('gcp-gcs').summary!({ storage: 5, class: 'deep-archive' })).toBe('5 GB · Archive')
-    expect(defOf('gcp-gcs').summary!({ storage: 5, class: 'bogus' })).toBe('5 GB · Standard')
-  })
-  it('metered services: base fees, units in labels and summaries', () => {
-    const nat = cost('gcp-nat', { m0: 100 })
-    expect(nat.lines).toEqual([{ label: 'Base fee', monthly: 32, commit: undefined }, { label: '100 GB/mo data processed', monthly: 4.5, commit: undefined }])
-    expect(defOf('gcp-nat').summary!({ m0: 1500 })).toBe('1,500 GB/mo')
-    expect(defOf('docdb').summary!({ m0: 3 })).toBe('3')
-    expect(cost('shield').lines).toMatchObject([{ label: 'Base fee', monthly: 3000 }])
-    expect(defOf('shield').summary!({})).toBe('Flat rate')
-    expect(cost('iam')).toEqual({ lines: [], monthly: 0 })
-    expect(defOf('iam').summary!({})).toBe('No direct charge')
-    expect(defOf('az-servicebus').props.map((p) => p.key)).toEqual(['m0', 'dlq'])
-    expect(defOf('gcp-tasks').props.at(-1)).toMatchObject({ key: 'dlq', type: 'toggle', default: false })
-  })
-})
-
-describe('regions and commitments', () => {
-  it('multiplies every line by the region factor and ignores unknown regions', () => {
-    const base = cost('rds').monthly
-    for (const r of REGIONS) expect(cost('rds', {}, r.id).monthly).toBeCloseTo(base * r.mult, 6)
-    expect(cost('rds', {}, 'mars-north-1').monthly).toBeCloseTo(base, 6)
-  })
-  it('discounts only the committable lines', () => {
-    const od = cost('ec2', { family: 'm5', size: 'large', count: 1, disk: 100 })
-    const c1 = cost('ec2', { family: 'm5', size: 'large', count: 1, disk: 100 }, 'us-east-1', 'commit1')
-    const c3 = cost('ec2', { family: 'm5', size: 'large', count: 1, disk: 100 }, 'us-east-1', 'commit3')
-    expect(c1.lines[0].monthly).toBeCloseTo(od.lines[0].monthly * 0.72)
-    expect(c3.lines[0].monthly).toBeCloseTo(od.lines[0].monthly * 0.5)
-    expect(c1.lines[1].monthly).toBeCloseTo(od.lines[1].monthly)
-    // pay-per-use services are unaffected
-    for (const t of ['lambda', 's3', 'dynamodb', 'sqs', 'cloudfront', 'gcp-functions', 'az-blob']) expect(cost(t, {}, 'us-east-1', 'commit3').monthly, t).toBeCloseTo(cost(t).monthly, 6)
-    for (const t of ['rds', 'ecs', 'eks', 'elasticache', 'redshift', 'opensearch', 'gcp-gce', 'az-sql', 'docdb', 'gcp-memorystore']) expect(cost(t, {}, 'us-east-1', 'commit1').monthly, t).toBeLessThan(cost(t).monthly)
-  })
-  it('region and commitment compose', () => {
-    const p = { family: 'm5', size: 'large', count: 1, disk: 0 }
-    expect(cost('ec2', p, 'sa-east-1', 'commit3').monthly).toBeCloseTo(0.096 * HOURS * 1.55 * 0.5)
-  })
-  it('fills in missing settings from the defaults', () => {
-    expect(costOf({ id: 'x', type: 'ec2', x: 0, y: 0, props: {} }, 'us-east-1').monthly).toBeCloseTo(cost('ec2').monthly)
-    expect(costOf({ id: 'x', type: 'ec2', x: 0, y: 0, props: { count: 2 } }, 'us-east-1').lines[0].label).toBe('2 × m7g.large')
-  })
-  it('totals a blueprint per component and per category', () => {
-    const d = docOf([node('a', 'ec2'), node('b', 'ec2'), node('c', 'rds'), node('u', 'users'), node('s', 's3')], [], { region: 'eu-central-1' })
-    const c = docCost(d)
-    expect(c.perNode.size).toBe(5)
-    expect(c.perNode.get('u')).toEqual({ lines: [], monthly: 0 })
-    expect(c.byCategory.get('compute')).toBeCloseTo(cost('ec2', {}, 'eu-central-1').monthly * 2)
-    expect(c.byCategory.get('database')).toBeCloseTo(cost('rds', {}, 'eu-central-1').monthly)
-    expect(c.byCategory.get('external')).toBe(0)
-    expect(c.total).toBeCloseTo([...c.byCategory.values()].reduce((s, v) => s + v, 0))
-    expect(docCost(d, 'commit1').total).toBeLessThan(c.total)
-    expect(docCost(docOf())).toMatchObject({ total: 0 })
   })
 })
 

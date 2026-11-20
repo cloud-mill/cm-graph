@@ -108,12 +108,12 @@ test.describe('inspector', () => {
     await page.keyboard.press('c')
     await app.drag(await app.world(1, 1), await app.world(7, 1))
     await page.keyboard.press('Escape')
-    await page.locator('.panel.right').getByPlaceholder('e.g. HTTPS, gRPC, events').fill('SQL')
+    await page.locator('.panel.right').getByLabel('Connection label').fill('SQL')
     await page.getByRole('radio', { name: 'Dashed' }).click()
     await page.getByRole('radio', { name: 'Both' }).click()
     await page.getByRole('radio', { name: 'Bold' }).click()
     await page.getByRole('button', { name: 'Reverse' }).click()
-    await expect(page.locator('.insp-sub')).toHaveText('orders-db → web-1')
+    await expect(page.locator('.insp-sub')).toHaveText('orders-db reads and writes web-1')
     let doc = await app.settled()
     expect(doc.edges).toMatchObject([{ from: 'b', to: 'a', label: 'SQL', style: 'dashed', arrow: 'both', width: 3.5 }])
     await expect(page.locator('.canvas-svg .edge text')).toHaveText('SQL')
@@ -203,8 +203,10 @@ test.describe('budget and advisor', () => {
     expect(dl.suggestedFilename()).toBe('e2e-blueprint-budget.csv')
     const text = (await (await dl.createReadStream()).toArray()).join('')
     const lines = text.trim().split('\n')
-    expect(lines[0]).toBe('Component,Service,Category,Line item,Monthly (USD),Yearly (USD)')
-    expect(lines.at(-1)).toMatch(/^Total,,,us-east-1 · ondemand,\d+\.\d\d,\d+\.\d\d$/)
+    // each line says what it rests on, and the total row says where the prices came from
+    expect(lines[0]).toBe('Component,Service,Category,Line item,Monthly (USD),Yearly (USD),Basis,Note')
+    expect(lines.at(-1)).toMatch(/^Total,,,us-east-1 · ondemand,\d+\.\d\d,\d+\.\d\d,,"AWS prices: AWS Price List Bulk API, read \d{4}-\d\d-\d\d\./)
+    expect(lines.slice(1, -1).every((l) => /Published rate|Estimate|Published allowance/.test(l))).toBe(true)
   })
 
   test('an empty blueprint has calm empty states in every tab', async ({ page, app }) => {
@@ -257,5 +259,67 @@ test.describe('budget and advisor', () => {
     await app.tab('Budget').click()
     expect(await page.locator('.panel.right').innerText()).not.toMatch(/undefined|NaN/)
     expect(await page.locator('.canvas-svg').innerHTML()).not.toMatch(/undefined|NaN/)
+  })
+})
+
+/** Prices as displayed: the same number everywhere it appears, moving by published amounts when settings change. */
+test.describe('pricing on screen', () => {
+  const dollars = (t: string) => Number(t.replace(/[^0-9.]/g, ''))
+  // one billable component; the other two cost nothing and are there so the grid helpers have their three reference points
+  const pair = () => makeDoc([{ id: 'a', type: 'ec2', x: 0, y: 0, name: 'web', props: { family: 'm5', size: 'large', os: 'linux', count: 1, disk: 0 } }, { id: 'b', type: 'users', x: 6, y: 0 }, { id: 'c', type: 'igw', x: 0, y: 6 }])
+
+  test('one instance costs its published hourly price for a month, in the footer, the inspector and the budget alike', async ({ page, app }) => {
+    await app.open(pair())
+    // m5.large in N. Virginia is $0.096 an hour: $70.08 over 730 hours
+    await expect(page.locator('.hud-cell.cost')).toContainText('$70.08')
+    await app.pick('a')
+    await expect(page.locator('.cost-total')).toContainText('$70.08')
+    await expect(page.locator('.cost-line').first()).toHaveClass(/fixed/)
+    // a size up is the published price of that size ($0.192), and Windows its own published price ($0.376)
+    await page.getByRole('combobox', { name: 'Size' }).click()
+    await page.getByRole('option', { name: 'xlarge', exact: true }).click()
+    await expect(page.locator('.cost-total')).toContainText('$140') // $140.16: amounts over $100 are shown in whole dollars
+    await page.getByRole('combobox', { name: 'Platform' }).click()
+    await page.getByRole('option', { name: 'Windows' }).click()
+    await expect(page.locator('.cost-total')).toContainText('$274') // $274.48
+    await expect(page.locator('.hud-cell.cost')).toContainText('$274')
+    await page.getByRole('tab', { name: /Budget/ }).click()
+    await expect(page.locator('.budget-center .big')).toHaveText('$274')
+    // and to the cent in the breakdown
+    await expect(page.locator('.basis-row.fixed .mono')).toHaveText('$274')
+    expect((await app.settled()).nodes[0].props).toMatchObject({ size: 'xlarge', os: 'windows' })
+  })
+
+  test('a region reprices from that region\'s own list, and a commitment from published reserved rates', async ({ page, app }) => {
+    await app.open(pair())
+    await page.getByRole('tab', { name: /Budget/ }).click()
+    await expect(page.locator('.budget-center .big')).toHaveText('$70.08')
+    await page.waitForTimeout(400) // the panel has finished sliding in
+    await page.getByRole('combobox', { name: 'Region' }).click()
+    await page.getByRole('option', { name: 'eu-central-1' }).click()
+    // Frankfurt publishes m5.large at $0.115: $83.95 a month
+    await expect(page.locator('.budget-center .big')).toHaveText('$83.95')
+    await page.getByRole('radio', { name: '1-yr commit' }).click()
+    // and $0.072 reserved for a year with no upfront payment
+    await expect(page.locator('.budget-center .big')).toHaveText('$52.56')
+    await expect(page.getByText(/published reserved rate with no upfront payment/)).toBeVisible()
+  })
+
+  test('the budget shows what the total rests on, the free allowances, and where the prices came from', async ({ page, app }) => {
+    await page.goto('/')
+    await page.getByText('Three-tier web app', { exact: true }).first().click()
+    await app.ready()
+    await page.getByRole('tab', { name: /Budget/ }).click()
+    const fixed = dollars(await page.locator('.basis-row.fixed .mono').innerText()), usage = dollars(await page.locator('.basis-row.usage .mono').innerText())
+    const est = dollars(await page.locator('.basis-row.estimate .mono').innerText()), free = dollars(await page.locator('.basis-row.credit .mono').innerText())
+    const total = dollars(await page.locator('.budget-center .big').innerText())
+    expect(est).toBe(0) // an all-AWS template rests on no estimates
+    expect(Math.abs(fixed + usage + est - free - total)).toBeLessThan(2) // whole-dollar rounding on screen
+    expect(total).toBe(1088)
+    await expect(page.locator('.basis-row.credit')).toContainText('CloudFront data transfer')
+    await expect(page.getByRole('link', { name: 'AWS Price List Bulk API' })).toBeVisible()
+    await expect(page.getByText(/Everything runs all month: 730 hours/)).toBeVisible()
+    // the footer agrees with the panel
+    await expect(page.locator('.hud-cell.cost')).toContainText('$1,088')
   })
 })

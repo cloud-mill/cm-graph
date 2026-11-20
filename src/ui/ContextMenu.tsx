@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { fitView } from '../canvas/camera'
 import { keys } from './atoms'
+import { useBackLayer } from '../core/nav'
 import { useStore } from '../core/store'
 import { fitAreaToContents, selectAll, tidy, wrapSelectionInArea } from './actions'
 
@@ -26,6 +27,7 @@ export function ContextMenu({ menu, onClose }: { menu: MenuState; onClose: () =>
   // swapped during dispatch would miss the very Escape it is waiting for
   const closeRef = useRef(onClose)
   useLayoutEffect(() => { closeRef.current = onClose })
+  useBackLayer(true, onClose)
   useEffect(() => {
     const close = (e: Event) => { if (!ref.current?.contains(e.target as Node)) closeRef.current() }
     const key = (e: KeyboardEvent) => { if (e.key === 'Escape') closeRef.current() }
@@ -38,12 +40,16 @@ export function ContextMenu({ menu, onClose }: { menu: MenuState; onClose: () =>
   const items: Item[] = []
   if (menu.target) {
     if (menu.target === 'edge') {
-      items.push({ label: 'Reverse direction', run: () => s.apply((d) => ({ ...d, edges: d.edges.map((e) => (sel.includes(e.id) ? { ...e, from: e.to, to: e.from } : e)) })) })
+      const shaped = s.doc.edges.some((e) => sel.includes(e.id) && (e.via?.length || e.fromSide || e.toSide))
+      items.push({ label: 'Follow the flow', run: () => s.set({ trace: sel[0] }) }, { label: 'Reverse direction', run: () => s.reverseEdge(sel) })
+      if (sel.length === 1) items.push({ label: 'Add a bend', run: () => { s.addBend(sel[0]) } })
+      if (shaped) items.push({ label: 'Route automatically', run: () => s.resetRoute(sel) })
     } else {
       items.push({ label: 'Duplicate', kbd: '⌘D', run: () => s.duplicate(sel) }, { label: 'Copy', kbd: '⌘C', run: () => s.copy() })
     }
     if (menu.target === 'node') {
       items.push({ label: 'Wrap in group', run: wrapSelectionInArea }, { label: 'Zoom to selection', run: () => fitView(sel) })
+      if (sel.length === 1 && s.doc.edges.some((e) => e.from === sel[0] || e.to === sel[0])) items.push({ label: 'Follow the flow', run: () => s.set({ trace: sel[0] }) })
     }
     if (menu.target === 'area') items.push({ label: 'Fit to contents', run: () => fitAreaToContents(sel[0]) })
     items.push({ label: 'Edit properties', kbd: '↵', run: () => useStore.setState((st) => ({ panel: 'inspect', focusName: st.focusName + 1 })) })

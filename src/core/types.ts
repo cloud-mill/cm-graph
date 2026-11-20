@@ -20,6 +20,15 @@ export const footOf = (n: Pick<NodeT, 'scale'>) => 2 * (n.scale ?? 1)
 /** centre of a component's footprint */
 export const centerOf = (n: Pick<NodeT, 'x' | 'y' | 'scale'>): [number, number] => [n.x + footOf(n) / 2, n.y + footOf(n) / 2]
 
+/** A side of a component's footprint: north is -y, east is +x. */
+export type Side = 'n' | 'e' | 's' | 'w'
+
+/** What a connection means. It decides how the line is drawn by default and how it is described. */
+export type LinkKind = 'request' | 'data' | 'event' | 'replication' | 'dependency'
+
+/** How a connection came to be in the diagram. None of these is observed traffic. */
+export type LinkOrigin = 'drawn' | 'imported' | 'inferred'
+
 export interface EdgeT {
   id: ID
   from: ID
@@ -29,6 +38,18 @@ export interface EdgeT {
   style: 'solid' | 'dashed' | 'dotted'
   arrow: 'none' | 'end' | 'both'
   width: number
+  /** the relationship this line stands for; absent on older files, which read as a plain connection */
+  kind?: LinkKind
+  /** e.g. HTTPS, gRPC, PostgreSQL */
+  protocol?: string
+  /** e.g. 443, or 5432 */
+  port?: string
+  origin?: LinkOrigin
+  /** waypoints the user placed, in ground coordinates. A route with these is theirs and is never re-planned */
+  via?: [number, number][]
+  /** sides the user pinned the ends to; otherwise each end uses the side facing where the line goes */
+  fromSide?: Side
+  toSide?: Side
 }
 
 export type AreaKind = 'vpc' | 'subnet' | 'zone' | 'group'
@@ -68,11 +89,20 @@ export interface Doc {
 
 export type PricingModel = 'ondemand' | 'commit1' | 'commit3'
 
+/** How far a cost line can be trusted: see `core/pricing`. */
+export type CostBasis = 'fixed' | 'usage' | 'estimate'
+
 export interface CostLine {
   label: string
   monthly: number
   /** eligible for commitment discounts (savings plans / reserved) */
   commit?: boolean
+  /** absent on a line that has not been classified, which reads as an estimate */
+  basis?: CostBasis
+  /** what the figure assumes or stands in for */
+  note?: string
+  /** metered usage that counts towards an account-wide free allowance: key, quantity and the rate it was priced at */
+  meter?: { key: string; qty: number; rate: number }
 }
 
 export const uid = () =>

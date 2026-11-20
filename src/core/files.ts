@@ -1,4 +1,5 @@
-import { costOf, defOf, nodeName } from './catalog'
+import { defOf, docCost, nodeName } from './catalog'
+import { RATE_CARD } from './pricing'
 import type { Doc, PricingModel } from './types'
 
 /**
@@ -24,16 +25,18 @@ const csvCell = (v: string | number) => {
   return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s
 }
 
+const BASIS_WORD = { fixed: 'Published rate, provisioned capacity', usage: 'Published rate, usage you entered', estimate: 'Estimate' } as const
+
 export function budgetCsv(doc: Doc, pricing: PricingModel): string {
-  const rows: (string | number)[][] = [['Component', 'Service', 'Category', 'Line item', 'Monthly (USD)', 'Yearly (USD)']]
-  let total = 0
+  const rows: (string | number)[][] = [['Component', 'Service', 'Category', 'Line item', 'Monthly (USD)', 'Yearly (USD)', 'Basis', 'Note']]
+  const cost = docCost(doc, pricing)
   for (const n of doc.nodes) {
-    const c = costOf(n, doc.region, pricing)
     const d = defOf(n.type)
-    for (const l of c.lines) rows.push([nodeName(n), d.svc, d.category, l.label, l.monthly.toFixed(2), (l.monthly * 12).toFixed(2)])
-    total += c.monthly
+    for (const l of cost.perNode.get(n.id)!.lines) rows.push([nodeName(n), d.svc, d.category, l.label, l.monthly.toFixed(2), (l.monthly * 12).toFixed(2), BASIS_WORD[l.basis ?? 'estimate'], l.note ?? ''])
   }
-  rows.push(['Total', '', '', `${doc.region} · ${pricing}`, total.toFixed(2), (total * 12).toFixed(2)])
+  // free allowances belong to the account, so they are listed once, not against any one component
+  for (const c of cost.credits) rows.push(['Free allowance', c.name, '', c.detail, (-c.monthly).toFixed(2), (-c.monthly * 12).toFixed(2), 'Published allowance', 'Applied once for the whole account'])
+  rows.push(['Total', '', '', `${doc.region} · ${pricing}`, cost.total.toFixed(2), (cost.total * 12).toFixed(2), '', `AWS prices: ${RATE_CARD.source}, read ${RATE_CARD.generated}. Excludes tax, support plans and data transfer between services.`])
   return rows.map((r) => r.map(csvCell).join(',')).join('\n') + '\n'
 }
 

@@ -1,3 +1,4 @@
+import { navigate } from '../core/nav'
 import { fitView, groundAt, setFlat } from '../canvas/camera'
 import { PROVIDERS, translateDoc } from '../core/catalog'
 import { autoLayout, fitArea, inArea } from '../core/layout'
@@ -71,4 +72,4 @@ export function wrapSelectionInArea() {
 }
 
 export const toggleFlat = () => setFlat(!S().flat)
-export const go = (hash: string) => { location.hash = hash }
+export const go = (hash: string) => navigate(hash)

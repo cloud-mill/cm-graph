@@ -1,7 +1,9 @@
 import { useEffect, useState } from 'react'
-import { ArrowLeftRight, Box, Check, Copy, Ellipsis, Group, Layers, ListChecks, LocateFixed, Maximize2, Navigation2, Plus, Scan, SlidersHorizontal, SquareDashed, Trash2, Type, Waypoints, X } from 'lucide-react'
+import { ArrowLeftRight, Box, Check, Copy, Ellipsis, Group, Layers, ListChecks, LocateFixed, Maximize2, Navigation2, Route, Spline, Plus, Scan, SlidersHorizontal, SquareDashed, Trash2, Type, Waypoints, X } from 'lucide-react'
 import { fitView, inSight, isTurned, recover, setFlat } from '../canvas/camera'
 import { costOf, defOf, defaultProps, money, nodeName } from '../core/catalog'
+import { describe } from '../core/links'
+import { useBackLayer } from '../core/nav'
 import { useStore } from '../core/store'
 import { fitAreaToContents, wrapSelectionInArea } from './actions'
 import { haptic } from './device'
@@ -32,8 +34,12 @@ export function MobileDock() {
   const tool = useStore((s) => s.tool)
   const linkFrom = useStore((s) => s.linkFrom)
   const multi = useStore((s) => s.multi)
+  const trace = useStore((s) => s.trace)
   const pricing = useStore((s) => s.pricing)
   const s = useStore.getState()
+  // a tool waiting for a tap, and picking several, are both modes with a way out: Back is that way out too
+  useBackLayer(tool !== 'select', () => useStore.getState().set({ tool: 'select', linkFrom: null }))
+  useBackLayer(multi && tool === 'select', () => useStore.getState().set({ multi: false }))
   const open = (what: 'lib' | 'insp') => s.set(what === 'lib' ? { showLib: true, showInsp: false } : { showInsp: true, showLib: false, panel: 'inspect' })
 
   const nodes = doc.nodes.filter((n) => selection.includes(n.id))
@@ -59,7 +65,7 @@ export function MobileDock() {
     const n = one ? nodes[0] : null
     const title = n ? nodeName(n) : one && edges[0] ? 'Connection' : one && areas[0] ? areas[0].name : one && labels[0] ? labels[0].text.split('\n')[0] : `${count} selected`
     const d = n ? defOf(n.type) : null
-    const sub = n ? d!.summary?.({ ...defaultProps(n.type), ...n.props }) ?? d!.svc : one && edges[0] ? 'Line between components' : one && areas[0] ? `Area · ${areas[0].w} × ${areas[0].d}` : one && labels[0] ? 'Text label' : [nodes.length && `${nodes.length} components`, areas.length && `${areas.length} areas`, labels.length && `${labels.length} labels`, edges.length && `${edges.length} connections`].filter(Boolean).join(' · ')
+    const sub = n ? d!.summary?.({ ...defaultProps(n.type), ...n.props }) ?? d!.svc : one && edges[0] ? describe(doc, edges[0]) || 'Line between components' : one && areas[0] ? `Area · ${areas[0].w} × ${areas[0].d}` : one && labels[0] ? 'Text label' : [nodes.length && `${nodes.length} components`, areas.length && `${areas.length} areas`, labels.length && `${labels.length} labels`, edges.length && `${edges.length} connections`].filter(Boolean).join(' · ')
     const total = nodes.reduce((t, x) => t + costOf(x, doc.region, pricing).monthly, 0)
     return (
       <nav className="dock selected" aria-label="Selection">
@@ -72,7 +78,9 @@ export function MobileDock() {
         <div className="dock-row">
           <Slot label="Edit" onClick={() => open('insp')}><SlidersHorizontal size={18} /></Slot>
           {n && <Slot label="Connect" onClick={() => s.set({ tool: 'connect', linkFrom: n.id })}><Waypoints size={18} /></Slot>}
-          {one && edges[0] && <Slot label="Reverse" onClick={() => s.apply((x) => ({ ...x, edges: x.edges.map((e) => (e.id === edges[0].id ? { ...e, from: e.to, to: e.from } : e)) }))}><ArrowLeftRight size={18} /></Slot>}
+          {one && edges[0] && <Slot label="Follow" on={trace === edges[0].id} onClick={() => s.set({ trace: trace === edges[0].id ? null : edges[0].id })}><Route size={18} /></Slot>}
+          {one && edges[0] && <Slot label="Bend" onClick={() => { s.addBend(edges[0].id) }}><Spline size={18} /></Slot>}
+          {one && edges[0] && <Slot label="Reverse" onClick={() => s.reverseEdge([edges[0].id])}><ArrowLeftRight size={18} /></Slot>}
           {one && areas[0] && <Slot label="Fit" onClick={() => fitAreaToContents(areas[0].id)}><Maximize2 size={18} /></Slot>}
           {nodes.length > 1 && <Slot label="Group" onClick={() => { wrapSelectionInArea(); s.set({ multi: false }) }}><Group size={18} /></Slot>}
           {!edges.length && <Slot label="Copy" onClick={() => s.duplicate(selection)}><Copy size={18} /></Slot>}
@@ -112,6 +120,8 @@ export function ViewFabs() {
   // checked once the camera has been still for a moment, not on every frame of a drag
   useEffect(() => { const t = setTimeout(() => setLost(!inSight()), 260); return () => clearTimeout(t) }, [view, yaw, pitch, doc])
   const turned = isTurned(yaw, pitch)
+  // with something selected the dock is showing its actions, so adding the next component gets its own button here
+  const busy = useStore((s) => s.selection.length > 0 && s.tool === 'select')
   return (
     <div className="fabs">
       {lost && <button className="fab wide" onClick={() => { haptic(4); recover() }}><LocateFixed size={16} />Back to diagram</button>}
@@ -122,6 +132,7 @@ export function ViewFabs() {
       )}
       <button className="fab" aria-label={flat ? 'Switch to 3D view' : 'Switch to plan view'} onClick={() => { haptic(4); setFlat(!flat) }}>{flat ? <Box size={17} /> : <Layers size={17} />}</button>
       <button className="fab" aria-label="Fit to screen" onClick={() => { haptic(4); fitView() }}><Scan size={17} /></button>
+      {busy && <button className="fab primary" aria-label="Add another component" onClick={() => { haptic(4); useStore.getState().set({ showLib: true, showInsp: false }) }}><Plus size={20} /></button>}
     </div>
   )
 }
@@ -135,6 +146,7 @@ const GESTURES: [string, string, React.ReactNode][] = [
 
 /** The four camera gestures, drawn rather than described. Shown once, and again from the menu. */
 export function GestureGuide({ onClose }: { onClose: () => void }) {
+  useBackLayer(true, onClose)
   return (
     <div className="gestures" role="dialog" aria-label="Getting around">
       <div className="gestures-row">

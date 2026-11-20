@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { beginOrbit, cam } from '../canvas/camera'
@@ -24,6 +24,7 @@ const seed = () => docOf(
 function open(state: object = {}, doc = seed()) {
   saveDoc(doc)
   resetStore({ showLib: false, showInsp: true, focusName: S().focusName })
+  location.hash = '#/d/' + doc.id // the editor is only ever on screen at a blueprint's address
   const r = render(<Editor id={doc.id} />)
   if (Object.keys(state).length) act(() => { useStore.setState(state) })
   return r
@@ -60,6 +61,7 @@ describe('opening a blueprint', () => {
   })
   it('goes back to the list when the blueprint does not exist', () => {
     resetStore({ focusName: S().focusName })
+    location.hash = '#/d/missing'
     render(<Editor id="missing" />)
     expect(location.hash).toBe('#/')
     expect(document.querySelector('.boot')).not.toBeNull()
@@ -583,7 +585,10 @@ describe('phone layout', () => {
     openPhone()
     click(btn('Add'))
     const lib = sheetOf('Library')!
-    expect(lib).toHaveTextContent('Add a component')
+    // the sheet's header is the cloud switch; the search field and the list follow
+    expect(within(lib).getByRole('radiogroup', { name: 'Cloud provider' })).toBeInTheDocument()
+    expect(within(lib).getByLabelText('Search components')).toBeInTheDocument()
+    expect(lib).toHaveClass('roomy')
     expect(sheetOf('Inspector')).toBeNull()
     touchTap(screen.getByTitle('Function: Lambda'))
     expect(S().doc.nodes.map((n) => n.type)).toEqual(['ec2', 'rds', 'lambda'])

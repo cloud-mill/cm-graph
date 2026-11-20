@@ -563,6 +563,221 @@ test.describe('phone: resilience', () => {
   })
 })
 
+/**
+ * The library is driven here the way a thumb drives it: every scroll is a finger
+ * dragged across the glass through the browser's own touch pipeline, and every
+ * check reads where the list actually ended up. An earlier version of these tests
+ * tapped tiles without ever scrolling, and missed that the list could not scroll.
+ */
+test.describe('phone: adding components', () => {
+  test.beforeEach(async ({ app }) => { await app.open(TRIO()) })
+  const openLibrary = async (page: import('@playwright/test').Page) => {
+    await dock(page).getByRole('button', { name: 'Add', exact: true }).tap()
+    const sheet = page.getByRole('dialog', { name: 'Library' })
+    await expect(sheet).toBeVisible()
+    await page.waitForTimeout(450) // risen and settled
+    return sheet
+  }
+  const listOf = (page: import('@playwright/test').Page) => page.locator('.palette-scroll')
+  const top = (page: import('@playwright/test').Page) => listOf(page).evaluate((e) => Math.round(e.scrollTop))
+
+  test('the whole catalogue scrolls under a finger that lands on a tile, and scrolling never adds anything', async ({ page, app, fingers, browserName }) => {
+    test.skip(browserName !== 'chromium', 'needs real touch scrolling')
+    const sheet = await openLibrary(page)
+    const box = (await listOf(page).boundingBox())!, tile = (await page.locator('.pal-item').nth(1).boundingBox())!
+    const x = tile.x + tile.width / 2, from = { x, y: box.y + box.height - 24 }, to = { x, y: box.y + 24 }
+    expect(await top(page)).toBe(0)
+    // a slow drag moves the list as far as the finger went (less the few px a browser waits to be sure)
+    await fingers.drag(from, to, { steps: 12 })
+    const moved = await top(page), travel = from.y - to.y
+    expect(moved).toBeGreaterThan(travel - 40)
+    expect(moved).toBeLessThanOrEqual(travel)
+    // flicks carry it to the very end: the last component in the catalogue can be reached
+    const max = await listOf(page).evaluate((e) => e.scrollHeight - e.clientHeight)
+    await expect(async () => {
+      await fingers.drag(from, to, { steps: 4, flick: true })
+      await page.waitForTimeout(250)
+      expect(await top(page)).toBeGreaterThanOrEqual(max - 2)
+    }).toPass({ intervals: [50], timeout: 30000 })
+    const last = page.locator('.pal-item').last()
+    await expect(last).toBeInViewport()
+    await expect(last.locator('svg')).toBeVisible() // and its picture has been drawn by the time it is seen
+    // and back up
+    await expect(async () => { await fingers.drag(to, from, { steps: 4, flick: true }); await page.waitForTimeout(250); expect(await top(page)).toBe(0) }).toPass({ intervals: [50], timeout: 30000 })
+    // none of that touched the blueprint, the canvas behind, or the sheet itself
+    await expect(sheet).toBeVisible()
+    expect((await app.settled()).nodes).toHaveLength(3)
+    expect(await page.evaluate(() => ({ x: scrollX, y: scrollY, scale: visualViewport?.scale ?? 1 }))).toEqual({ x: 0, y: 0, scale: 1 })
+  })
+
+  test('a tap on a tile far down the list adds it where it can be seen, selected, and puts the sheet away', async ({ page, app, fingers, browserName }) => {
+    test.skip(browserName !== 'chromium', 'needs real touch scrolling')
+    const sheet = await openLibrary(page)
+    const box = (await listOf(page).boundingBox())!
+    for (let i = 0; i < 3; i++) await fingers.drag({ x: box.x + box.width / 2, y: box.y + box.height - 24 }, { x: box.x + box.width / 2, y: box.y + 24 }, { steps: 6 })
+    expect(await top(page)).toBeGreaterThan(100)
+    // whichever tile now has its middle clear of the sticky heading and the sheet's edge
+    const pick = await page.evaluate(([y0, y1]) => { const t = [...document.querySelectorAll('.pal-item')].find((e) => { const r = e.getBoundingClientRect(), c = r.top + r.height / 2; return c > y0 + 44 && c < y1 - 12 })!; const r = t.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2, title: t.getAttribute('title')! } }, [box.y, box.y + box.height])
+    await fingers.tap(pick)
+    await expect(sheet).toHaveCount(0)
+    const doc = await app.settled()
+    expect(doc.nodes).toHaveLength(4)
+    await expect(dock(page).locator('.dock-name b')).toBeVisible()
+    // on screen, between the bars, not under a sheet that has gone
+    const vp = page.viewportSize()!, body = (await app.node(doc.nodes[3].id).locator('.nd-body').boundingBox())!
+    expect(body.x).toBeGreaterThanOrEqual(0); expect(body.x + body.width).toBeLessThanOrEqual(vp.width)
+    expect(body.y).toBeGreaterThan((await page.locator('.topbar').boundingBox())!.height); expect(body.y + body.height).toBeLessThan(vp.height)
+    // and the next one is a single tap away, without deselecting first
+    await page.getByRole('button', { name: 'Add another component' }).tap()
+    await expect(sheet).toBeVisible()
+  })
+
+  test('category chips flick sideways and filter; search looks across every cloud and clears in one tap', async ({ page, fingers, browserName }) => {
+    const sheet = await openLibrary(page)
+    const chips = sheet.getByRole('radiogroup', { name: 'Category' })
+    if (browserName === 'chromium') {
+      const cb = (await chips.boundingBox())!
+      await fingers.drag({ x: cb.x + cb.width - 30, y: cb.y + cb.height / 2 }, { x: cb.x + 30, y: cb.y + cb.height / 2 })
+      expect(await chips.evaluate((e) => e.scrollLeft)).toBeGreaterThan(80)
+      await expect(sheet).toBeVisible() // a sideways flick is not a pull on the sheet
+    }
+    const all = await page.locator('.pal-item').count()
+    await chips.getByRole('radio', { name: 'Security' }).tap()
+    await expect(page.locator('.palette h4')).toHaveCount(1)
+    expect(await page.locator('.pal-item').count()).toBeLessThan(all)
+    expect(await top(page)).toBe(0)
+    const field = sheet.getByLabel('Search components')
+    await field.tap()
+    await page.keyboard.type('queue')
+    await expect(page.locator('.pal-item')).toHaveCount(3)
+    await expect(page.locator('.pal-aws').first()).toContainText('·') // tagged with the cloud each belongs to
+    await sheet.getByRole('button', { name: 'Clear search' }).tap()
+    await expect(field).toHaveValue('')
+    await expect(page.locator('.palette h4')).toHaveCount(1)
+    // every control here is a thumb-sized target
+    const small = await sheet.evaluate((el) => [...el.querySelectorAll<HTMLElement>('button, input')].filter((e) => e.offsetParent && !e.closest('.palette-foot')).map((e) => ({ n: e.getAttribute('aria-label') ?? e.innerText.split('\n')[0], r: e.getBoundingClientRect() })).filter((x) => x.r.height < 28 || x.r.width < 28).map((x) => `${x.n} ${Math.round(x.r.width)}×${Math.round(x.r.height)}`))
+    expect(small).toEqual([])
+  })
+
+  test('switching cloud in the header swaps the list, and the choice sticks', async ({ page }) => {
+    const sheet = await openLibrary(page)
+    await expect(page.getByTitle('Virtual machine: EC2')).toBeVisible()
+    await sheet.getByRole('radio', { name: 'Azure' }).tap()
+    await expect(page.getByTitle('Virtual machine: EC2')).toHaveCount(0)
+    await expect(sheet.getByRole('radio', { name: 'Azure' })).toHaveAttribute('aria-checked', 'true')
+    await sheet.getByRole('button', { name: 'Close library' }).tap()
+    await openLibrary(page)
+    await expect(sheet.getByRole('radio', { name: 'Azure' })).toHaveAttribute('aria-checked', 'true')
+  })
+
+  test('opening and closing over and over leaves nothing behind', async ({ page, app }) => {
+    for (let i = 0; i < 8; i++) {
+      await dock(page).getByRole('button', { name: 'Add', exact: true }).tap()
+      await page.getByRole('dialog', { name: 'Library' }).getByRole('button', { name: 'Close library' }).tap()
+    }
+    await expect(page.locator('.sheet')).toHaveCount(0)
+    await expect(dock(page).getByRole('button', { name: 'Add', exact: true })).toBeVisible()
+    expect((await app.settled()).nodes).toHaveLength(3)
+  })
+})
+
+/** Anything that overflows has to move under a finger. This walks every sheet and dialog and drags inside each one. */
+test.describe('phone: everything that overflows scrolls by finger', () => {
+  test('sheets, menu and dialogs', async ({ page, app, fingers, browserName }) => {
+    test.skip(browserName !== 'chromium', 'needs real touch scrolling')
+    test.slow()
+    await app.open(TRIO())
+    const check = async (surface: string, root: string) => {
+      await page.waitForTimeout(500)
+      const found = await page.evaluate((sel) => {
+        const root = document.querySelector(sel); if (!root) return []
+        return [root, ...root.querySelectorAll('*')].flatMap((e, i) => {
+          const cs = getComputedStyle(e), r = e.getBoundingClientRect()
+          const v = e.scrollHeight - e.clientHeight > 24 && /auto|scroll/.test(cs.overflowY), h = !v && e.scrollWidth - e.clientWidth > 24 && /auto|scroll/.test(cs.overflowX)
+          if ((!v && !h) || r.width < 40 || r.height < 30) return []
+          e.setAttribute('data-scrolls', String(i)); e.scrollTo(0, 0)
+          const y0 = Math.max(0, r.y), y1 = Math.min(innerHeight, r.bottom)
+          return [{ id: String(i), cls: e.className.toString().split(' ')[0], v, x: r.x, y: y0, w: r.width, h: y1 - y0 }]
+        })
+      }, root)
+      for (const s of found) {
+        const at = (id: string) => page.evaluate((i) => { const e = document.querySelector(`[data-scrolls="${i}"]`); return e ? [e.scrollLeft, e.scrollTop] : null }, id)
+        const from = s.v ? { x: s.x + s.w / 2, y: s.y + s.h * 0.8 } : { x: s.x + s.w * 0.8, y: s.y + s.h / 2 }
+        const to = s.v ? { x: s.x + s.w / 2, y: s.y + s.h * 0.2 } : { x: s.x + s.w * 0.2, y: s.y + s.h / 2 }
+        await fingers.drag(from, to)
+        const p = await at(s.id)
+        expect(p, `${surface}: ${s.cls} is still there after a drag inside it`).not.toBeNull()
+        expect(s.v ? p![1] : p![0], `${surface}: ${s.cls} moves under a finger`).toBeGreaterThan(15)
+      }
+      return found.map((f) => f.cls)
+    }
+    const menu = async (q: string) => { await dock(page).getByRole('button', { name: 'Menu' }).tap(); await page.getByLabel('Search commands').fill(q); await page.keyboard.press('Enter') }
+    const seen: string[] = []
+    await dock(page).getByRole('button', { name: 'Add', exact: true }).tap()
+    seen.push(...await check('library', '.sheet'))
+    await page.getByRole('button', { name: 'Close library' }).tap()
+    await page.waitForTimeout(600) // the view glides back to where it was before the sheet
+    await fingers.tap(await app.world(1, 1))
+    await dock(page).getByRole('button', { name: 'Edit' }).tap()
+    seen.push(...await check('inspector', '.sheet'))
+    await page.getByRole('tab', { name: /Budget/ }).tap(); seen.push(...await check('budget', '.sheet'))
+    await page.getByRole('tab', { name: /Advisor/ }).tap(); seen.push(...await check('advisor', '.sheet'))
+    await page.getByRole('button', { name: 'Close inspector' }).tap()
+    await dock(page).getByRole('button', { name: 'Deselect' }).tap()
+    await dock(page).getByRole('button', { name: 'Menu' }).tap(); seen.push(...await check('menu', '[role="dialog"]')); await page.keyboard.press('Escape')
+    for (const q of ['export', 'import from']) { await menu(q); seen.push(...await check(q, '.modal')); await page.keyboard.press('Escape'); await page.waitForTimeout(300) }
+    // the walk really did find the surfaces it is meant to guard
+    expect(seen).toEqual(expect.arrayContaining(['palette-scroll', 'pal-chips', 'right-scroll']))
+  })
+})
+
+test.describe('phone: sheets and the view', () => {
+  test.beforeEach(async ({ app }) => { await app.open(TRIO()) })
+
+  test('a sheet keeps what is being edited in clear view, never zooms, and gives the view back when it goes', async ({ page, app, fingers }) => {
+    const span = async () => { const a = await app.corner('a'), b = await app.corner('b'); return Math.hypot(b.x - a.x, b.y - a.y) }
+    const rest = async () => { let last = { x: -1, y: -1 }; await expect.poll(async () => { const c = await app.corner('a'); const same = Math.abs(c.x - last.x) < 0.5 && Math.abs(c.y - last.y) < 0.5; last = c; return same }, { intervals: [150] }).toBe(true); return last }
+    const before = await rest(), zoom = await span()
+    await fingers.tap(await app.world(1, 7)) // c, the lowest of the three
+    await dock(page).getByRole('button', { name: 'Edit' }).tap()
+    const sheet = page.getByRole('dialog', { name: 'Inspector' })
+    await expect(sheet).toBeVisible()
+    await rest()
+    // the component is clear of the top bar and of the sheet, wherever the sheet sits
+    const body = (await app.node('c').locator('.nd-body').boundingBox())!, top = (await page.locator('.topbar').boundingBox())!, sh = (await sheet.boundingBox())!, vp = page.viewportSize()!
+    const side = sh.width < vp.width * 0.7
+    expect(body.y).toBeGreaterThanOrEqual(top.y + top.height)
+    expect(body.x).toBeGreaterThanOrEqual(0)
+    if (side) expect(body.x + body.width).toBeLessThanOrEqual(sh.x)
+    else expect(body.y + body.height).toBeLessThanOrEqual(sh.y)
+    expect(await span()).toBeCloseTo(zoom, 0)
+    await sheet.getByRole('button', { name: 'Close' }).tap()
+    await expect(sheet).toHaveCount(0)
+    const after = await rest()
+    expect(after.x).toBeCloseTo(before.x, 0); expect(after.y).toBeCloseTo(before.y, 0)
+    expect(await span()).toBeCloseTo(zoom, 0)
+  })
+
+  test('a view the user moved while the sheet was up is left where they put it', async ({ page, app, fingers }) => {
+    await dock(page).getByRole('button', { name: 'Add', exact: true }).tap()
+    const sheet = page.getByRole('dialog', { name: 'Library' })
+    await expect(sheet).toBeVisible()
+    await page.waitForTimeout(700)
+    const top = (await page.locator('.topbar').boundingBox())!
+    // clear of the cost pill and the cube in the corners
+    const from = { x: page.viewportSize()!.width * 0.4, y: top.y + top.height + 70 }
+    const start = await app.corner('a')
+    await fingers.drag(from, { x: from.x + 50, y: from.y + 20 })
+    const mine = await app.corner('a')
+    expect(mine.x - start.x).toBeCloseTo(50, 0)
+    await sheet.getByRole('button', { name: 'Close' }).tap()
+    await expect(sheet).toHaveCount(0)
+    await page.waitForTimeout(600)
+    const after = await app.corner('a')
+    expect(after.x).toBeCloseTo(mine.x, 0); expect(after.y).toBeCloseTo(mine.y, 0)
+  })
+})
+
 test.describe('phone: first visit', () => {
   test.use({ firstVisit: true })
   test('the gestures are drawn once, stay out of the way, and can be found again', async ({ page, app }) => {

@@ -166,7 +166,8 @@ describe('adding things', () => {
   it('connects two components once, in either direction', () => {
     resetStore({ doc: docOf([node('a'), node('b'), node('c')]) })
     const id = S().addEdge('a', 'b')!
-    expect(S().doc.edges).toEqual([{ id, from: 'a', to: 'b', style: 'solid', arrow: 'end', width: 2 }])
+    // a new line says what it most likely is and that it was drawn by hand
+    expect(S().doc.edges).toEqual([{ id, from: 'a', to: 'b', style: 'solid', arrow: 'end', width: 2, kind: 'request', origin: 'drawn' }])
     expect(S().addEdge('a', 'b')).toBeNull()
     expect(S().addEdge('b', 'a')).toBeNull()
     expect(S().addEdge('a', 'a')).toBeNull()
@@ -563,5 +564,118 @@ describe('when a save cannot be written', () => {
     S().load(docOf([], [], { id: 'other' }))
     expect(S().saveFailed).toBe(false)
     expect(S().saved).toBe(true)
+  })
+})
+
+describe('shaping and rewiring connections', () => {
+  const start = (extra: Partial<Parameters<typeof edge>[3]> = {}) =>
+    resetStore({ doc: docOf([node('a', 'ec2', 0, 0), node('b', 'rds', 8, 0), node('c', 'sqs', 8, 8)], [edge('e', 'a', 'b', extra as any)]) })
+  const E = () => S().doc.edges.find((x) => x.id === 'e')!
+
+  it('a new connection is given the likely kind for what it joins, and its line style', () => {
+    start()
+    const id = S().addEdge('a', 'c')!
+    expect(S().doc.edges.find((x) => x.id === id)).toMatchObject({ kind: 'event', style: 'dashed', arrow: 'end', origin: 'drawn' })
+  })
+  it('saying what a connection is restyles it, in one undo step', () => {
+    start()
+    S().setKind(['e'], 'replication')
+    expect(E()).toMatchObject({ kind: 'replication', style: 'dotted', arrow: 'both' })
+    S().undo()
+    expect(E().kind).toBeUndefined()
+    expect(E()).toMatchObject({ style: 'solid', arrow: 'end' })
+  })
+  it('adds a bend in the middle of the longest run, and it can be undone', () => {
+    start()
+    expect(S().addBend('e')).toBe(0)
+    expect(E().via).toEqual([[5, 1]])
+    S().undo()
+    expect(E().via).toBeUndefined()
+    expect(S().addBend('nope')).toBe(-1)
+  })
+  it('a second bend goes in the right place along the line', () => {
+    start({ via: [[4, 6]] })
+    const i = S().addBend('e')
+    expect(E().via).toHaveLength(2)
+    expect(E().via![i]).not.toEqual([4, 6])
+  })
+  it('hands a shaped connection back to the router', () => {
+    start({ via: [[4, 6]], fromSide: 's' })
+    S().resetRoute(['e'])
+    expect(E().via).toBeUndefined()
+    expect(E().fromSide).toBeUndefined()
+    S().undo()
+    expect(E()).toMatchObject({ via: [[4, 6]], fromSide: 's' })
+  })
+  it('moves an end to another component, keeping the shape, and pins a side only when asked', () => {
+    start({ via: [[4, 6]] })
+    expect(S().reconnect('e', 'to', 'c')).toBe(true)
+    expect(E()).toMatchObject({ from: 'a', to: 'c', via: [[4, 6]] })
+    expect(E().toSide).toBeUndefined()
+    expect(S().reconnect('e', 'from', 'b', 'n')).toBe(true)
+    expect(E()).toMatchObject({ from: 'b', to: 'c', fromSide: 'n' })
+    S().undo(); S().undo()
+    expect(E()).toMatchObject({ from: 'a', to: 'b' })
+  })
+  it('an end can be re-pinned on the component it is already on', () => {
+    start()
+    expect(S().reconnect('e', 'to', 'b', 's')).toBe(true)
+    expect(E()).toMatchObject({ to: 'b', toSide: 's' })
+  })
+  it('refuses to join a component to itself, or to something that is not there', () => {
+    start()
+    expect(S().reconnect('e', 'to', 'a')).toBe(false)
+    expect(S().reconnect('e', 'to', 'ghost')).toBe(false)
+    expect(S().reconnect('ghost', 'to', 'c')).toBe(false)
+    expect(E()).toMatchObject({ from: 'a', to: 'b' })
+    expect(S().past).toHaveLength(0)
+  })
+  it('reversing keeps the path: ends, sides and waypoints all swap round', () => {
+    start({ via: [[3, 5], [6, 5]], fromSide: 's', toSide: 'w' })
+    S().reverseEdge(['e'])
+    expect(E()).toMatchObject({ from: 'b', to: 'a', fromSide: 'w', toSide: 's', via: [[6, 5], [3, 5]] })
+  })
+  it('a second connection between the same two starts clean and is selected', () => {
+    start({ label: 'orders', protocol: 'HTTPS', via: [[4, 6]], kind: 'request' })
+    const id = S().twinEdge('e')!
+    const twin = S().doc.edges.find((x) => x.id === id)!
+    expect(twin).toMatchObject({ from: 'a', to: 'b', kind: 'request', origin: 'drawn' })
+    expect(twin.label).toBeUndefined(); expect(twin.protocol).toBeUndefined(); expect(twin.via).toBeUndefined()
+    expect(S().selection).toEqual([id])
+    expect(S().twinEdge('nope')).toBeNull()
+  })
+  it('moving both ends together carries the shape; moving one end leaves the waypoints where they are', () => {
+    start({ via: [[4, 6]] })
+    S().apply((d) => moveItems(d, d, new Set(['a', 'b']), 2, 3))
+    expect(E().via).toEqual([[6, 9]])
+    S().apply((d) => moveItems(d, d, new Set(['a']), 5, 5))
+    expect(E().via).toEqual([[6, 9]])
+  })
+  it('copies of a shaped connection keep the shape, shifted with them', () => {
+    start({ via: [[4, 6]] })
+    S().duplicate(['a', 'b'], 2, 2)
+    expect(S().doc.edges.at(-1)!.via).toEqual([[6, 8]])
+    S().select(['a', 'b']); S().copy(); S().paste()
+    expect(S().doc.edges.at(-1)!.via).toEqual([[6, 8]])
+  })
+  it('undo and redo keep what is still there selected', () => {
+    start()
+    S().select(['e'])
+    S().addBend('e')
+    S().undo()
+    expect(S().selection).toEqual(['e'])
+    S().redo()
+    expect(S().selection).toEqual(['e'])
+    // but not something the step took away
+    const id = S().addNode('s3', 20, 20)
+    expect(S().selection).toEqual([id])
+    S().undo()
+    expect(S().selection).toEqual([])
+  })
+  it('following a flow is a view state that a new blueprint clears', () => {
+    start()
+    S().set({ trace: 'a' })
+    S().load(docOf([node('z')]))
+    expect(S().trace).toBeNull()
   })
 })

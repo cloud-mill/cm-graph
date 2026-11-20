@@ -4,10 +4,11 @@ import { fitView, orbitTo, turn, viewHome, viewTop } from '../canvas/camera'
 import { ModelIcon } from '../canvas/models'
 import { CATALOG_LIST, PROVIDERS, defOf, nodeName } from '../core/catalog'
 import { ISO } from '../core/iso'
+import { goHome, useBackLayer } from '../core/nav'
 import { useStore } from '../core/store'
 import { keys } from './atoms'
 import { isPhone } from './device'
-import { addAtCenter, go, saveVersion, selectAll, tidy, toggleFlat, translateTo } from './actions'
+import { addAtCenter, saveVersion, selectAll, tidy, toggleFlat, translateTo } from './actions'
 
 interface Cmd {
   id: string
@@ -20,6 +21,7 @@ interface Cmd {
 }
 
 export function CommandPalette({ onClose }: { onClose: () => void }) {
+  useBackLayer(true, onClose)
   const [q, setQ] = useState('')
   const [idx, setIdx] = useState(0)
   const list = useRef<HTMLDivElement>(null)
@@ -50,7 +52,7 @@ export function CommandPalette({ onClose }: { onClose: () => void }) {
       { id: 'all', group: 'Actions', label: 'Select all', kbd: '⌘A', run: selectAll },
       ...(isPhone() ? [{ id: 'gestures', group: 'Actions' as const, label: 'Touch gestures', hint: 'help pinch twist tilt rotate zoom', run: () => st.set({ modal: 'gestures' }) }] : []),
       { id: 'keys', group: 'Actions', label: 'Keyboard shortcuts', kbd: '?', run: () => st.set({ modal: 'shortcuts' }) },
-      { id: 'dash', group: 'Actions', label: 'Back to all blueprints', run: () => go('#/') },
+      { id: 'dash', group: 'Actions', label: 'Back to all blueprints', run: goHome },
       ...PROVIDERS.map((p): Cmd => ({ id: 'to:' + p.id, group: 'Actions', label: `Translate blueprint to ${p.short}`, hint: `${p.name} convert migrate cloud`, run: () => translateTo(p.id) })),
     ]
     const short = (id: string) => PROVIDERS.find((p) => p.id === id)?.short ?? ''
@@ -87,7 +89,7 @@ export function CommandPalette({ onClose }: { onClose: () => void }) {
       <div className="cmdk" role="dialog" aria-label="Command palette">
         <div className="cmdk-input">
           <Search size={16} />
-          <input autoFocus aria-label="Search commands" placeholder="Search actions, components and anything on the canvas…" value={q} spellCheck={false}
+          <input autoFocus aria-label="Search commands" placeholder={isPhone() ? 'Search actions and components' : 'Search actions, components and anything on the canvas…'} value={q} spellCheck={false}
             onChange={(e) => setQ(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === 'ArrowDown') { e.preventDefault(); setIdx((i) => Math.min(results.length - 1, i + 1)) }

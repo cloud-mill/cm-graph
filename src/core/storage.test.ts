@@ -333,3 +333,27 @@ describe('loadDoc repairs what it reads', () => {
     expect(loadDoc('fine')).toEqual(doc)
   })
 })
+
+describe('coerceDoc: connections', () => {
+  const raw = (e: object) => ({ nodes: [{ id: 'a', type: 'ec2', x: 0, y: 0 }, { id: 'b', type: 'rds', x: 8, y: 0 }], edges: [{ id: 'e', from: 'a', to: 'b', ...e }] })
+  it('an older file with none of the new fields reads as a plain automatic connection', () => {
+    const e = coerceDoc(raw({}))!.edges[0]
+    expect(e).toMatchObject({ style: 'solid', arrow: 'end', width: 2 })
+    for (const k of ['kind', 'protocol', 'port', 'origin', 'via', 'fromSide', 'toSide']) expect(k in e, k).toBe(false)
+  })
+  it('keeps what a connection means and how it was shaped', () => {
+    const e = coerceDoc(raw({ kind: 'event', protocol: 'AMQP', port: '5672', origin: 'imported', via: [[4, 5], [6.5, 5]], fromSide: 's', toSide: 'w' }))!.edges[0]
+    expect(e).toMatchObject({ kind: 'event', protocol: 'AMQP', port: '5672', origin: 'imported', via: [[4, 5], [6.5, 5]], fromSide: 's', toSide: 'w' })
+  })
+  it('drops anything it does not recognise rather than trusting it', () => {
+    const e = coerceDoc(raw({ kind: 'telepathy', origin: 'observed', fromSide: 'up', toSide: 7, protocol: 5, port: {}, via: [[1, 'x']] }))!.edges[0] as any
+    for (const k of ['kind', 'protocol', 'port', 'origin', 'via', 'fromSide', 'toSide']) expect(k in e, k).toBe(false)
+  })
+  it('refuses waypoints that are not finite pairs, or absurdly many', () => {
+    for (const via of [[[1, 2, 3]], [[NaN, 1]], [[Infinity, 0]], 'x', [], Array.from({ length: 65 }, () => [1, 1])]) expect('via' in coerceDoc(raw({ via }))!.edges[0], JSON.stringify(via).slice(0, 30)).toBe(false)
+  })
+  it('caps the length of protocol and port', () => {
+    const e = coerceDoc(raw({ protocol: 'x'.repeat(200), port: '9'.repeat(200) }))!.edges[0]
+    expect(e.protocol).toHaveLength(40); expect(e.port).toHaveLength(40)
+  })
+})

@@ -183,5 +183,7 @@ export function autoLayout(doc: Doc, membership?: Map<string, string[]>): Doc {
     const kids = bySize.filter((c) => parentOf.get(c.id) === a.id && fitted.has(c.id)).map((c) => fitted.get(c.id)!)
     fitted.set(a.id, fitArea(a, ns, 1, kids.map((c) => ({ x: c.x - 0.75, y: c.y - 0.75, w: c.w + 1.5, d: c.d + 1.5 }))))
   }
-  return { ...doc, nodes: moved, areas: doc.areas.map((a) => fitted.get(a.id) ?? a) }
+  // every component has a new place, so paths shaped by hand for the old places no longer mean anything
+  const edgesOut = doc.edges.some((e) => e.via || e.fromSide || e.toSide) ? doc.edges.map((e) => (e.via || e.fromSide || e.toSide ? { ...e, via: undefined, fromSide: undefined, toSide: undefined } : e)) : doc.edges
+  return { ...doc, nodes: moved, edges: edgesOut, areas: doc.areas.map((a) => fitted.get(a.id) ?? a) }
 }

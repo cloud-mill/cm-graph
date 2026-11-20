@@ -1,18 +1,16 @@
-import { Component, type ReactNode, useEffect, useState } from 'react'
+import { Component, type ReactNode, useEffect, useSyncExternalStore } from 'react'
 import { decodeShare, saveDoc } from './core/storage'
 import { useStore } from './core/store'
 import { Dashboard } from './ui/Dashboard'
 import { Editor } from './ui/Editor'
 
-function useHash() {
-  const [hash, setHash] = useState(location.hash)
-  useEffect(() => {
-    const on = () => setHash(location.hash)
-    window.addEventListener('hashchange', on)
-    return () => window.removeEventListener('hashchange', on)
-  }, [])
-  return hash
-}
+const onHash = (cb: () => void) => { window.addEventListener('hashchange', cb); return () => window.removeEventListener('hashchange', cb) }
+/**
+ * The address, read straight from the browser. Subscribing this way re-reads it
+ * once the listener is in place, so a redirect made while the first screen was
+ * still mounting (before anything could be listening) is not missed.
+ */
+const useHash = () => useSyncExternalStore(onHash, () => location.hash)
 
 /** A render error anywhere should never leave a blank page: say so, and offer the way back. */
 class Boundary extends Component<{ children: ReactNode }, { error: Error | null }> {

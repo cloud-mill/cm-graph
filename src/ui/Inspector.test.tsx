@@ -258,10 +258,10 @@ describe('connection', () => {
   const doc = () => docOf([node('a', 'ec2', 0, 0, { name: 'web' }), node('b', 'rds', 8, 0, { name: 'db' })], [edge('e1', 'a', 'b'), edge('e2', 'b', 'a')])
   it('edits label, line, arrows, weight and colour', async () => {
     show(doc(), ['e1'])
-    expect(screen.getByText('web → db')).toBeInTheDocument()
-    await userEvent.type(screen.getByPlaceholderText(/HTTPS, gRPC/), 'SQL')
+    expect(screen.getByText('web connects to db')).toBeInTheDocument()
+    await userEvent.type(screen.getByLabelText('Connection label'), 'SQL')
     expect(S().doc.edges[0].label).toBe('SQL')
-    await userEvent.clear(screen.getByPlaceholderText(/HTTPS, gRPC/))
+    await userEvent.clear(screen.getByLabelText('Connection label'))
     expect(S().doc.edges[0].label).toBeUndefined()
     await userEvent.click(screen.getByRole('radio', { name: 'Dashed' }))
     await userEvent.click(screen.getByRole('radio', { name: 'Both' }))
@@ -281,14 +281,14 @@ describe('connection', () => {
     show(doc(), ['e1'])
     await userEvent.click(screen.getByRole('button', { name: 'Reverse' }))
     expect(S().doc.edges[0]).toMatchObject({ from: 'b', to: 'a' })
-    expect(screen.getByText('db → web')).toBeInTheDocument()
+    expect(screen.getByText('db connects to web')).toBeInTheDocument()
     await userEvent.click(screen.getByRole('button', { name: 'Delete' }))
     expect(S().doc.edges.map((e) => e.id)).toEqual(['e2'])
   })
   it('styles several at once and offers no label field', async () => {
     show(doc(), ['e1', 'e2'])
     expect(screen.getByText('2 connections')).toBeInTheDocument()
-    expect(screen.queryByPlaceholderText(/HTTPS, gRPC/)).toBeNull()
+    expect(screen.queryByLabelText('Connection label')).toBeNull()
     await userEvent.click(screen.getByRole('radio', { name: 'Dashed' }))
     expect(S().doc.edges.map((e) => e.style)).toEqual(['dashed', 'dashed'])
     await userEvent.click(screen.getByRole('button', { name: 'Reverse' }))
@@ -375,5 +375,153 @@ describe('mixed selection', () => {
   it('ignores ids that no longer exist', () => {
     show(doc(), ['gone'])
     expect(screen.getByText('AWS blueprint')).toBeInTheDocument()
+  })
+})
+
+describe('connection: what it is and how it runs', () => {
+  const doc = (extra: object = {}, more: ReturnType<typeof edge>[] = []) => docOf(
+    [node('a', 'ec2', 0, 0, { name: 'web' }), node('b', 'rds', 8, 0, { name: 'db' }), node('u', 'users', -6, 0, { name: 'Clients' })],
+    [edge('e', 'a', 'b', extra), ...more],
+  )
+  const E = () => S().doc.edges[0]
+
+  it('says what it joins in a sentence, and each end leads to its component', async () => {
+    show(doc({ kind: 'data', protocol: 'PostgreSQL', port: '5432' }), ['e'])
+    expect(screen.getByText('web reads and writes db over PostgreSQL 5432')).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: /From\s*web/ }))
+    expect(S().selection).toEqual(['a'])
+  })
+  it('choosing the relationship restyles the line and explains itself', async () => {
+    show(doc(), ['e'])
+    expect(screen.getByRole('combobox', { name: 'Relationship' })).toHaveTextContent('Not said')
+    await pick('Relationship', 'Event')
+    expect(E()).toMatchObject({ kind: 'event', style: 'dashed', arrow: 'end' })
+    expect(screen.getByText(/without waiting/)).toBeInTheDocument()
+    await pick('Relationship', 'Dependency')
+    expect(screen.getByText(/no traffic implied/)).toBeInTheDocument()
+  })
+  it('takes a protocol and a port, shown along the line, and clears them again', async () => {
+    show(doc(), ['e'])
+    await userEvent.type(screen.getByLabelText('Protocol'), 'HTTPS')
+    await userEvent.type(screen.getByLabelText('Port'), '443')
+    expect(E()).toMatchObject({ protocol: 'HTTPS', port: '443' })
+    await userEvent.clear(screen.getByLabelText('Port'))
+    expect(E().port).toBeUndefined()
+    expect(document.querySelectorAll('#link-protocols option').length).toBeGreaterThan(8)
+  })
+  it('says where the connection came from, and that none of it is measured', () => {
+    const first = show(doc({ origin: 'inferred' }), ['e'])
+    expect(screen.getByText('Inferred.')).toBeInTheDocument()
+    expect(screen.getByText(/Guessed while importing/)).toBeInTheDocument()
+    expect(screen.getByText(/none of this is measured traffic/)).toBeInTheDocument()
+    first.unmount()
+    show(doc(), ['e'])
+    expect(screen.getByText('Drawn.')).toBeInTheDocument() // older files read as drawn by hand
+  })
+  it('flags a connection that looks wrong', async () => {
+    resetStore({ doc: docOf([node('u', 'users', 0, 0, { name: 'Clients' }), node('b', 'rds', 8, 0, { name: 'db' })], [edge('e', 'u', 'b', { kind: 'data' })]), selection: ['e'] })
+    render(<Inspector />)
+    expect(screen.getByRole('status')).toHaveTextContent(/Clients reaches db directly/)
+    await userEvent.type(screen.getByLabelText('Port'), 'abc')
+    expect(screen.getAllByRole('status').some((el) => /not a number/.test(el.textContent!))).toBe(true)
+  })
+  it('describes the path and offers to bend it or hand it back to the router', async () => {
+    show(doc(), ['e'])
+    expect(screen.getByText(/Routed automatically around other components/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Route automatically' })).toBeDisabled()
+    await userEvent.click(screen.getByRole('button', { name: 'Add a bend' }))
+    expect(E().via).toHaveLength(1)
+    expect(screen.getByText(/Shaped by hand, through 1 point\./)).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: 'Add a bend' }))
+    expect(screen.getByText(/through 2 points/)).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: 'Route automatically' }))
+    expect(E().via).toBeUndefined()
+  })
+  it('says so when only a side has been chosen', () => {
+    show(doc({ fromSide: 's' }), ['e'])
+    expect(screen.getByText(/from the side you chose/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Route automatically' })).toBeEnabled()
+  })
+  it('reversing keeps the shape, and a second connection can be added between the same two', async () => {
+    show(doc({ via: [[3, 5], [6, 5]] }), ['e'])
+    await userEvent.click(screen.getByRole('button', { name: 'Reverse' }))
+    expect(E()).toMatchObject({ from: 'b', to: 'a', via: [[6, 5], [3, 5]] })
+    await userEvent.click(screen.getByRole('button', { name: 'Second connection' }))
+    expect(S().doc.edges).toHaveLength(2)
+    expect(S().selection).toEqual([S().doc.edges[1].id])
+  })
+  it('follows the flow from the connection, and stops', async () => {
+    show(doc(), ['e'])
+    await userEvent.click(screen.getByRole('button', { name: 'Follow the flow' }))
+    expect(S().trace).toBe('e')
+    await userEvent.click(screen.getByRole('button', { name: 'Stop following' }))
+    expect(S().trace).toBeNull()
+  })
+  it('with several selected: counts the shaped ones and resets them together', async () => {
+    show(doc({ via: [[4, 4]] }, [edge('f', 'u', 'a')]), ['e', 'f'])
+    expect(screen.getByText(/1 of these has been shaped by hand/)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Add a bend' })).toBeNull()
+    await userEvent.click(screen.getByRole('button', { name: 'Route automatically' }))
+    expect(screen.getByText('All routed automatically.')).toBeInTheDocument()
+    await pick('Relationship', 'Request')
+    expect(S().doc.edges.map((x) => x.kind)).toEqual(['request', 'request'])
+  })
+})
+
+describe('component: its connections', () => {
+  const doc = () => docOf(
+    [node('u', 'users', -6, 0, { name: 'Clients' }), node('a', 'ec2', 0, 0, { name: 'web' }), node('b', 'rds', 8, 0, { name: 'db' }), node('q', 'sqs', 8, 8, { name: 'jobs' })],
+    [edge('e1', 'u', 'a', { kind: 'request', protocol: 'HTTPS' }), edge('e2', 'a', 'b', { kind: 'data' }), edge('e3', 'a', 'q', { arrow: 'none' })],
+  )
+  it('says how far it reaches each way and lists each connection with what it carries', () => {
+    show(doc(), ['a'])
+    // the arrowless line to jobs is an association, so jobs counts on both sides
+    expect(screen.getByText(/2 upstream, 2 downstream/)).toBeInTheDocument()
+    const rows = [...document.querySelectorAll('.conn')].map((r) => r.textContent)
+    expect(rows).toEqual(['←ClientsHTTPS', '→dbData', '–jobsSQS'])
+  })
+  it('follows the flow from the component', async () => {
+    show(doc(), ['a'])
+    await userEvent.click(screen.getByRole('button', { name: 'Follow the flow' }))
+    expect(S().trace).toBe('a')
+    expect(screen.getByRole('button', { name: 'Stop following' })).toBeInTheDocument()
+  })
+  it('an end of the chain says there is nothing beyond it', () => {
+    show(doc(), ['u'])
+    expect(screen.getByText(/Nothing upstream, 3 downstream/)).toBeInTheDocument()
+  })
+})
+
+describe('component: what its cost rests on', () => {
+  const lines = () => [...document.querySelectorAll('.cost-line')]
+  it('marks each line as fixed, usage-based or an estimate', () => {
+    show(docOf([node('a', 'alb', 0, 0, { name: 'lb' })]), ['a'])
+    expect(lines().map((l) => l.className)).toEqual(['cost-line fixed', 'cost-line usage'])
+    expect(lines()[0].querySelector('.basis')).toHaveAttribute('title', expect.stringMatching(/provisioned all month/))
+    expect(screen.getByText(/List price in US East \(N\. Virginia\), all month \(730 hours\)/)).toBeInTheDocument()
+  })
+  it('an estimate is shown as approximate, with what it stands in for', async () => {
+    show(docOf([node('a', 'ec2', 0, 0, { name: 'web', props: { family: 'm5', size: 'nano', os: 'linux', count: 1, disk: 30 } })]), ['a'])
+    expect(lines()[0]).toHaveClass('estimate')
+    expect(lines()[0]).toHaveTextContent(/~\$/)
+    expect(lines()[0]).toHaveTextContent(/AWS does not sell m5\.nano/)
+  })
+  it('changing a setting reprices at once, from the published price of the new choice', async () => {
+    show(docOf([node('a', 'ec2', 0, 0, { name: 'web', props: { family: 'm5', size: 'large', os: 'linux', count: 1, disk: 0 } })]), ['a'])
+    expect(document.querySelector('.cost-total')).toHaveTextContent(money(0.096 * 730))
+    await pick('Size', 'xlarge')
+    expect(document.querySelector('.cost-total')).toHaveTextContent(money(0.192 * 730))
+    await pick('Platform', 'Windows')
+    expect(document.querySelector('.cost-total')).toHaveTextContent(money(0.376 * 730))
+  })
+  it('says where free allowances are handled when a line counts towards one', () => {
+    show(docOf([node('a', 'lambda', 0, 0, { name: 'fn' })]), ['a'])
+    expect(screen.getByText(/Free monthly allowances are taken off once for the whole blueprint/)).toBeInTheDocument()
+  })
+  it('says when reserved rates are in play', () => {
+    resetStore({ doc: docOf([node('a', 'ec2', 0, 0, { name: 'web' })]), selection: ['a'], pricing: 'commit1' })
+    render(<Inspector />)
+    expect(screen.getByText(/with reserved rates where they are published/)).toBeInTheDocument()
+    expect(lines()[0]).toHaveTextContent(/Reserved for 1 year, no upfront payment/)
   })
 })

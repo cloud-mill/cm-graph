@@ -1,6 +1,7 @@
 import { type ReactNode, useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Check, ChevronsUpDown, X } from 'lucide-react'
+import { useBackLayer } from '../core/nav'
 import { useStore } from '../core/store'
 
 export function Segmented<T extends string>({ value, options, onChange, size }: {
@@ -46,6 +47,8 @@ export function Modal({ title, subtitle, onClose, children, width = 560, footer 
   // subscribed once, so a re-render during the key event cannot drop the listener
   const closeRef = useRef(onClose)
   useLayoutEffect(() => { closeRef.current = onClose })
+  // the phone's Back button closes a dialog before it leaves the page
+  useBackLayer(true, onClose)
   useEffect(() => {
     const k = (e: KeyboardEvent) => { if (e.key === 'Escape') { e.stopPropagation(); closeRef.current() } }
     window.addEventListener('keydown', k, true)
@@ -79,8 +82,10 @@ export const typeAhead = (ch: string) => { typedAhead += ch }
 useStore.subscribe((s, prev) => { if (s.focusName !== prev.focusName) { focusAskedAt = performance.now(); typedAhead = '' } })
 
 /** Text input that keeps local state while typing so external updates don't fight the caret. */
-export function TextInput({ value, onChange, placeholder, className, autoFocusKey, multiline, mono, label }: {
+export function TextInput({ value, onChange, placeholder, className, autoFocusKey, multiline, mono, label, list, inputMode }: {
   value: string; onChange: (v: string) => void; placeholder?: string; className?: string; autoFocusKey?: number; multiline?: boolean; mono?: boolean; label: string
+  /** id of a list of suggestions */
+  list?: string; inputMode?: 'text' | 'numeric'
 }) {
   const ref = useRef<any>(null)
   useEffect(() => {
@@ -99,7 +104,7 @@ export function TextInput({ value, onChange, placeholder, className, autoFocusKe
     onKeyDown: (e: any) => { if (e.key === 'Escape' || (e.key === 'Enter' && !multiline)) e.currentTarget.blur() },
     spellCheck: false,
   }
-  return multiline ? <textarea rows={3} {...props} /> : <input {...props} />
+  return multiline ? <textarea rows={3} {...props} /> : <input {...props} list={list} inputMode={inputMode} />
 }
 
 export function NumberInput({ value, onChange, min = 0, max = 1e7, step = 1, unit, label }: {
@@ -192,6 +197,7 @@ export function Select<T extends string>({ value, options, onChange, label, clas
   value: T; options: { value: T; label: string }[]; onChange: (v: T) => void; label?: string; className?: string
 }) {
   const [open, setOpen] = useState(false)
+  useBackLayer(open, () => setOpen(false))
   const [active, setActive] = useState(0)
   const [pos, setPos] = useState<{ left: number; top?: number; bottom?: number; width: number; maxHeight: number } | null>(null)
   const trigger = useRef<HTMLButtonElement>(null)

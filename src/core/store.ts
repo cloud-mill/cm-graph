@@ -2,8 +2,10 @@ import { create } from 'zustand'
 import { defOf, defaultProps } from './catalog'
 import { ISO_PITCH, ISO_YAW } from './iso'
 import { inArea } from './layout'
+import { guessKind, kindInfo } from './links'
+import { legOfRun, routeAll } from './router'
 import { getPref, saveDoc, setPref } from './storage'
-import { type AreaT, type Doc, type EdgeT, type LabelT, type NodeT, type PricingModel, emptyDoc, uid } from './types'
+import { type AreaT, type Doc, type EdgeT, type LabelT, type LinkKind, type NodeT, type PricingModel, type Side, emptyDoc, uid } from './types'
 
 export type Tool = 'select' | 'connect' | 'area' | 'text' | 'orbit'
 export type Panel = 'inspect' | 'budget' | 'advisor'
@@ -21,6 +23,8 @@ interface State {
   placing: string | null
   /** with the connect tool: the component a connection is being drawn from, waiting for its other end */
   linkFrom: string | null
+  /** the component or connection whose flow is being followed; everything off its paths is dimmed */
+  trace: string | null
   /** touch: taps add to the selection instead of replacing it */
   multi: boolean
   view: View
@@ -62,6 +66,18 @@ interface State {
 
   addNode: (type: string, x: number, y: number) => string
   addEdge: (from: string, to: string) => string | null
+  /** a second connection between the same two components, for a second relationship */
+  twinEdge: (id: string) => string | null
+  /** move one end of a connection to another component, optionally pinned to a side of it */
+  reconnect: (id: string, end: 'from' | 'to', node: string, side?: Side) => boolean
+  /** say what a connection is; the line style follows */
+  setKind: (ids: string[], kind: LinkKind) => void
+  /** swap which end a connection starts from, keeping its path */
+  reverseEdge: (ids: string[]) => void
+  /** hand a connection's path back to the automatic router */
+  resetRoute: (ids: string[]) => void
+  /** put a waypoint on the longest run of a connection, ready to be dragged; returns its index */
+  addBend: (id: string) => number
   addArea: (a: Omit<AreaT, 'id'>) => string
   addLabel: (x: number, y: number) => string
   patchNode: (id: string, p: Partial<NodeT>) => void
@@ -104,6 +120,7 @@ export const useStore = create<State>((set, get) => ({
   tool: 'select',
   placing: null,
   linkFrom: null,
+  trace: null,
   multi: false,
   view: { x: 0, y: 0, k: 1 },
   yaw: ISO_YAW,
@@ -126,7 +143,7 @@ export const useStore = create<State>((set, get) => ({
   fresh: null,
   modal: null,
 
-  load: (doc) => set({ doc, past: [], future: [], selection: [], tool: 'select', placing: null, linkFrom: null, multi: false, saved: true, saveFailed: false, lens: 'none', modal: null, panel: 'inspect' }),
+  load: (doc) => set({ doc, past: [], future: [], selection: [], tool: 'select', placing: null, linkFrom: null, trace: null, multi: false, saved: true, saveFailed: false, lens: 'none', modal: null, panel: 'inspect' }),
 
   apply: (fn, transient) => {
     const { doc, past } = get()
@@ -141,12 +158,12 @@ export const useStore = create<State>((set, get) => ({
     const { past, doc, future } = get()
     if (!past.length) return
     const prev = past[past.length - 1]
-    set({ doc: touch(prev), past: past.slice(0, -1), future: [doc, ...future], selection: [], saved: false })
+    set({ doc: touch(prev), past: past.slice(0, -1), future: [doc, ...future], selection: stillThere(prev, get().selection), saved: false })
   },
   redo: () => {
     const { past, doc, future } = get()
     if (!future.length) return
-    set({ doc: touch(future[0]), past: [...past.slice(-(HISTORY - 1)), doc], future: future.slice(1), selection: [], saved: false })
+    set({ doc: touch(future[0]), past: [...past.slice(-(HISTORY - 1)), doc], future: future.slice(1), selection: stillThere(future[0], get().selection), saved: false })
   },
   select: (ids, additive) =>
     set((s) => {
@@ -180,10 +197,56 @@ export const useStore = create<State>((set, get) => ({
     const { doc } = get()
     if (from === to) return null
     if (!doc.nodes.some((n) => n.id === from) || !doc.nodes.some((n) => n.id === to)) return null
+    // one line between two components by default, whichever way it was dragged: a slip of the hand should not double it.
+    // A second relationship is added on purpose, from the connection's inspector
     if (doc.edges.some((e) => (e.from === from && e.to === to) || (e.from === to && e.to === from))) return null
     const id = uid()
-    get().apply((d) => ({ ...d, edges: [...d.edges, { id, from, to, style: 'solid', arrow: 'end', width: 2 }] }))
+    const a = doc.nodes.find((n) => n.id === from)!, b = doc.nodes.find((n) => n.id === to)!
+    const kind = guessKind(a, b), k = kindInfo(kind)!
+    get().apply((d) => ({ ...d, edges: [...d.edges, { id, from, to, style: k.style, arrow: k.arrow, width: 2, kind, origin: 'drawn' as const }] }))
     return id
+  },
+  twinEdge: (id) => {
+    const e = get().doc.edges.find((x) => x.id === id)
+    if (!e) return null
+    const copy = { ...e, id: uid(), label: undefined, protocol: undefined, port: undefined, via: undefined, fromSide: undefined, toSide: undefined, origin: 'drawn' as const }
+    get().apply((d) => ({ ...d, edges: [...d.edges, copy] }))
+    set({ selection: [copy.id] })
+    return copy.id
+  },
+  reconnect: (id, end, node, side) => {
+    const { doc } = get()
+    const e = doc.edges.find((x) => x.id === id)
+    if (!e || !doc.nodes.some((n) => n.id === node)) return false
+    const from = end === 'from' ? node : e.from, to = end === 'to' ? node : e.to
+    if (from === to) return false
+    const key = end === 'from' ? 'fromSide' : 'toSide'
+    // moving an end onto another component keeps the shape the user gave the line; a side is pinned only when they aimed for one
+    get().apply((d) => ({ ...d, edges: d.edges.map((x) => (x.id === id ? { ...x, from, to, [key]: side } : x)) }))
+    return true
+  },
+  setKind: (ids, kind) => {
+    const k = kindInfo(kind)!
+    get().apply((d) => ({ ...d, edges: d.edges.map((e) => (ids.includes(e.id) ? { ...e, kind, style: k.style, arrow: k.arrow } : e)) }))
+  },
+  reverseEdge: (ids) => get().apply((d) => ({
+    ...d,
+    // the same line the other way round: its ends swap, and so do the sides and the order of its waypoints
+    edges: d.edges.map((e) => (ids.includes(e.id) ? { ...e, from: e.to, to: e.from, fromSide: e.toSide, toSide: e.fromSide, ...(e.via ? { via: [...e.via].reverse() } : {}) } : e)),
+  })),
+  resetRoute: (ids) => get().apply((d) => ({ ...d, edges: d.edges.map((e) => (ids.includes(e.id) && (e.via || e.fromSide || e.toSide) ? { ...e, via: undefined, fromSide: undefined, toSide: undefined } : e)) })),
+  addBend: (id) => {
+    const { doc } = get()
+    const e = doc.edges.find((x) => x.id === id), r = e && routeAll(doc.nodes, doc.edges).get(id)
+    if (!e || !r) return -1
+    // on the longest straight run, where there is the most room to pull it somewhere
+    let best = 0, len = -1
+    for (let i = 0; i < r.pts.length - 1; i++) { const l = Math.abs(r.pts[i + 1][0] - r.pts[i][0]) + Math.abs(r.pts[i + 1][1] - r.pts[i][1]); if (l > len) { len = l; best = i } }
+    const a = r.pts[best], b = r.pts[best + 1], at: [number, number] = [Math.round((a[0] + b[0])) / 2, Math.round((a[1] + b[1])) / 2]
+    const index = legOfRun(r, best), via = [...(e.via ?? [])]
+    via.splice(index, 0, at)
+    get().apply((d) => ({ ...d, edges: d.edges.map((x) => (x.id === id ? { ...x, via } : x)) }))
+    return index
   },
   addArea: (a) => {
     const id = uid()
@@ -223,7 +286,7 @@ export const useStore = create<State>((set, get) => ({
     const sel = new Set(ids)
     const map = new Map<string, string>()
     const nodes = renumber(doc.nodes.filter((n) => sel.has(n.id)).map((n) => { const id = uid(); map.set(n.id, id); return { ...n, id, x: n.x + dx, y: n.y + dy } }), doc.nodes)
-    const edges = doc.edges.filter((e) => map.has(e.from) && map.has(e.to)).map((e) => ({ ...e, id: uid(), from: map.get(e.from)!, to: map.get(e.to)! }))
+    const edges = doc.edges.filter((e) => map.has(e.from) && map.has(e.to)).map((e) => ({ ...e, id: uid(), from: map.get(e.from)!, to: map.get(e.to)!, ...(e.via ? { via: e.via.map(([x, y]) => [x + dx, y + dy] as [number, number]) } : {}) }))
     const areas = doc.areas.filter((a) => sel.has(a.id)).map((a) => ({ ...a, id: uid(), x: a.x + dx, y: a.y + dy }))
     const labels = doc.labels.filter((l) => sel.has(l.id)).map((l) => ({ ...l, id: uid(), x: l.x + dx, y: l.y + dy }))
     if (!nodes.length && !areas.length && !labels.length) return
@@ -250,7 +313,7 @@ export const useStore = create<State>((set, get) => ({
     const off = pasteCount * 2
     const map = new Map<string, string>()
     const nodes = renumber(clipboard.nodes.map((n) => { const id = uid(); map.set(n.id, id); return { ...n, id, x: n.x + off, y: n.y + off } }), get().doc.nodes)
-    const edges = clipboard.edges.map((e) => ({ ...e, id: uid(), from: map.get(e.from)!, to: map.get(e.to)! }))
+    const edges = clipboard.edges.map((e) => ({ ...e, id: uid(), from: map.get(e.from)!, to: map.get(e.to)!, ...(e.via ? { via: e.via.map(([x, y]) => [x + off, y + off] as [number, number]) } : {}) }))
     const areas = clipboard.areas.map((a) => ({ ...a, id: uid(), x: a.x + off, y: a.y + off }))
     const labels = clipboard.labels.map((l) => ({ ...l, id: uid(), x: l.x + off, y: l.y + off }))
     get().apply((d) => ({ ...d, nodes: [...d.nodes, ...nodes], edges: [...d.edges, ...edges], areas: [...d.areas, ...areas], labels: [...d.labels, ...labels] }))
@@ -272,6 +335,13 @@ export const useStore = create<State>((set, get) => ({
  * Move selected items by a delta measured from `base` (the doc at drag start).
  * Moving an area carries the nodes, labels and areas that sit inside it.
  */
+/** What is selected stays selected through undo and redo, as long as it still exists: stepping back mid-edit should not drop what you were editing. */
+function stillThere(doc: Doc, selection: string[]): string[] {
+  if (!selection.length) return selection
+  const ids = new Set([...doc.nodes, ...doc.edges, ...doc.areas, ...doc.labels].map((x) => x.id))
+  return selection.filter((id) => ids.has(id))
+}
+
 export function moveItems(doc: Doc, base: Doc, sel: Set<string>, dx: number, dy: number): Doc {
   if (!dx && !dy && doc === base) return doc
   const carried = new Set(sel)
@@ -284,11 +354,17 @@ export function moveItems(doc: Doc, base: Doc, sel: Set<string>, dx: number, dy:
   const bn = new Map(base.nodes.map((n) => [n.id, n]))
   const ba = new Map(base.areas.map((n) => [n.id, n]))
   const bl = new Map(base.labels.map((n) => [n.id, n]))
+  const be = new Map(base.edges.map((e) => [e.id, e]))
   return {
     ...doc,
     nodes: doc.nodes.map((n) => (carried.has(n.id) && bn.has(n.id) ? { ...n, x: bn.get(n.id)!.x + dx, y: bn.get(n.id)!.y + dy } : n)),
     areas: doc.areas.map((a) => (carried.has(a.id) && ba.has(a.id) ? { ...a, x: ba.get(a.id)!.x + dx, y: ba.get(a.id)!.y + dy } : a)),
     labels: doc.labels.map((l) => (carried.has(l.id) && bl.has(l.id) ? { ...l, x: bl.get(l.id)!.x + dx, y: bl.get(l.id)!.y + dy } : l)),
+    // a hand-shaped line whose two ends move together keeps its shape; one whose ends part company keeps its waypoints where they are
+    edges: doc.edges.map((e) => {
+      const b = be.get(e.id)
+      return b?.via && carried.has(e.from) && carried.has(e.to) ? { ...e, via: b.via.map(([x, y]) => [x + dx, y + dy] as [number, number]) } : e
+    }),
   }
 }
 

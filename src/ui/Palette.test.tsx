@@ -1,13 +1,13 @@
 // @vitest-environment jsdom
-import { fireEvent, render, screen } from '@testing-library/react'
+import { act, fireEvent, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { CATALOG_LIST } from '../core/catalog'
 import { getPref } from '../core/storage'
 import { useStore } from '../core/store'
 import { docOf, node, resetStore } from '../test/helpers'
 import { PHONE, stubMedia } from '../test/media'
-import { Palette } from './Palette'
+import { CloudSeg, Palette } from './Palette'
 
 const S = () => useStore.getState()
 const items = () => [...document.querySelectorAll('.pal-item')] as HTMLElement[]
@@ -155,5 +155,120 @@ describe('Palette', () => {
     fireEvent.pointerDown(vm, { button: 0, pointerType: 'mouse' })
     fireEvent.click(vm)
     expect(S().doc.nodes).toHaveLength(0)
+  })
+})
+
+describe('Palette on a phone', () => {
+  beforeEach(() => { stubMedia(PHONE) })
+  afterEach(() => { vi.unstubAllGlobals() })
+  const chips = () => within(screen.getByRole('radiogroup', { name: 'Category' })).getAllByRole('radio')
+
+  it('is a search field, a row of category chips and the list: the cloud switch lives in the sheet header', () => {
+    render(<Palette />)
+    expect(document.querySelector('.palette')).toHaveClass('touch')
+    expect(screen.queryByRole('radiogroup', { name: 'Cloud provider' })).toBeNull()
+    expect(screen.getByPlaceholderText(`Search ${CATALOG_LIST.length} components`)).toBeInTheDocument()
+    expect(chips()[0]).toHaveTextContent('All')
+    expect(chips()[0]).toHaveAttribute('aria-checked', 'true')
+    expect(chips().length).toBeGreaterThan(5)
+    // no drop-down to cover the list it filters
+    expect(document.querySelector('.cat-select')).toBeNull()
+    expect(items()).toHaveLength(count('aws'))
+  })
+  it('a chip narrows the list to its category, and All brings everything back', () => {
+    render(<Palette />)
+    fireEvent.click(screen.getByRole('radio', { name: 'Database' }))
+    expect([...document.querySelectorAll('.palette h4')].map((h) => h.textContent!.replace(/\d+$/, ''))).toEqual(['Database'])
+    expect(screen.getByRole('radio', { name: 'Database' })).toHaveAttribute('aria-checked', 'true')
+    expect(items().length).toBeLessThan(count('aws'))
+    fireEvent.click(screen.getByRole('radio', { name: 'All' }))
+    expect(items()).toHaveLength(count('aws'))
+  })
+  it('searching looks everywhere, so the chips step back until the search is cleared', async () => {
+    render(<Palette />)
+    fireEvent.click(screen.getByRole('radio', { name: 'Database' }))
+    await userEvent.type(screen.getByLabelText('Search components'), 'queue')
+    expect(items().map((i) => i.querySelector('.pal-name')!.textContent)).toContain('SQS')
+    expect(chips().every((c) => (c as HTMLButtonElement).disabled)).toBe(true)
+    await userEvent.click(screen.getByRole('button', { name: 'Clear search' }))
+    expect(screen.getByLabelText('Search components')).toHaveValue('')
+    expect(screen.getByLabelText('Search components')).toHaveFocus()
+    expect(chips().every((c) => !(c as HTMLButtonElement).disabled)).toBe(true)
+    expect([...document.querySelectorAll('.palette h4')]).toHaveLength(1) // the category chosen before is still chosen
+  })
+  it('the keyboard search key puts the keyboard away so the results can be seen', async () => {
+    render(<Palette />)
+    const field = screen.getByLabelText('Search components')
+    await userEvent.type(field, 'lambda{Enter}')
+    expect(field).not.toHaveFocus()
+    expect(field).toHaveValue('lambda')
+    expect(field).toHaveAttribute('enterkeyhint', 'search')
+  })
+  it('a new search or filter starts the list from the top', async () => {
+    render(<Palette />)
+    const list = document.querySelector('.palette-scroll') as HTMLElement
+    const scrollTo = vi.fn<(x: number, y: number) => void>()
+    list.scrollTo = scrollTo as unknown as typeof list.scrollTo
+    fireEvent.click(screen.getByRole('radio', { name: 'Storage' }))
+    expect(scrollTo).toHaveBeenLastCalledWith(0, 0)
+    scrollTo.mockClear()
+    await userEvent.type(screen.getByLabelText('Search components'), 's')
+    expect(scrollTo).toHaveBeenCalledWith(0, 0)
+  })
+})
+
+describe('library pictures', () => {
+  // each picture is a small 3D drawing: they are drawn as their tiles come near the screen, not all at once
+  let seen: (els: Element[]) => void
+  const observed = new Set<Element>()
+  beforeEach(() => {
+    observed.clear()
+    vi.resetModules()
+    vi.stubGlobal('IntersectionObserver', class {
+      constructor(cb: (entries: { isIntersecting: boolean; target: Element }[]) => void) { seen = (els) => cb(els.map((target) => ({ isIntersecting: true, target }))) }
+      observe(el: Element) { observed.add(el) }
+      unobserve(el: Element) { observed.delete(el) }
+      disconnect() {}
+    })
+  })
+  afterEach(() => { vi.unstubAllGlobals() })
+
+  it('draws nothing up front, then each picture once its tile is near, and stops watching it', async () => {
+    const { Palette: Lazy } = await import('./Palette')
+    render(<Lazy />)
+    expect(items()).toHaveLength(count('aws'))
+    expect(document.querySelectorAll('.pal-item svg')).toHaveLength(0)
+    expect(document.querySelectorAll('.pal-ph')).toHaveLength(count('aws'))
+    expect(observed.size).toBe(count('aws'))
+    const first = items().slice(0, 6)
+    act(() => seen(first))
+    expect(document.querySelectorAll('.pal-item svg')).toHaveLength(6)
+    first.forEach((t) => expect(observed.has(t)).toBe(false))
+    // names are there from the start, so the list can be read and tapped before its pictures arrive
+    expect(items()[20]).toHaveTextContent(/\w/)
+  })
+  it('a tile that leaves the list stops being watched', async () => {
+    const { Palette: Lazy } = await import('./Palette')
+    render(<Lazy />)
+    const before = observed.size
+    await userEvent.type(screen.getByLabelText('Search components'), 'lambda')
+    expect(observed.size).toBeLessThan(before)
+  })
+  it('a tile that is not near yet stays undrawn', async () => {
+    const { Palette: Lazy } = await import('./Palette')
+    render(<Lazy />)
+    act(() => (seen as unknown as (e: { isIntersecting: boolean; target: Element }[]) => void)(items().slice(0, 3) as never))
+    expect(document.querySelectorAll('.pal-item svg').length).toBe(3)
+  })
+})
+
+describe('CloudSeg', () => {
+  it('switches cloud and remembers the choice on its own, as it does in the phone sheet header', async () => {
+    render(<CloudSeg />)
+    expect(screen.getByRole('radio', { name: 'AWS' })).toHaveAttribute('aria-checked', 'true')
+    await userEvent.click(screen.getByRole('radio', { name: 'GCP' }))
+    expect(S().provider).toBe('gcp')
+    expect(getPref('provider', 'aws')).toBe('gcp')
+    expect(screen.getByRole('radio', { name: 'GCP' })).toHaveAttribute('aria-checked', 'true')
   })
 })

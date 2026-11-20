@@ -169,7 +169,8 @@ describe('dock with other things selected', () => {
     mount({ selection: ['e'] })
     const nav = screen.getByRole('navigation', { name: 'Selection' })
     expect(nav).toHaveTextContent('Connection')
-    expect(buttons(nav)).toEqual(['Deselect', 'Edit', 'Reverse', 'Delete'])
+    expect(nav).toHaveTextContent('web connects to db') // what it joins, in words
+    expect(buttons(nav)).toEqual(['Deselect', 'Edit', 'Follow', 'Bend', 'Reverse', 'Delete'])
     tap('Reverse')
     expect(S().doc.edges[0]).toMatchObject({ id: 'e', from: 'b', to: 'a' })
     S().undo()
@@ -286,6 +287,18 @@ describe('ViewFabs', () => {
     expect(Math.abs(S().view.x)).toBeLessThan(2000)
     act(() => { vi.advanceTimersByTime(300) })
     expect(screen.queryByRole('button', { name: 'Back to diagram' })).toBeNull()
+  })
+  it('with something selected, offers to add the next component without deselecting first', () => {
+    resetStore({ doc: DOC(), showInsp: true })
+    render(<ViewFabs />)
+    expect(screen.queryByRole('button', { name: 'Add another component' })).toBeNull()
+    act(() => S().select(['a']))
+    fireEvent.click(screen.getByRole('button', { name: 'Add another component' }))
+    expect(S()).toMatchObject({ showLib: true, showInsp: false })
+    expect(S().selection).toEqual(['a'])
+    // not while a tool is in use: the dock is showing its prompt then
+    act(() => S().set({ tool: 'connect' }))
+    expect(screen.queryByRole('button', { name: 'Add another component' })).toBeNull()
   })
   it('an empty blueprint is never lost', () => {
     resetStore({ doc: docOf([]), view: { x: 9000, y: 9000, k: 1 } })

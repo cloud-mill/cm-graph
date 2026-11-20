@@ -1,6 +1,11 @@
 node_modules
 dist
-/foo/
 coverage
 playwright-report
 test-results
+
+# IDE
+/.idea/
+
+# misc
+/foo/

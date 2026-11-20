@@ -164,6 +164,43 @@ describe('Sheet', () => {
     fireEvent.focusIn(screen.getByLabelText('Search'))
     expect(tall()).toBe(true)
   })
+  it('hands the room back when the typing is over', () => {
+    mount()
+    fireEvent.focusIn(screen.getByLabelText('Search'))
+    expect(tall()).toBe(true)
+    fireEvent.focusOut(screen.getByLabelText('Search'))
+    expect(tall()).toBe(false)
+  })
+  it('stays tall while moving from one field to the next', () => {
+    render(<Sheet label="Library" onClose={() => {}}><input aria-label="One" /><input aria-label="Two" /><button>Body</button></Sheet>)
+    fireEvent.focusIn(screen.getByLabelText('One'))
+    fireEvent.focusOut(screen.getByLabelText('One'), { relatedTarget: screen.getByLabelText('Two') })
+    expect(tall()).toBe(true)
+    fireEvent.focusOut(screen.getByLabelText('Two'), { relatedTarget: screen.getByText('Body') })
+    expect(tall()).toBe(false)
+  })
+  it('a sheet the user had already pulled tall stays tall after typing', () => {
+    mount({ startTall: true })
+    fireEvent.focusIn(screen.getByLabelText('Search'))
+    fireEvent.focusOut(screen.getByLabelText('Search'))
+    expect(tall()).toBe(true)
+  })
+  it('a height chosen by hand while typing is kept', () => {
+    mount()
+    fireEvent.focusIn(screen.getByLabelText('Search'))
+    pull(0) // a tap on the handle: down to half
+    expect(tall()).toBe(false)
+    pull(-200) // and pulled back up on purpose
+    expect(tall()).toBe(true)
+    fireEvent.focusOut(screen.getByLabelText('Search'))
+    expect(tall()).toBe(true)
+  })
+  it('losing focus from something that is not a field changes nothing', () => {
+    mount()
+    fireEvent.focusIn(screen.getByLabelText('Search'))
+    fireEvent.focusOut(screen.getByText('Body'))
+    expect(tall()).toBe(true)
+  })
 })
 
 describe('Sheet and the camera', () => {
@@ -202,6 +239,85 @@ describe('Sheet and the camera', () => {
     expect(y).toBeLessThan(844 - 440)
     expect(x).toBeGreaterThan(0)
     expect(x).toBeLessThan(390)
+  })
+  it('opens at two thirds when asked to be roomy', () => {
+    mount({ roomy: true })
+    expect(sheet()).toHaveClass('roomy')
+  })
+  it('slides the selection into sight at exactly the zoom the user chose', () => {
+    useStore.setState({ selection: ['a'], view: { x: 100, y: 1500, k: 1.7 } })
+    mount()
+    vi.advanceTimersByTime(1200)
+    expect(useStore.getState().view.k).toBe(1.7)
+    expect(useStore.getState().view.y).not.toBe(1500)
+  })
+  it('leaves the view alone when the selection is already in sight above the sheet', () => {
+    const q = pt(makeCam(useStore.getState().yaw, useStore.getState().pitch), 1, 1)
+    const view = { x: 195 - q[0], y: 230 - q[1], k: 1 }
+    useStore.setState({ selection: ['a'], view })
+    const { unmount } = mount()
+    vi.advanceTimersByTime(1200)
+    expect(useStore.getState().view).toEqual(view)
+    unmount()
+    vi.advanceTimersByTime(1200)
+    expect(useStore.getState().view).toEqual(view)
+  })
+  it('putting the sheet away puts the view back where it was', () => {
+    const before = { x: 100, y: 1500, k: 0.8 }
+    useStore.setState({ selection: ['a'], view: before })
+    const { unmount } = mount()
+    vi.advanceTimersByTime(1200)
+    expect(useStore.getState().view).not.toEqual(before)
+    unmount()
+    vi.advanceTimersByTime(1200)
+    expect(useStore.getState().view).toEqual(before)
+  })
+  it('a sheet put away while the view is still gliding to make room still puts the view back', () => {
+    const before = { x: 100, y: 1500, k: 0.8 }
+    useStore.setState({ selection: ['a'], view: before })
+    const { unmount } = mount()
+    vi.advanceTimersByTime(60 + 120) // the glide has started and is nowhere near done
+    expect(useStore.getState().view).not.toEqual(before)
+    unmount()
+    vi.advanceTimersByTime(1200)
+    expect(useStore.getState().view).toEqual(before)
+  })
+  it('but not if the user has moved the view in the meantime', () => {
+    useStore.setState({ selection: ['a'], view: { x: 100, y: 1500, k: 0.8 } })
+    const { unmount } = mount()
+    vi.advanceTimersByTime(1200)
+    const mine = { ...useStore.getState().view, x: useStore.getState().view.x + 80 }
+    useStore.setState({ view: mine })
+    unmount()
+    vi.advanceTimersByTime(1200)
+    expect(useStore.getState().view).toEqual(mine)
+  })
+  it('remembers the original view through a change of height', () => {
+    const before = { x: 100, y: 1500, k: 0.8 }
+    useStore.setState({ view: before })
+    const { unmount } = mount()
+    vi.advanceTimersByTime(1200)
+    box = { left: 0, top: 60, width: 390, height: 784 }
+    pull(-200)
+    vi.advanceTimersByTime(1200)
+    unmount()
+    vi.advanceTimersByTime(1200)
+    expect(useStore.getState().view).toEqual(before)
+  })
+  it('a blueprint that is already framed is not moved at all', () => {
+    mount()
+    vi.advanceTimersByTime(1200)
+    const framed = useStore.getState().view
+    const { unmount } = mount()
+    vi.advanceTimersByTime(1200)
+    expect(useStore.getState().view).toEqual(framed)
+    unmount()
+  })
+  it('sideways, a column that stops short of the full height is still a side sheet', () => {
+    vi.stubGlobal('innerWidth', 844); vi.stubGlobal('innerHeight', 390)
+    box = { left: 464, top: 52, width: 380, height: 338 }
+    mount()
+    expect(chrome).toEqual({ bottom: 0, right: 380 })
   })
   it('with nothing selected, re-frames the whole blueprint in the room that is left', () => {
     useStore.setState({ view: { x: 100, y: 1500, k: 0.8 } })

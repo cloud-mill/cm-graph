@@ -143,6 +143,7 @@ describe('CommandPalette', () => {
     expect(S().toasts.at(-1)!.text).toBe('Version saved')
   })
   it('goes back to the list of blueprints', async () => {
+    location.hash = '#/d/some-blueprint'
     await run('back to all')
     expect(location.hash).toBe('#/')
   })

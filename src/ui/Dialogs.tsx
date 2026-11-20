@@ -6,6 +6,7 @@ import { budgetCsv, download, slug } from '../core/files'
 import { makeCam, makeProj } from '../core/iso'
 import { type Snapshot, addSnapshot, coerceDoc, listSnapshots, removeSnapshot } from '../core/storage'
 import { useStore } from '../core/store'
+import { isPhone } from './device'
 import { SAMPLE_TF, exportTerraform, importTerraform } from '../core/terraform'
 import type { Doc } from '../core/types'
 import { Modal, Segmented, Toggle, keys } from './atoms'
@@ -153,7 +154,7 @@ export function ImportDialog({ onClose, onDoc }: { onClose: () => void; onDoc?: 
       <div className="export-grid import">
         <textarea className="code-input" aria-label={mode === 'tf' ? 'Terraform source' : 'Blueprint JSON'} spellCheck={false} value={text} onChange={(e) => setText(e.target.value)}
           onDragOver={(e) => e.preventDefault()} onDrop={(e) => { e.preventDefault(); onFile(e.dataTransfer.files[0]) }}
-          placeholder={mode === 'tf' ? 'Paste or drop .tf files here.\n\nResources become components,\nreferences become connections,\nand networks become areas.\n\nWorks with the aws, google and\nazurerm providers.' : 'Paste or drop a .cloudmill.json file here.'} />
+          placeholder={isPhone() ? (mode === 'tf' ? 'Paste Terraform here,\nor load the sample above.\n\naws, google and azurerm\nproviders are understood.' : 'Paste a .cloudmill.json\nfile here.') : mode === 'tf' ? 'Paste or drop .tf files here.\n\nResources become components,\nreferences become connections,\nand networks become areas.\n\nWorks with the aws, google and\nazurerm providers.' : 'Paste or drop a .cloudmill.json file here.'} />
         <div className="export-preview" style={{ background: THEMES[s.theme].bg }}>
           {ok ? <Preview doc={ok.doc} theme={s.theme} /> : <div className="muted center">{result && 'error' in result ? result.error : 'A live preview appears here.'}</div>}
           {ok && mode === 'tf' && (
@@ -254,10 +255,13 @@ export function HistoryDialog({ onClose }: { onClose: () => void }) {
           ))}
           {!snaps.length && <div className="muted pad">No versions yet. Save one before a big change. It is stored alongside the blueprint in this browser.</div>}
         </div>
-        <div className="export-preview" style={{ background: THEMES[s.theme].bg }}>
-          {pick ? <Preview doc={pick.doc} theme={s.theme} /> : <div className="muted center">Select a version to preview it.</div>}
-          {pick && <button className="btn primary float" onClick={() => restore(pick)}><RotateCcw size={14} />Restore this version</button>}
-        </div>
+        {/* with nothing saved there is nothing to preview: on a phone that empty box would be half the screen */}
+        {(snaps.length > 0 || !isPhone()) && (
+          <div className="export-preview" style={{ background: THEMES[s.theme].bg }}>
+            {pick ? <Preview doc={pick.doc} theme={s.theme} /> : <div className="muted center">Select a version to preview it.</div>}
+            {pick && <button className="btn primary float" onClick={() => restore(pick)}><RotateCcw size={14} />Restore this version</button>}
+          </div>
+        )}
       </div>
     </Modal>
   )

@@ -41,8 +41,10 @@ export function analyze(doc: Doc): { findings: Finding[]; score: number } {
     outs.get(a.id)!.push(b); ins.get(b.id)!.push(a)
     if (e.arrow === 'both') { outs.get(b.id)!.push(a); ins.get(a.id)!.push(b) }
   }
+  // measured on the whole blueprint, so a change that also moves how much of a free allowance is used is counted honestly
+  const before = docCost(doc).total
   const saving = (n: NodeT, props: Record<string, any>) =>
-    costOf(n, doc.region).monthly - costOf({ ...n, props: { ...n.props, ...props } }, doc.region).monthly
+    before - docCost({ ...doc, nodes: doc.nodes.map((x) => (x.id === n.id ? { ...x, props: { ...x.props, ...props } } : x)) }).total
 
   for (const n of doc.nodes) {
     const name = nodeName(n)
@@ -176,7 +178,7 @@ export function analyze(doc: Doc): { findings: Finding[]; score: number } {
     F.push({
       id: 'commit', severity: 'low', pillar: 'Cost', nodes: [], saving: od - c1,
       title: 'Steady compute is billed on-demand',
-      detail: 'A 1-year compute commitment covering always-on instances and databases would lower this bill by roughly 28% on eligible usage. Compare pricing models in the Budget tab.',
+      detail: `Reserving the always-on instances, databases and caches for a year, with no upfront payment, would lower this bill by ${Math.round(((od - c1) / od) * 100)}% at published reserved rates. Compare pricing models in the Budget tab.`,
     })
   }
 
