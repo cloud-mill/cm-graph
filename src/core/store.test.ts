@@ -585,19 +585,41 @@ describe('shaping and rewiring connections', () => {
     expect(E().kind).toBeUndefined()
     expect(E()).toMatchObject({ style: 'solid', arrow: 'end' })
   })
-  it('adds a bend in the middle of the longest run, and it can be undone', () => {
-    start()
-    expect(S().addBend('e')).toBe(0)
-    expect(E().via).toEqual([[5, 1]])
+  it('straightens a connection in one undo step, and says how many could not be', () => {
+    start({ runs: [2.5, 4, 5.5], fromSide: 'e', toSide: 'w', fromAt: 0, toAt: 0 })
+    expect(S().straighten(['e'])).toEqual({ straight: 1, apart: 0 })
+    expect(E()).toMatchObject({ runs: [], fromSide: 'e', toSide: 'w' })
     S().undo()
-    expect(E().via).toBeUndefined()
-    expect(S().addBend('nope')).toBe(-1)
+    expect(E().runs).toEqual([2.5, 4, 5.5])
+    // a and c are out of line on both axes
+    const id = S().addEdge('a', 'c')!
+    expect(S().straighten([id])).toEqual({ straight: 0, apart: 1 })
   })
-  it('a second bend goes in the right place along the line', () => {
-    start({ via: [[4, 6]] })
-    const i = S().addBend('e')
-    expect(E().via).toHaveLength(2)
-    expect(E().via![i]).not.toEqual([4, 6])
+  it('lines two components up so the connection between them is straight, in one undo step', () => {
+    start()
+    const id = S().addEdge('a', 'c')!
+    const was = S().doc.nodes.find((n) => n.id === 'c')!
+    S().lineUp(id)
+    const now = S().doc.nodes.find((n) => n.id === 'c')!
+    expect(now.x === was.x && now.y === was.y).toBe(false)
+    expect(S().doc.edges.find((x) => x.id === id)!.runs).toEqual([])
+    S().undo()
+    expect(S().doc.nodes.find((n) => n.id === 'c')).toEqual(was)
+    expect(S().doc.edges.find((x) => x.id === id)!.runs).toBeUndefined()
+  })
+  it('changes how a connection is drawn; a track laid for right angles is let go with it', () => {
+    start({ runs: [4], fromSide: 'e', toSide: 'w', fromAt: 0.5, toAt: 0 })
+    S().setShape(['e'], 'curved')
+    expect(E().shape).toBe('curved')
+    expect(E().runs).toBeUndefined(); expect(E().fromAt).toBeUndefined(); expect(E().fromSide).toBeUndefined()
+    S().setShape(['e'], 'direct')
+    expect(E().shape).toBe('direct')
+    S().setShape(['e'], undefined)
+    expect('shape' in E()).toBe(false)
+    // asking for what it already is changes nothing, and takes no undo step
+    const before = S().doc
+    S().setShape(['e'], undefined)
+    expect(S().doc.edges[0]).toBe(before.edges[0])
   })
   it('hands a shaped connection back to the router', () => {
     start({ via: [[4, 6]], fromSide: 's' })
@@ -607,20 +629,23 @@ describe('shaping and rewiring connections', () => {
     S().undo()
     expect(E()).toMatchObject({ via: [[4, 6]], fromSide: 's' })
   })
-  it('moves an end to another component, keeping the shape, and pins a side only when asked', () => {
+  it('moves an end to another component and plans the line afresh; a side is pinned only when asked', () => {
     start({ via: [[4, 6]] })
     expect(S().reconnect('e', 'to', 'c')).toBe(true)
-    expect(E()).toMatchObject({ from: 'a', to: 'c', via: [[4, 6]] })
+    // the bend was drawn for the way to `b`: it does not follow the line to somewhere else
+    expect(E()).toMatchObject({ from: 'a', to: 'c' })
+    expect(E().via).toBeUndefined()
     expect(E().toSide).toBeUndefined()
     expect(S().reconnect('e', 'from', 'b', 'n')).toBe(true)
     expect(E()).toMatchObject({ from: 'b', to: 'c', fromSide: 'n' })
     S().undo(); S().undo()
     expect(E()).toMatchObject({ from: 'a', to: 'b' })
   })
-  it('an end can be re-pinned on the component it is already on', () => {
-    start()
+  it('an end re-pinned on the component it is already on has its line planned afresh from that side', () => {
+    start({ runs: [4], fromSide: 'e', toSide: 'w', fromAt: 0.5, toAt: 0.25 })
     expect(S().reconnect('e', 'to', 'b', 's')).toBe(true)
-    expect(E()).toMatchObject({ to: 'b', toSide: 's' })
+    expect(E()).toMatchObject({ to: 'b', toSide: 's', fromSide: 'e' })
+    expect(E().runs).toBeUndefined(); expect(E().fromAt).toBeUndefined(); expect(E().toAt).toBeUndefined()
   })
   it('refuses to join a component to itself, or to something that is not there', () => {
     start()
@@ -661,7 +686,7 @@ describe('shaping and rewiring connections', () => {
   it('undo and redo keep what is still there selected', () => {
     start()
     S().select(['e'])
-    S().addBend('e')
+    S().straighten(['e'])
     S().undo()
     expect(S().selection).toEqual(['e'])
     S().redo()
@@ -677,5 +702,34 @@ describe('shaping and rewiring connections', () => {
     S().set({ trace: 'a' })
     S().load(docOf([node('z')]))
     expect(S().trace).toBeNull()
+  })
+})
+
+describe('adding something already connected', () => {
+  beforeEach(() => resetStore({ doc: docOf([node('a', 'ec2', 0, 0), node('b', 'rds', 8, 0)], [edge('e', 'a', 'b', { label: 'orders', kind: 'data', via: [[5, 3]], fromSide: 'n', toSide: 's' })]) }))
+  it('adds a component joined from another, as one undo step, with the relationship guessed as for any drawn line', () => {
+    const id = S().addLinked('s3', 0, 8, { from: 'a' })
+    expect(S().doc.nodes.at(-1)).toMatchObject({ id, type: 's3', x: 0, y: 8 })
+    expect(S().doc.edges.at(-1)).toMatchObject({ from: 'a', to: id, origin: 'drawn', kind: 'data' })
+    expect(S().selection).toEqual([id])
+    expect(S().past).toHaveLength(1)
+    S().undo()
+    expect([S().doc.nodes.length, S().doc.edges.length]).toEqual([2, 1])
+  })
+  it('puts a component into the middle of a connection: both halves keep what the line was, each end keeps its own door', () => {
+    const id = S().addLinked('lambda', 4, 0, { into: 'e' })
+    expect(S().doc.edges.map((x) => [x.from, x.to])).toEqual([['a', id], [id, 'b']])
+    expect(S().doc.edges[0]).toMatchObject({ id: 'e', label: 'orders', kind: 'data', fromSide: 'n' })
+    expect(S().doc.edges[0].toSide).toBeUndefined()
+    expect(S().doc.edges[1]).toMatchObject({ kind: 'data', toSide: 's' })
+    expect(S().doc.edges[1].fromSide).toBeUndefined()
+    expect(S().doc.edges[1].id).not.toBe('e')
+    expect(S().doc.edges.every((x) => x.via === undefined)).toBe(true)
+    expect(S().past).toHaveLength(1)
+  })
+  it('still adds the component when what it was to be joined to has gone', () => {
+    const one = S().addLinked('s3', 0, 8, { from: 'nope' }), two = S().addLinked('s3', 4, 8, { into: 'nope' })
+    expect(S().doc.nodes.map((n) => n.id)).toEqual(['a', 'b', one, two])
+    expect(S().doc.edges).toHaveLength(1)
   })
 })

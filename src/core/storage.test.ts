@@ -349,6 +349,16 @@ describe('coerceDoc: connections', () => {
     const e = coerceDoc(raw({ kind: 'telepathy', origin: 'observed', fromSide: 'up', toSide: 7, protocol: 5, port: {}, via: [[1, 'x']] }))!.edges[0] as any
     for (const k of ['kind', 'protocol', 'port', 'origin', 'via', 'fromSide', 'toSide']) expect(k in e, k).toBe(false)
   })
+  it('keeps a line\'s track, where its ends sit and how it is drawn, so a straightened line is still straight after a round trip', () => {
+    const e = coerceDoc(raw({ shape: 'curved', runs: [3, 7.5, 6], fromAt: 0.5, toAt: -0.25, fromSide: 'e', toSide: 'w' }))!.edges[0]
+    expect(e).toMatchObject({ shape: 'curved', runs: [3, 7.5, 6], fromAt: 0.5, toAt: -0.25 })
+    expect(coerceDoc(raw({ runs: [], shape: 'direct' }))!.edges[0]).toMatchObject({ runs: [], shape: 'direct' })
+  })
+  it('refuses a track, an end position or a shape that is not what it should be', () => {
+    for (const bad of [{ runs: [1, 'x'] }, { runs: 'x' }, { runs: [NaN] }, { runs: Array.from({ length: 65 }, () => 1) }]) expect('runs' in coerceDoc(raw(bad))!.edges[0], JSON.stringify(bad).slice(0, 30)).toBe(false)
+    const e = coerceDoc(raw({ fromAt: 'x', toAt: Infinity, shape: 'wiggly' }))!.edges[0]
+    for (const k of ['fromAt', 'toAt', 'shape']) expect(k in e, k).toBe(false)
+  })
   it('refuses waypoints that are not finite pairs, or absurdly many', () => {
     for (const via of [[[1, 2, 3]], [[NaN, 1]], [[Infinity, 0]], 'x', [], Array.from({ length: 65 }, () => [1, 1])]) expect('via' in coerceDoc(raw({ via }))!.edges[0], JSON.stringify(via).slice(0, 30)).toBe(false)
   })

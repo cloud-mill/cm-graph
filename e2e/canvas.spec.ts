@@ -62,7 +62,7 @@ test.describe('canvas editing', () => {
 
   test('deletes with the keyboard and removes attached connections', async ({ page, app }) => {
     await app.pick('a')
-    const handle = await page.locator('.connect-handle').boundingBox()
+    const handle = await page.locator('.door[data-side="e"]').boundingBox()
     await app.drag({ x: handle!.x + handle!.width / 2, y: handle!.y + handle!.height / 2 }, await app.world(7, 1))
     await expect(app.edges()).toHaveCount(1)
     await app.pick('a')
@@ -76,7 +76,7 @@ test.describe('canvas editing', () => {
 
   test('connects from the handle, selects the new connection, and refuses a duplicate', async ({ page, app }) => {
     await app.pick('a')
-    const h = await page.locator('.connect-handle').boundingBox()
+    const h = await page.locator('.door[data-side="e"]').boundingBox()
     const start = { x: h!.x + h!.width / 2, y: h!.y + h!.height / 2 }
     await app.drag(start, await app.world(7, 1))
     await expect(app.edges()).toHaveCount(1)
@@ -85,7 +85,7 @@ test.describe('canvas editing', () => {
     await expect(page.locator('.insp-sub')).toHaveText('web-1 reads and writes orders-db')
     // the reverse direction counts as the same connection
     await app.pick('b')
-    const h2 = await page.locator('.connect-handle').boundingBox()
+    const h2 = await page.locator('.door[data-side="e"]').boundingBox()
     await app.drag({ x: h2!.x + h2!.width / 2, y: h2!.y + h2!.height / 2 }, await app.world(1, 1))
     await expect(app.toast('already connected')).toBeVisible()
     await expect(app.edges()).toHaveCount(1)
@@ -99,9 +99,13 @@ test.describe('canvas editing', () => {
     await expect(page.locator('.hint-pill')).toHaveText('Drag from one component to another')
     await app.drag(await app.world(1, 1), await app.world(1, 7))
     await expect(app.edges()).toHaveCount(1)
-    // dropping on empty ground makes nothing
+    // let go on empty ground, it asks what to put there; Escape answers "nothing" and makes nothing
     await app.drag(await app.world(7, 1), await app.world(4, 4))
+    await expect(page.getByRole('dialog', { name: 'Add and connect a component' })).toBeVisible()
+    await page.keyboard.press('Escape')
+    await expect(page.getByRole('dialog', { name: 'Add and connect a component' })).toHaveCount(0)
     await expect(app.edges()).toHaveCount(1)
+    await expect(app.nodes()).toHaveCount(3)
     await page.keyboard.press('Escape')
     await expect(app.tool('Select')).toHaveAttribute('aria-pressed', 'true')
   })
@@ -297,7 +301,7 @@ test.describe('canvas editing', () => {
 
   test('tidy layout rearranges everything and one undo puts it back', async ({ page, app }) => {
     await app.pick('a')
-    const h = await page.locator('.connect-handle').boundingBox()
+    const h = await page.locator('.door[data-side="e"]').boundingBox()
     await app.drag({ x: h!.x + h!.width / 2, y: h!.y + h!.height / 2 }, await app.world(7, 1))
     await app.tool('Tidy layout').click()
     await expect(app.toast('Layout tidied')).toBeVisible()

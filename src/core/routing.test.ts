@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { FLAT, ISO, U } from './iso'
-import { type W, arrowAt, labelAnchor, pathOf, route } from './routing'
+import { type W, arrowAt, captionAnchor, curveOf, labelAnchor, lineOf, pathOf, route } from './routing'
 
 const at = (x: number, y: number, scale?: number) => ({ x, y, scale })
 
@@ -112,5 +112,32 @@ describe('labelAnchor', () => {
   })
   it('prefers the first segment on a tie', () => {
     expect(labelAnchor([[0, 0], [4, 0], [4, 4]])).toEqual({ at: [2, 0], dir: 'x' })
+  })
+})
+
+describe('curves and the line of a routed connection', () => {
+  const curve: W[] = [[0, 0], [2, 0], [6, 4], [8, 4]]
+  it('a curve is one sweep through its two control points', () => {
+    const d = curveOf(FLAT, curve)
+    expect(d).toMatch(/^M[^LQ]+C[^LQ]+$/)
+    expect(d.startsWith('M0 0C')).toBe(true)
+  })
+  it('is shortened along its own direction at either end, to leave room for an arrowhead', () => {
+    expect(curveOf(FLAT, curve, 0.5, 0)).toBe(curveOf(FLAT, [[0.5, 0], ...curve.slice(1)]))
+    expect(curveOf(FLAT, curve, 0, 0.5)).toBe(curveOf(FLAT, [...curve.slice(0, 3), [7.5, 4]]))
+  })
+  it('given anything but four points it is drawn as a plain line', () => {
+    expect(curveOf(FLAT, [[0, 0], [4, 0]])).toBe(pathOf(FLAT, [[0, 0], [4, 0]]))
+  })
+  it('a routed connection is drawn in its own shape', () => {
+    expect(lineOf(FLAT, { pts: curve, shape: 'curved' })).toBe(curveOf(FLAT, curve))
+    expect(lineOf(FLAT, { pts: curve, shape: 'ortho' }, 0.1, 0.1)).toBe(pathOf(FLAT, curve, 0.1, 0.1))
+    // a direct line at an angle is one stroke from end to end
+    expect(lineOf(FLAT, { pts: [[0, 0], [6, 3]], shape: 'direct' })).toMatch(/^M0 0L[\d.]+ [\d.]+$/)
+  })
+  it('a caption sits halfway round a curve, reading along whichever way it mostly goes', () => {
+    expect(captionAnchor({ pts: curve, shape: 'curved' })).toEqual({ at: [4, 2], dir: 'x' })
+    expect(captionAnchor({ pts: [[0, 0], [0, 2], [1, 6], [1, 8]], shape: 'curved' }).dir).toBe('y')
+    expect(captionAnchor({ pts: [[0, 0], [8, 0], [8, 2]], shape: 'ortho' })).toEqual(labelAnchor([[0, 0], [8, 0], [8, 2]]))
   })
 })

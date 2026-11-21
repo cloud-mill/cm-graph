@@ -1,4 +1,5 @@
 import { defOf } from './catalog'
+import { isShaped, unshaped } from './shape'
 import { type AreaT, type Doc, type NodeT, centerOf, footOf } from './types'
 
 export const inArea = (a: AreaT, n: Pick<NodeT, 'x' | 'y' | 'scale'>) =>
@@ -26,6 +27,48 @@ const FREE = '~'
  * inline with their neighbours or step aside when their column runs through an
  * area. Areas are then re-wrapped around their members.
  */
+/** Which way a set of components mostly runs: along x (a row) or along y (a column). */
+const runOf = (nodes: Pick<NodeT, 'x' | 'y' | 'scale'>[]) => {
+  const cx = nodes.map((n) => n.x + (n.scale ?? 1)), cy = nodes.map((n) => n.y + (n.scale ?? 1))
+  return Math.max(...cx) - Math.min(...cx) >= Math.max(...cy) - Math.min(...cy) ? 'x' : 'y'
+}
+
+/** the least room left between two components that are put in a line */
+const MIN_GAP = 1
+
+/** Put the chosen components in one straight line: a row if they mostly run sideways, a column if they are stacked. */
+export function lineUp(doc: Doc, ids: string[]): Doc {
+  const sel = doc.nodes.filter((n) => ids.includes(n.id))
+  if (sel.length < 2) return doc
+  const run = runOf(sel), across = run === 'x' ? 'y' : 'x'
+  // the middle one stays where it is, so the line forms around the group instead of dragging it away
+  const centres = sel.map((n) => n[across] + (n.scale ?? 1)).sort((a, b) => a - b), line = centres[Math.floor((centres.length - 1) / 2)]
+  // brought into one line, two that were in different rows may land on top of each other: each is moved along just far enough to stand clear
+  const order = [...sel].sort((a, b) => a[run] - b[run] || (a.id < b.id ? -1 : 1))
+  const place = new Map<string, number>()
+  let edge = -Infinity
+  for (const n of order) { const at = Math.max(n[run], edge); place.set(n.id, at); edge = at + 2 * (n.scale ?? 1) + MIN_GAP }
+  const next = doc.nodes.map((n) => (place.has(n.id) ? { ...n, [across]: Math.round((line - (n.scale ?? 1)) * 2) / 2, [run]: place.get(n.id)! } : n))
+  return next.every((n, i) => n.x === doc.nodes[i].x && n.y === doc.nodes[i].y) ? doc : { ...doc, nodes: next }
+}
+
+/** Space the chosen components evenly along the way they run. The two at the ends stay put unless that would leave the rest touching. */
+export function spaceEvenly(doc: Doc, ids: string[]): Doc {
+  const sel = doc.nodes.filter((n) => ids.includes(n.id))
+  if (sel.length < 3) return doc
+  const run = runOf(sel)
+  const order = [...sel].sort((a, b) => a[run] + (a.scale ?? 1) - (b[run] + (b.scale ?? 1)))
+  const size = (n: (typeof sel)[number]) => 2 * (n.scale ?? 1)
+  const span = order[order.length - 1][run] + size(order[order.length - 1]) - order[0][run]
+  // equal gaps between footprints, on the half-cell grid, and never less than the least room
+  const gap = Math.max(MIN_GAP, Math.round(((span - order.reduce((t, n) => t + size(n), 0)) / (order.length - 1)) * 2) / 2)
+  const place = new Map<string, number>()
+  let at = order[0][run]
+  for (const n of order) { place.set(n.id, at); at += size(n) + gap }
+  if (order.every((n) => place.get(n.id) === n[run])) return doc
+  return { ...doc, nodes: doc.nodes.map((n) => (place.has(n.id) ? { ...n, [run]: place.get(n.id)! } : n)) }
+}
+
 export function autoLayout(doc: Doc, membership?: Map<string, string[]>): Doc {
   const nodes = doc.nodes
   if (!nodes.length) return doc
@@ -184,6 +227,6 @@ export function autoLayout(doc: Doc, membership?: Map<string, string[]>): Doc {
     fitted.set(a.id, fitArea(a, ns, 1, kids.map((c) => ({ x: c.x - 0.75, y: c.y - 0.75, w: c.w + 1.5, d: c.d + 1.5 }))))
   }
   // every component has a new place, so paths shaped by hand for the old places no longer mean anything
-  const edgesOut = doc.edges.some((e) => e.via || e.fromSide || e.toSide) ? doc.edges.map((e) => (e.via || e.fromSide || e.toSide ? { ...e, via: undefined, fromSide: undefined, toSide: undefined } : e)) : doc.edges
+  const edgesOut = doc.edges.some(isShaped) ? doc.edges.map((e) => (isShaped(e) ? unshaped(e) : e)) : doc.edges
   return { ...doc, nodes: moved, edges: edgesOut, areas: doc.areas.map((a) => fitted.get(a.id) ?? a) }
 }

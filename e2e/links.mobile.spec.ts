@@ -24,27 +24,25 @@ test.describe('phone: connections', () => {
     await expect(dock(page).locator('.dock-name b')).toHaveText('Connection')
     await expect(dock(page).locator('.dock-name i')).toHaveText('web-1 connects to orders-db')
     // by name, since a phone held sideways shows these as icons only
-    expect(await dock(page).locator('.dock-btn').evaluateAll((els) => els.map((el) => el.getAttribute('aria-label')))).toEqual(['Edit', 'Follow', 'Bend', 'Reverse', 'Delete'])
+    expect(await dock(page).locator('.dock-btn').evaluateAll((els) => els.map((el) => el.getAttribute('aria-label')))).toEqual(['Edit', 'Follow', 'Straighten', 'Reverse', 'Delete'])
     // every handle has an invisible target a finger can land on
     const r = await page.locator('circle[data-handle="ea"][fill="transparent"]').evaluate((el) => el.getBoundingClientRect().width)
     expect(r).toBeGreaterThanOrEqual(32)
   })
 
-  test('Bend puts a waypoint on the line and a finger drags it, without moving the view', async ({ page, app, fingers }) => {
+  test('a finger pulls the line sideways, without moving the view, and Straighten puts it back in one tap', async ({ page, app, fingers }) => {
     await fingers.tap(await middle(page))
-    await dock(page).getByRole('button', { name: 'Bend' }).tap()
-    expect((await E(app)).via).toHaveLength(1)
-    const before = await app.corner('a'), w = await centre(page, 'w0'), d = await app.cells(0, 3)
-    await fingers.drag(w, { x: w.x + d.x, y: w.y + d.y })
-    const via = (await E(app)).via
-    expect(via).toHaveLength(1)
-    expect(via[0][1]).toBe(4) // three cells from the line it started on
+    const before = await app.corner('a'), run = await centre(page, 's0'), d = await app.cells(0, 4)
+    await fingers.drag(run, { x: run.x + d.x, y: run.y + d.y }, { steps: 12 })
+    expect((await E(app)).runs).toEqual([2.5, 5, 5.5]) // out of web-1, along four cells from where it was, in to orders-db
     expect(await app.corner('a')).toEqual(before) // the canvas did not pan under the finger
-    // one step back takes the drag away, another the waypoint
+    await dock(page).getByRole('button', { name: 'Straighten' }).tap()
+    expect((await E(app)).runs).toEqual([])
+    // one step back restores the shape, another the line as it began
     await page.getByRole('button', { name: 'Undo' }).tap()
-    expect((await E(app)).via[0][1]).toBe(1)
+    expect((await E(app)).runs).toHaveLength(3)
     await page.getByRole('button', { name: 'Undo' }).tap()
-    expect((await E(app)).via).toBeUndefined()
+    expect((await E(app)).runs).toBeUndefined()
   })
 
   test('a finger drags an end onto another component to reconnect it', async ({ page, app, fingers }) => {

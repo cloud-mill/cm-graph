@@ -55,6 +55,28 @@ export function pathOf(p: Proj, pts: W[], trimStart = 0, trimEnd = 0, radius = 0
   return d + 'L' + S(w[n - 1])
 }
 
+/** SVG path for a curve given as start, two control points and end, projected. The trims shorten it along its own direction at each end. */
+export function curveOf(p: Proj, pts: W[], trimStart = 0, trimEnd = 0): string {
+  if (pts.length !== 4) return pathOf(p, pts, trimStart, trimEnd)
+  const w = pts.map((q) => [...q] as W)
+  if (trimStart) w[0] = toward(w[0], w[1], trimStart)
+  if (trimEnd) w[3] = toward(w[3], w[2], trimEnd)
+  const S = (q: W) => { const s = pt(p, q[0], q[1]); return f(s[0]) + ' ' + f(s[1]) }
+  return 'M' + S(w[0]) + 'C' + S(w[1]) + ' ' + S(w[2]) + ' ' + S(w[3])
+}
+
+/** The path of a routed connection, whatever shape it is drawn in. */
+export const lineOf = (p: Proj, r: { pts: W[]; shape: 'ortho' | 'direct' | 'curved' }, trimStart = 0, trimEnd = 0): string =>
+  r.shape === 'curved' ? curveOf(p, r.pts, trimStart, trimEnd) : pathOf(p, r.pts, trimStart, trimEnd)
+
+/** Where a routed connection's caption goes, and which way it reads. */
+export function captionAnchor(r: { pts: W[]; shape: 'ortho' | 'direct' | 'curved' }): { at: W; dir: 'x' | 'y' } {
+  if (r.shape !== 'curved' || r.pts.length !== 4) return labelAnchor(r.pts)
+  // halfway round the curve
+  const [a, b, c, d] = r.pts
+  return { at: [(a[0] + 3 * b[0] + 3 * c[0] + d[0]) / 8, (a[1] + 3 * b[1] + 3 * c[1] + d[1]) / 8], dir: Math.abs(d[0] - a[0]) >= Math.abs(d[1] - a[1]) ? 'x' : 'y' }
+}
+
 /** Arrowhead triangle lying on the ground at `tip`, pointing away from `from`. */
 export function arrowAt(tip: W, from: W, size = 0.4): W[] {
   const l = len(from, tip) || 1

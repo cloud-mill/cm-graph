@@ -1,11 +1,12 @@
 import { useEffect, useState } from 'react'
-import { ArrowLeftRight, Box, Check, Copy, Ellipsis, Group, Layers, ListChecks, LocateFixed, Maximize2, Navigation2, Route, Spline, Plus, Scan, SlidersHorizontal, SquareDashed, Trash2, Type, Waypoints, X } from 'lucide-react'
+import { ArrowLeftRight, Box, Check, Copy, Ellipsis, Group, Layers, ListChecks, LocateFixed, Maximize2, Navigation2, Minus, Route, Plus, Scan, SlidersHorizontal, SquareDashed, Trash2, Type, Waypoints, X } from 'lucide-react'
 import { fitView, inSight, isTurned, recover, setFlat } from '../canvas/camera'
 import { costOf, defOf, defaultProps, money, nodeName } from '../core/catalog'
 import { describe } from '../core/links'
 import { useBackLayer } from '../core/nav'
 import { useStore } from '../core/store'
-import { fitAreaToContents, wrapSelectionInArea } from './actions'
+import { straightness } from '../core/shape'
+import { fitAreaToContents, straightenLinks, wrapSelectionInArea } from './actions'
 import { haptic } from './device'
 
 function Slot({ label, onClick, children, on, danger, primary }: { label: string; onClick: () => void; children: React.ReactNode; on?: boolean; danger?: boolean; primary?: boolean }) {
@@ -79,7 +80,7 @@ export function MobileDock() {
           <Slot label="Edit" onClick={() => open('insp')}><SlidersHorizontal size={18} /></Slot>
           {n && <Slot label="Connect" onClick={() => s.set({ tool: 'connect', linkFrom: n.id })}><Waypoints size={18} /></Slot>}
           {one && edges[0] && <Slot label="Follow" on={trace === edges[0].id} onClick={() => s.set({ trace: trace === edges[0].id ? null : edges[0].id })}><Route size={18} /></Slot>}
-          {one && edges[0] && <Slot label="Bend" onClick={() => { s.addBend(edges[0].id) }}><Spline size={18} /></Slot>}
+          {one && edges[0] && <Slot label={straightness(doc, edges[0]).state === 'apart' ? 'Line up' : 'Straighten'} onClick={() => straightenLinks([edges[0].id])}><Minus size={18} /></Slot>}
           {one && edges[0] && <Slot label="Reverse" onClick={() => s.reverseEdge([edges[0].id])}><ArrowLeftRight size={18} /></Slot>}
           {one && areas[0] && <Slot label="Fit" onClick={() => fitAreaToContents(areas[0].id)}><Maximize2 size={18} /></Slot>}
           {nodes.length > 1 && <Slot label="Group" onClick={() => { wrapSelectionInArea(); s.set({ multi: false }) }}><Group size={18} /></Slot>}

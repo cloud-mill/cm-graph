@@ -2,7 +2,7 @@ import { memo, useMemo, useState } from 'react'
 import { type Proj, type Pt, U, alpha, f, planeMatrixUV, poly, pt, upright, uprightAlong } from '../core/iso'
 import { captionOf, type Flow } from '../core/links'
 import { type Routed, routeAll } from '../core/router'
-import { arrowAt, labelAnchor, pathOf } from '../core/routing'
+import { arrowAt, captionAnchor, lineOf } from '../core/routing'
 import { nodeColor, nodeName } from '../core/catalog'
 import { type AreaT, type Doc, type EdgeT, type LabelT, type NodeT, centerOf, footOf } from '../core/types'
 import { Model, SceneDefs } from './models'
@@ -45,6 +45,10 @@ export interface SceneProps {
   routes?: Map<string, Routed>
   /** a flow being followed: everything off its paths steps back */
   focus?: Flow | null
+  /** components picked up and in the hand */
+  lifted?: Set<string> | null
+  /** a connection that steps back while one of its ends is being moved somewhere else */
+  dim?: string | null
 }
 
 /**
@@ -58,7 +62,7 @@ export function useRoutes(doc: Doc): Map<string, Routed> {
     const next = routeAll(doc.nodes, doc.edges)
     for (const [id, r] of next) {
       const was = keep.last.get(id)
-      if (was && was.fromSide === r.fromSide && was.toSide === r.toSide && was.pts.length === r.pts.length && was.pts.every((p, i) => p[0] === r.pts[i][0] && p[1] === r.pts[i][1]) && was.leg.join() === r.leg.join()) next.set(id, was)
+      if (was && was.shape === r.shape && was.manual === r.manual && was.fromSide === r.fromSide && was.toSide === r.toSide && was.pts.length === r.pts.length && was.pts.every((p, i) => p[0] === r.pts[i][0] && p[1] === r.pts[i][1]) && was.leg.join() === r.leg.join()) next.set(id, was)
     }
     keep.last = next
     return next
@@ -104,11 +108,11 @@ const EdgeView = memo(function EdgeView({ e, r, proj, theme, flow, state }: { e:
   const color = e.color || theme.edge
   const hasEnd = e.arrow !== 'none'
   const hasStart = e.arrow === 'both'
-  const d = pathOf(proj, pts, hasStart ? 0.26 : 0, hasEnd ? 0.26 : 0)
-  const full = pathOf(proj, pts)
+  const d = lineOf(proj, r, hasStart ? 0.26 : 0, hasEnd ? 0.26 : 0)
+  const full = lineOf(proj, r)
   const dash = e.style === 'dashed' ? '5 5' : e.style === 'dotted' ? '0.5 5' : undefined
   const caption = captionOf(e)
-  const la = caption ? labelAnchor(pts) : null
+  const la = caption ? captionAnchor(r) : null
   const lb = la ? uprightAlong(proj, la.dir) : null
   const arrow = (tip: [number, number], from: [number, number]) =>
     <polygon points={poly(arrowAt(tip, from, 0.34).map((q) => pt(proj, q[0], q[1]) as Pt))} fill={color} stroke={color} strokeWidth={1} strokeLinejoin="round" pointerEvents="none" />
@@ -134,8 +138,8 @@ const EdgeView = memo(function EdgeView({ e, r, proj, theme, flow, state }: { e:
   )
 })
 
-const NodeView = memo(function NodeView({ n, proj, theme, showLabels, color, note, fresh, order, off }: {
-  n: NodeT; proj: Proj; theme: SceneTheme; showLabels?: boolean; color?: string; note?: string; fresh?: boolean; order: number; off?: boolean
+const NodeView = memo(function NodeView({ n, proj, theme, showLabels, color, note, fresh, order, off, up }: {
+  n: NodeT; proj: Proj; theme: SceneTheme; showLabels?: boolean; color?: string; note?: string; fresh?: boolean; order: number; off?: boolean; up?: boolean
 }) {
   const [tx, ty] = pt(proj, n.x, n.y)
   const k = n.scale ?? 1 // the body is drawn at unit size and scaled; the name stays the same size
@@ -146,7 +150,7 @@ const NodeView = memo(function NodeView({ n, proj, theme, showLabels, color, not
   const gid = 'nl' + tint.replace('#', '')
   const count = n.props.count > 1 ? n.props.count : n.props.tasks > 1 && n.type === 'ecs' ? n.props.tasks : 0
   return (
-    <g transform={`translate(${f(tx)} ${f(ty)})`} data-kind="node" data-id={n.id} className={'nd' + (fresh ? ' nd-new' : '') + (off ? ' off' : '')} style={{ cursor: 'grab', ['--i' as any]: order }}>
+    <g transform={`translate(${f(tx)} ${f(ty)})`} data-kind="node" data-id={n.id} className={'nd' + (fresh ? ' nd-new' : '') + (off ? ' off' : '') + (up ? ' up' : '')} style={{ cursor: 'grab', ['--i' as any]: order }}>
       {/* each component throws a faint pool of its own colour on the ground, then a soft contact shadow */}
       {theme.glow > 0 && (
         <>
@@ -195,11 +199,12 @@ const LabelView = memo(function LabelView({ l, proj, theme }: { l: LabelT; proj:
 const KIND_ORDER = { vpc: 0, zone: 1, group: 2, subnet: 3 }
 
 /** The diagram itself: pure, so it is reused for the editor, thumbnails and exports. */
-export const Scene = memo(function Scene({ doc, proj, theme, showLabels = true, flow, lens, fresh, routes, focus }: SceneProps) {
+export const Scene = memo(function Scene({ doc, proj, theme, showLabels = true, flow, lens, fresh, routes, focus, lifted, dim }: SceneProps) {
   const own = useRoutes(doc)
   const paths = routes ?? own
   // painter's order: far to near along the camera's ground direction
-  const sorted = useMemo(() => [...doc.nodes].sort((a, b) => { const p = centerOf(a), q = centerOf(b); return p[0] * proj.c + p[1] * proj.d - (q[0] * proj.c + q[1] * proj.d) || a.x - b.x }), [doc.nodes, proj])
+  // (depth is compared to a thousandth of a cell: components level with each other must not swap places over rounding noise while they are carried)
+  const sorted = useMemo(() => { const depth = (n: NodeT) => { const p = centerOf(n); return Math.round((p[0] * proj.c + p[1] * proj.d) * 1000) }; return [...doc.nodes].sort((a, b) => depth(a) - depth(b) || a.x - b.x || (a.id < b.id ? -1 : 1)) }, [doc.nodes, proj])
   const areas = useMemo(() => [...doc.areas].sort((a, b) => KIND_ORDER[a.kind] - KIND_ORDER[b.kind] || b.w * b.d - a.w * a.d), [doc.areas])
   return (
     <g>
@@ -207,12 +212,12 @@ export const Scene = memo(function Scene({ doc, proj, theme, showLabels = true, 
       {areas.map((a) => <AreaView key={a.id} a={a} proj={proj} theme={theme} />)}
       {doc.edges.map((e) => {
         const r = paths.get(e.id)
-        return r ? <EdgeView key={e.id} e={e} r={r} proj={proj} theme={theme} flow={flow} state={focus ? (focus.edges.has(e.id) ? 'on' : 'off') : undefined} /> : null
+        return r ? <EdgeView key={e.id} e={e} r={r} proj={proj} theme={theme} flow={flow} state={dim === e.id ? 'off' : focus ? (focus.edges.has(e.id) ? 'on' : 'off') : undefined} /> : null
       })}
       {doc.labels.map((l) => <LabelView key={l.id} l={l} proj={proj} theme={theme} />)}
       {sorted.map((n, i) => {
         const o = lens?.get(n.id)
-        return <NodeView key={n.id} n={n} proj={proj} theme={theme} showLabels={showLabels} color={o?.color} note={o?.note} fresh={fresh === n.id} order={i} off={!!focus && !focus.start.has(n.id) && !focus.up.has(n.id) && !focus.down.has(n.id)} />
+        return <NodeView key={n.id} n={n} proj={proj} theme={theme} showLabels={showLabels} color={o?.color} note={o?.note} fresh={fresh === n.id} order={i} off={!!focus && !focus.start.has(n.id) && !focus.up.has(n.id) && !focus.down.has(n.id)} up={!!lifted?.has(n.id)} />
       })}
     </g>
   )

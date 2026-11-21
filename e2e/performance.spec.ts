@@ -134,6 +134,42 @@ test.describe('performance and stability', () => {
     expect(undone).toBe(120)
   })
 
+  test('carrying a connected component across a large blueprint keeps pace with the pointer', async ({ page, app }) => {
+    // 80 components and 110 connections; the one carried has four lines that re-route as it goes
+    const types = ['ec2', 'rds', 's3', 'lambda', 'alb', 'sqs', 'dynamodb', 'elasticache']
+    const nodes = Array.from({ length: 80 }, (_, i) => ({ id: `n${i % 10}_${Math.floor(i / 10)}`, type: types[(i % 10 + Math.floor(i / 10)) % types.length], x: (i % 10) * 5, y: Math.floor(i / 10) * 5 }))
+    const doc = makeDoc(nodes)
+    for (let j = 0; j < 8; j++) for (let i = 0; i < 10; i++) {
+      if (i < 9) doc.edges.push({ id: `h${i}_${j}`, from: `n${i}_${j}`, to: `n${i + 1}_${j}`, style: 'solid', arrow: 'end', width: 2 })
+      if (j < 7 && (i + j) % 2 === 0) doc.edges.push({ id: `v${i}_${j}`, from: `n${i}_${j}`, to: `n${i}_${j + 1}`, style: 'solid', arrow: 'end', width: 2 })
+    }
+    await app.open(doc)
+    const b = (await page.locator('[data-kind="node"][data-id="n4_3"] .nd-body').boundingBox())!
+    const from = { x: b.x + b.width / 2, y: b.y + b.height * 0.6 }
+    await page.mouse.move(from.x, from.y)
+    await page.mouse.down()
+    await page.evaluate(() => {
+      const w = window as any
+      w.__frames = []; w.__long = 0
+      let last = performance.now()
+      const tick = (t: number) => { if (!w.__frames) return; w.__frames.push(t - last); last = t; requestAnimationFrame(tick) }
+      requestAnimationFrame(tick)
+      new PerformanceObserver((l) => { for (const e of l.getEntries()) w.__long = Math.max(w.__long, e.duration) }).observe({ entryTypes: ['longtask'] })
+    })
+    for (let i = 1; i <= 90; i++) { await page.mouse.move(from.x + (200 * i) / 90, from.y + (60 * i) / 90); await page.waitForTimeout(8) }
+    const { frames, long } = await page.evaluate(() => { const w = window as any; const f = w.__frames.slice(2); w.__frames = null; return { frames: f as number[], long: w.__long as number } })
+    await page.mouse.up()
+    const avg = frames.reduce((x, y) => x + y, 0) / frames.length, p95 = [...frames].sort((x, y) => x - y)[Math.floor(frames.length * 0.95)]
+    test.info().annotations.push({ type: 'frame time carrying one of 80 components', description: `${avg.toFixed(1)} ms average, ${p95.toFixed(0)} ms at the 95th percentile, longest task ${long.toFixed(0)} ms` })
+    // a floor for regressions on a machine without a GPU, not a claim about real hardware: 60 frames a second is 16.7 ms
+    expect(avg, 'average frame time while carrying (ms)').toBeLessThan(34)
+    expect(long, 'longest single task while carrying (ms)').toBeLessThan(250)
+    // and it was all one step, written at the end
+    expect((await app.settled()).nodes.find((n) => n.id === 'n4_3')).not.toMatchObject({ x: 20, y: 15 })
+    await app.mod('z')
+    expect((await app.settled()).nodes.find((n) => n.id === 'n4_3')).toMatchObject({ x: 20, y: 15 })
+  })
+
   test('first load is light: no failed requests and a small page', async ({ page }) => {
     const failed: string[] = []
     page.on('requestfailed', (r) => failed.push(r.url()))

@@ -148,7 +148,8 @@ test.describe('persistence and failure handling', () => {
     await page.mouse.move(from.x + 80, from.y + 40, { steps: 5 })
     await page.mouse.move(-50, -50, { steps: 3 })
     await page.mouse.up()
-    // the next plain move must not keep dragging
+    // the next plain move must not keep dragging (once it has eased into the cell it was dropped in)
+    await expect(page.locator('.canvas-wrap.settle')).toHaveCount(0)
     const here = await app.corner('a')
     await page.mouse.move(700, 500, { steps: 4 })
     const there = await app.corner('a')

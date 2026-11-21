@@ -3,7 +3,7 @@ import { defOf, defaultProps } from './catalog'
 import { ISO_PITCH, ISO_YAW } from './iso'
 import { inArea } from './layout'
 import { guessKind, kindInfo } from './links'
-import { legOfRun, routeAll } from './router'
+import { isShaped, lineUpEnds, shifted, straighten, unshaped } from './shape'
 import { getPref, saveDoc, setPref } from './storage'
 import { type AreaT, type Doc, type EdgeT, type LabelT, type LinkKind, type NodeT, type PricingModel, type Side, emptyDoc, uid } from './types'
 
@@ -66,6 +66,8 @@ interface State {
 
   addNode: (type: string, x: number, y: number) => string
   addEdge: (from: string, to: string) => string | null
+  /** add a component and connect it from `from` (or, with `into`, drop it into the middle of that connection): one undo step */
+  addLinked: (type: string, x: number, y: number, link: { from?: string; into?: string }) => string
   /** a second connection between the same two components, for a second relationship */
   twinEdge: (id: string) => string | null
   /** move one end of a connection to another component, optionally pinned to a side of it */
@@ -76,8 +78,12 @@ interface State {
   reverseEdge: (ids: string[]) => void
   /** hand a connection's path back to the automatic router */
   resetRoute: (ids: string[]) => void
-  /** put a waypoint on the longest run of a connection, ready to be dragged; returns its index */
-  addBend: (id: string) => number
+  /** make connections one straight line where they can be; says how many could not, and why */
+  straighten: (ids: string[]) => { straight: number; apart: number }
+  /** move one end's component level with the other, so the connection between them is straight */
+  lineUp: (id: string) => void
+  /** draw connections as right-angled runs (no shape), one direct line, or a curve */
+  setShape: (ids: string[], shape: EdgeT['shape']) => void
   addArea: (a: Omit<AreaT, 'id'>) => string
   addLabel: (x: number, y: number) => string
   patchNode: (id: string, p: Partial<NodeT>) => void
@@ -206,10 +212,28 @@ export const useStore = create<State>((set, get) => ({
     get().apply((d) => ({ ...d, edges: [...d.edges, { id, from, to, style: k.style, arrow: k.arrow, width: 2, kind, origin: 'drawn' as const }] }))
     return id
   },
+  addLinked: (type, x, y, link) => {
+    const id = get().addNode(type, x, y)
+    get().apply((d) => {
+      const made = d.nodes.find((n) => n.id === id)!
+      if (link.into) {
+        // the line that ran A → B now runs A → new → B, keeping what it was; a hand-shaped path no longer fits and is let go
+        const e = d.edges.find((x) => x.id === link.into)
+        if (!e) return d
+        const plain = unshaped(e, false)
+        return { ...d, edges: d.edges.flatMap((x) => (x.id === e.id ? [{ ...plain, to: id, fromSide: e.fromSide }, { ...plain, id: uid(), from: id, label: undefined, toSide: e.toSide }] : [x])) }
+      }
+      const a = d.nodes.find((n) => n.id === link.from)
+      if (!a) return d
+      const kind = guessKind(a, made), k = kindInfo(kind)!
+      return { ...d, edges: [...d.edges, { id: uid(), from: a.id, to: id, style: k.style, arrow: k.arrow, width: 2, kind, origin: 'drawn' as const }] }
+    }, true)
+    return id
+  },
   twinEdge: (id) => {
     const e = get().doc.edges.find((x) => x.id === id)
     if (!e) return null
-    const copy = { ...e, id: uid(), label: undefined, protocol: undefined, port: undefined, via: undefined, fromSide: undefined, toSide: undefined, origin: 'drawn' as const }
+    const copy = { ...unshaped(e), id: uid(), label: undefined, protocol: undefined, port: undefined, origin: 'drawn' as const }
     get().apply((d) => ({ ...d, edges: [...d.edges, copy] }))
     set({ selection: [copy.id] })
     return copy.id
@@ -221,8 +245,10 @@ export const useStore = create<State>((set, get) => ({
     const from = end === 'from' ? node : e.from, to = end === 'to' ? node : e.to
     if (from === to) return false
     const key = end === 'from' ? 'fromSide' : 'toSide'
-    // moving an end onto another component keeps the shape the user gave the line; a side is pinned only when they aimed for one
-    get().apply((d) => ({ ...d, edges: d.edges.map((x) => (x.id === id ? { ...x, from, to, [key]: side } : x)) }))
+    // a side is pinned only when they aimed for one. The track the line was following was laid between the old ends,
+    // so it is let go and the line is planned afresh from where it now stands; the other end keeps the side it was given
+    const { via: _v, runs: _r, fromAt: _a, toAt: _b, ...rest } = e
+    get().apply((d) => ({ ...d, edges: d.edges.map((x) => (x.id === id ? { ...rest, from, to, [key]: side } : x)) }))
     return true
   },
   setKind: (ids, kind) => {
@@ -231,23 +257,21 @@ export const useStore = create<State>((set, get) => ({
   },
   reverseEdge: (ids) => get().apply((d) => ({
     ...d,
-    // the same line the other way round: its ends swap, and so do the sides and the order of its waypoints
-    edges: d.edges.map((e) => (ids.includes(e.id) ? { ...e, from: e.to, to: e.from, fromSide: e.toSide, toSide: e.fromSide, ...(e.via ? { via: [...e.via].reverse() } : {}) } : e)),
+    // the same line the other way round: its ends swap, and so do the sides and the order of its runs
+    edges: d.edges.map((e) => (ids.includes(e.id) ? { ...e, from: e.to, to: e.from, fromSide: e.toSide, toSide: e.fromSide, fromAt: e.toAt, toAt: e.fromAt, ...(e.via ? { via: [...e.via].reverse() } : {}), ...(e.runs ? { runs: [...e.runs].reverse() } : {}) } : e)),
   })),
-  resetRoute: (ids) => get().apply((d) => ({ ...d, edges: d.edges.map((e) => (ids.includes(e.id) && (e.via || e.fromSide || e.toSide) ? { ...e, via: undefined, fromSide: undefined, toSide: undefined } : e)) })),
-  addBend: (id) => {
-    const { doc } = get()
-    const e = doc.edges.find((x) => x.id === id), r = e && routeAll(doc.nodes, doc.edges).get(id)
-    if (!e || !r) return -1
-    // on the longest straight run, where there is the most room to pull it somewhere
-    let best = 0, len = -1
-    for (let i = 0; i < r.pts.length - 1; i++) { const l = Math.abs(r.pts[i + 1][0] - r.pts[i][0]) + Math.abs(r.pts[i + 1][1] - r.pts[i][1]); if (l > len) { len = l; best = i } }
-    const a = r.pts[best], b = r.pts[best + 1], at: [number, number] = [Math.round((a[0] + b[0])) / 2, Math.round((a[1] + b[1])) / 2]
-    const index = legOfRun(r, best), via = [...(e.via ?? [])]
-    via.splice(index, 0, at)
-    get().apply((d) => ({ ...d, edges: d.edges.map((x) => (x.id === id ? { ...x, via } : x)) }))
-    return index
+  resetRoute: (ids) => get().apply((d) => ({ ...d, edges: d.edges.map((e) => (ids.includes(e.id) && isShaped(e) ? unshaped(e) : e)) })),
+  straighten: (ids) => {
+    const { doc, ...count } = straighten(get().doc, ids)
+    get().apply(() => doc)
+    return count
   },
+  lineUp: (id) => get().apply((d) => lineUpEnds(d, id)),
+  setShape: (ids, shape) => get().apply((d) => ({
+    ...d,
+    // a direct line or a curve has no track to follow, so one laid for right-angled runs is let go; going back to right angles starts from the router's plan
+    edges: d.edges.map((e) => { if (!ids.includes(e.id) || e.shape === shape) return e; const plain = unshaped(e, false); return shape ? { ...plain, shape } : plain }),
+  })),
   addArea: (a) => {
     const id = uid()
     get().apply((d) => ({ ...d, areas: [...d.areas, { ...a, id }] }))
@@ -286,7 +310,7 @@ export const useStore = create<State>((set, get) => ({
     const sel = new Set(ids)
     const map = new Map<string, string>()
     const nodes = renumber(doc.nodes.filter((n) => sel.has(n.id)).map((n) => { const id = uid(); map.set(n.id, id); return { ...n, id, x: n.x + dx, y: n.y + dy } }), doc.nodes)
-    const edges = doc.edges.filter((e) => map.has(e.from) && map.has(e.to)).map((e) => ({ ...e, id: uid(), from: map.get(e.from)!, to: map.get(e.to)!, ...(e.via ? { via: e.via.map(([x, y]) => [x + dx, y + dy] as [number, number]) } : {}) }))
+    const edges = doc.edges.filter((e) => map.has(e.from) && map.has(e.to)).map((e) => shifted({ ...e, id: uid(), from: map.get(e.from)!, to: map.get(e.to)! }, dx, dy))
     const areas = doc.areas.filter((a) => sel.has(a.id)).map((a) => ({ ...a, id: uid(), x: a.x + dx, y: a.y + dy }))
     const labels = doc.labels.filter((l) => sel.has(l.id)).map((l) => ({ ...l, id: uid(), x: l.x + dx, y: l.y + dy }))
     if (!nodes.length && !areas.length && !labels.length) return
@@ -313,7 +337,7 @@ export const useStore = create<State>((set, get) => ({
     const off = pasteCount * 2
     const map = new Map<string, string>()
     const nodes = renumber(clipboard.nodes.map((n) => { const id = uid(); map.set(n.id, id); return { ...n, id, x: n.x + off, y: n.y + off } }), get().doc.nodes)
-    const edges = clipboard.edges.map((e) => ({ ...e, id: uid(), from: map.get(e.from)!, to: map.get(e.to)!, ...(e.via ? { via: e.via.map(([x, y]) => [x + off, y + off] as [number, number]) } : {}) }))
+    const edges = clipboard.edges.map((e) => shifted({ ...e, id: uid(), from: map.get(e.from)!, to: map.get(e.to)! }, off, off))
     const areas = clipboard.areas.map((a) => ({ ...a, id: uid(), x: a.x + off, y: a.y + off }))
     const labels = clipboard.labels.map((l) => ({ ...l, id: uid(), x: l.x + off, y: l.y + off }))
     get().apply((d) => ({ ...d, nodes: [...d.nodes, ...nodes], edges: [...d.edges, ...edges], areas: [...d.areas, ...areas], labels: [...d.labels, ...labels] }))
@@ -360,10 +384,10 @@ export function moveItems(doc: Doc, base: Doc, sel: Set<string>, dx: number, dy:
     nodes: doc.nodes.map((n) => (carried.has(n.id) && bn.has(n.id) ? { ...n, x: bn.get(n.id)!.x + dx, y: bn.get(n.id)!.y + dy } : n)),
     areas: doc.areas.map((a) => (carried.has(a.id) && ba.has(a.id) ? { ...a, x: ba.get(a.id)!.x + dx, y: ba.get(a.id)!.y + dy } : a)),
     labels: doc.labels.map((l) => (carried.has(l.id) && bl.has(l.id) ? { ...l, x: bl.get(l.id)!.x + dx, y: bl.get(l.id)!.y + dy } : l)),
-    // a hand-shaped line whose two ends move together keeps its shape; one whose ends part company keeps its waypoints where they are
+    // a hand-shaped line whose two ends move together goes with them; one whose ends part company keeps its track where it was laid
     edges: doc.edges.map((e) => {
       const b = be.get(e.id)
-      return b?.via && carried.has(e.from) && carried.has(e.to) ? { ...e, via: b.via.map(([x, y]) => [x + dx, y + dy] as [number, number]) } : e
+      return b && (b.via || b.runs) && carried.has(e.from) && carried.has(e.to) ? { ...e, ...shifted(b, dx, dy) } : e
     }),
   }
 }

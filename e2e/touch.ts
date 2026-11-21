@@ -95,6 +95,8 @@ export class Fingers {
     await this.send('touchEnd', [])
   }
 
+  /** Put one finger down and leave it there; follow with `move` and `lift`. */
+  async down(p: P) { await this.send('touchStart', [p]) }
   async lift() { await this.send('touchEnd', []) }
   async move(p: P) { await this.send('touchMove', [p]) }
 }

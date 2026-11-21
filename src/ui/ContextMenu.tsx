@@ -3,7 +3,8 @@ import { fitView } from '../canvas/camera'
 import { keys } from './atoms'
 import { useBackLayer } from '../core/nav'
 import { useStore } from '../core/store'
-import { fitAreaToContents, selectAll, tidy, wrapSelectionInArea } from './actions'
+import { isShaped, straightness } from '../core/shape'
+import { fitAreaToContents, selectAll, straightenLinks, tidy, wrapSelectionInArea } from './actions'
 
 export interface MenuState {
   x: number
@@ -40,10 +41,13 @@ export function ContextMenu({ menu, onClose }: { menu: MenuState; onClose: () =>
   const items: Item[] = []
   if (menu.target) {
     if (menu.target === 'edge') {
-      const shaped = s.doc.edges.some((e) => sel.includes(e.id) && (e.via?.length || e.fromSide || e.toSide))
-      items.push({ label: 'Follow the flow', run: () => s.set({ trace: sel[0] }) }, { label: 'Reverse direction', run: () => s.reverseEdge(sel) })
-      if (sel.length === 1) items.push({ label: 'Add a bend', run: () => { s.addBend(sel[0]) } })
+      const picked = s.doc.edges.filter((e) => sel.includes(e.id))
+      const shaped = picked.some(isShaped)
+      // one that cannot be straight as things stand says what making it so will do
+      const apart = picked.length === 1 && straightness(s.doc, picked[0]).state === 'apart'
+      items.push({ label: apart ? 'Line up and straighten' : 'Straighten', run: () => straightenLinks(sel) })
       if (shaped) items.push({ label: 'Route automatically', run: () => s.resetRoute(sel) })
+      items.push({ label: 'Follow the flow', run: () => s.set({ trace: sel[0] }) }, { label: 'Reverse direction', run: () => s.reverseEdge(sel) })
     } else {
       items.push({ label: 'Duplicate', kbd: '⌘D', run: () => s.duplicate(sel) }, { label: 'Copy', kbd: '⌘C', run: () => s.copy() })
     }

@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, fireEvent, render, screen, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cam } from '../canvas/camera'
 import { costOf, money } from '../core/catalog'
@@ -170,11 +170,22 @@ describe('dock with other things selected', () => {
     const nav = screen.getByRole('navigation', { name: 'Selection' })
     expect(nav).toHaveTextContent('Connection')
     expect(nav).toHaveTextContent('web connects to db') // what it joins, in words
-    expect(buttons(nav)).toEqual(['Deselect', 'Edit', 'Follow', 'Bend', 'Reverse', 'Delete'])
+    expect(buttons(nav)).toEqual(['Deselect', 'Edit', 'Follow', 'Straighten', 'Reverse', 'Delete'])
     tap('Reverse')
     expect(S().doc.edges[0]).toMatchObject({ id: 'e', from: 'b', to: 'a' })
     S().undo()
     expect(S().doc.edges[0]).toMatchObject({ from: 'a', to: 'b' })
+  })
+  it('a connection is straightened from the dock; when its components are out of line the button says it will line them up', () => {
+    mount({ selection: ['e'] })
+    tap('Straighten')
+    expect(S().doc.edges[0]).toMatchObject({ runs: [], fromSide: 'e', toSide: 'w' })
+    cleanup()
+    resetStore({ doc: docOf([node('a', 'ec2', 0, 0), node('b', 'rds', 8, 6, { name: 'db' })], [edge('e', 'a', 'b')]), selection: ['e'] })
+    render(<MobileDock />)
+    tap('Line up')
+    expect(S().doc.nodes[1]).toMatchObject({ x: 8, y: 0 })
+    expect(S().toasts.at(-1)!.text).toBe('Moved db into line')
   })
   it('an area shows its name and size, and can be fitted to what is inside it', () => {
     const doc = DOC()

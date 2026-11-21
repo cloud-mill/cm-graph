@@ -76,47 +76,49 @@ test.describe('connections: routing', () => {
 test.describe('connections: shaping by hand', () => {
   test.beforeEach(async ({ page, app }) => { await app.open(PAIR()); await plan(page) })
   const select = async (page: Page) => { const m = await middle(page); await page.mouse.click(m.x + 60, m.y) }
+  const pull = async (page: Page, app: any, name: string, dx: number, dy: number) => {
+    const from = await centre(page, name), d = await cells(app, dx, dy)
+    await page.mouse.move(from.x, from.y); await page.mouse.down(); await page.mouse.move(from.x + d.x, from.y + d.y, { steps: 8 }); await page.mouse.up()
+  }
 
-  test('selecting shows what it joins, the ends, and a dot to pull', async ({ page }) => {
+  test('selecting shows what it joins, the ends, a run to take hold of, and a bar clear of the line', async ({ page }) => {
     await select(page)
     await expect(page.locator('.insp-sub').first()).toHaveText('web connects to db')
     await expect(handle(page, 'ea')).toBeVisible()
     await expect(handle(page, 'eb')).toBeVisible()
-    await expect(handle(page, 'm0')).toBeVisible()
+    await expect(handle(page, 's0')).toHaveCount(1)
+    // the bar never covers the line it is for
+    const bar = (await page.locator('.edge-bar').boundingBox())!
+    for (const p of await lineOf(page, 'e', 40)) expect(p.x > bar.x && p.x < bar.x + bar.width && p.y > bar.y && p.y < bar.y + bar.height).toBe(false)
   })
 
-  test('pulling the dot bends the line there; it survives undo, redo and a reload', async ({ page, app }) => {
+  test('pulling the line sideways takes it round; that survives undo, redo and a reload', async ({ page, app }) => {
     await select(page)
-    const dot = await centre(page, 'm0'), d = await cells(app, 0, 4)
-    await page.mouse.move(dot.x, dot.y); await page.mouse.down(); await page.mouse.move(dot.x + d.x, dot.y + d.y, { steps: 8 }); await page.mouse.up()
-    const via = (await E(app)).via
-    expect(via).toHaveLength(1)
-    expect(via[0][1]).toBe(5) // four cells below the line it was pulled from
-    await expect(handle(page, 'w0')).toBeVisible()
-    // the line really does pass through the waypoint
-    const w = await centre(page, 'w0'), pts = await lineOf(page, 'e', 200)
-    expect(Math.min(...pts.map((p) => Math.hypot(p.x - w.x, p.y - w.y)))).toBeLessThan(3)
+    await pull(page, app, 's0', 0, 4)
+    const runs = (await E(app)).runs
+    expect(runs).toEqual([2.5, 5, 7.5]) // out of web, along four cells below where it was, and in to db
+    // the line as drawn really does run along y = 5
+    const low = await centre(page, 's2'), pts = await lineOf(page, 'e', 200)
+    expect(Math.min(...pts.map((p) => Math.hypot(p.x - low.x, p.y - low.y)))).toBeLessThan(3)
     await app.mod('z')
-    expect((await E(app)).via).toBeUndefined()
+    expect((await E(app)).runs).toBeUndefined()
     await expect(handle(page, 'ea')).toBeVisible() // still selected: undo does not drop what is being edited
     await page.keyboard.press('ControlOrMeta+Shift+z')
-    expect((await E(app)).via).toEqual(via)
+    expect((await E(app)).runs).toEqual(runs)
     await page.reload(); await app.ready()
-    expect(((await app.saved())!.edges[0] as any).via).toEqual(via)
+    expect(((await app.saved())!.edges[0] as any).runs).toEqual(runs)
   })
 
-  test('a waypoint moves, and double-clicking it takes it out', async ({ page, app }) => {
+  test('one run moves on its own, and pulled back level with the ends the line is straight again', async ({ page, app }) => {
     await select(page)
-    await page.getByRole('button', { name: 'Add a bend' }).click()
-    const w = await centre(page, 'w0'), d = await cells(app, -2, 3)
-    await page.mouse.move(w.x, w.y); await page.mouse.down(); await page.mouse.move(w.x + d.x, w.y + d.y, { steps: 6 }); await page.mouse.up()
-    const via = (await E(app)).via
-    expect(via as unknown[]).toHaveLength(1)
-    expect(via[0][1]).toBe(4)
-    const at = await centre(page, 'w0')
-    await page.mouse.dblclick(at.x, at.y)
-    expect((await E(app)).via).toBeUndefined()
-    await expect(page.locator('[data-handle="w0"]')).toHaveCount(0)
+    await pull(page, app, 's0', 0, 4)
+    await pull(page, app, 's2', 0, -2)
+    expect((await E(app)).runs).toEqual([2.5, 3, 7.5])
+    // near enough is enough: it is drawn onto the line the ends are on
+    await pull(page, app, 's2', 0, -1.8)
+    expect((await E(app)).runs).toEqual([])
+    await expect(page.locator('.run-hit')).toHaveCount(1)
+    expect((await page.locator('.edge-hit[data-id="e"]').getAttribute('d'))!.includes('Q')).toBe(false)
   })
 
   test('dragging an end onto another component reconnects it there', async ({ page, app }) => {
@@ -132,28 +134,27 @@ test.describe('connections: shaping by hand', () => {
     expect(await E(app)).toMatchObject({ from: 'a', to: 'b' })
   })
 
-  test('the handles stay on the line when the camera turns and tilts', async ({ page }) => {
+  test('the handles stay on the line when the camera turns and tilts', async ({ page, app }) => {
     await select(page)
-    await page.getByRole('button', { name: 'Add a bend' }).click()
+    await pull(page, app, 's0', 0, 4)
     for (const key of ['3', 'q', 'q', 'e']) {
       await page.keyboard.press(key); await page.waitForTimeout(700)
       const pts = await lineOf(page, 'e', 300)
       const near = (p: { x: number; y: number }) => Math.min(...pts.map((q) => Math.hypot(q.x - p.x, q.y - p.y)))
       expect(near(await centre(page, 'ea')), `start handle after "${key}"`).toBeLessThan(3)
       expect(near(await centre(page, 'eb')), `end handle after "${key}"`).toBeLessThan(3)
-      expect(near(await centre(page, 'w0')), `waypoint after "${key}"`).toBeLessThan(3)
+      expect(near(await centre(page, 's2')), `middle run after "${key}"`).toBeLessThan(3)
     }
   })
 
   test('"Route automatically" hands a shaped line back, as one undo step', async ({ page, app }) => {
     await select(page)
-    await page.getByRole('button', { name: 'Add a bend' }).click()
-    await page.getByRole('button', { name: 'Add a bend' }).click()
-    expect((await E(app)).via).toHaveLength(2)
-    await page.getByRole('button', { name: 'Route automatically' }).click()
-    expect((await E(app)).via).toBeUndefined()
+    await pull(page, app, 's0', 0, 4)
+    expect((await E(app)).runs).toHaveLength(3)
+    await page.locator('.panel.right').getByRole('button', { name: 'Route automatically' }).click()
+    expect((await E(app)).runs).toBeUndefined()
     await app.mod('z')
-    expect((await E(app)).via).toHaveLength(2)
+    expect((await E(app)).runs).toHaveLength(3)
   })
 })
 

@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { costOf, money } from '../core/catalog'
 import { ISO_PITCH, ISO_YAW, pt, unproject } from '../core/iso'
@@ -29,6 +30,11 @@ const drag = (el: Element, from: [number, number], to: [number, number], o: obje
 // a component's handle is a group wrapping the visible square (and, for fingers, a bigger invisible target): count each handle once
 const handles = (prefix: string) => [...new Set([...document.querySelectorAll('[data-handle]')].map((h) => h.getAttribute('data-handle')!).filter((h) => new RegExp(`^${prefix}\\d$`).test(h)))]
 const area = (id: string, x: number, y: number, w: number, d: number) => ({ id, x, y, w, d, name: id, color: '#8F6FF2', kind: 'vpc' as const })
+/** where a component is drawn on the ground right now, which while it is carried is not where the blueprint has it */
+const drawnAt = (id: string) => {
+  const m = hit('node', id).getAttribute('transform')!.match(/translate\((-?[\d.]+) (-?[\d.]+)\)/)!
+  return unproject(projNow(), Number(m[1]), Number(m[2])).map((v) => Math.round(v * 100) / 100 + 0)
+}
 const label = (id: string, x: number, y: number) => ({ id, x, y, text: 'Note', size: 20, dir: 'x' as const })
 
 function mount(doc = docOf([node('a', 'ec2', 0, 0, { name: 'web' }), node('b', 'rds', 8, 0, { name: 'db' })]), state: object = {}) {
@@ -106,10 +112,22 @@ describe('selecting', () => {
   })
   it('selects a connection without starting a move', () => {
     mount(docOf([node('a'), node('b', 'ec2', 8, 0)], [edge('e', 'a', 'b')]))
-    drag(hit('edge', 'e'), [4, 1], [6, 3])
+    down(hit('edge', 'e'), 4, 1); up(4, 1)
     expect(S().selection).toEqual(['e'])
     expect(S().past).toHaveLength(0)
     expect(document.querySelector('.overlay path[filter]')).not.toBeNull() // highlighted
+  })
+  it('a connection can be taken hold of without selecting it first: pressing picks it, pulling moves the run under the pointer', () => {
+    mount(docOf([node('a'), node('b', 'ec2', 8, 4)], [edge('e', 'a', 'b')]))
+    // the middle run of the Z, at x = 5
+    drag(hit('edge', 'e'), [5, 3], [3.1, 3])
+    expect(S().selection).toEqual(['e'])
+    expect(S().doc.edges[0]).toMatchObject({ runs: [3], fromSide: 'e', toSide: 'w' })
+    expect(S().past).toHaveLength(1)
+    // with Shift it is only added to what is selected
+    act(() => S().undo())
+    fireEvent.pointerDown(hit('edge', 'e'), { pointerId: 1, button: 0, shiftKey: true, ...at(5, 3) }); move(3, 3); up(3, 3)
+    expect(S().doc.edges[0].runs).toBeUndefined()
   })
   it('selects everything inside a Shift-drag rectangle', () => {
     mount(docOf([node('a', 'ec2', 0, 0), node('b', 'ec2', 30, 30)], [], { areas: [area('in', -1, -1, 4, 4), area('big', -40, -40, 80, 80)], labels: [label('l', 1, 1), label('far', 30, 30)] }))
@@ -142,7 +160,14 @@ describe('moving', () => {
     move(1.02, 1.02)
     expect(S().past).toHaveLength(0) // a twitch is not a drag
     move(4.4, 1)
-    expect(S().doc.nodes[0]).toMatchObject({ x: 3, y: 0 })
+    // in the hand: it follows the pointer between cells, the cell it will land in is marked, and the blueprint is not touched yet
+    expect(drawnAt('a')[0]).toBeGreaterThan(3)
+    expect(drawnAt('a')[0]).toBeLessThan(3.4)
+    expect(drawnAt('a')[1]).toBe(0)
+    expect(document.querySelectorAll('.landing')).toHaveLength(1)
+    expect(hit('node', 'a')).toHaveClass('up')
+    expect(S().doc.nodes[0]).toMatchObject({ x: 0, y: 0 })
+    expect(S()).toMatchObject({ past: [], saved: true })
     expect(document.querySelector('.canvas-wrap')).toHaveClass('busy')
     move(6.6, 3.4)
     up(6.6, 3.4)
@@ -214,7 +239,9 @@ describe('resizing', () => {
     mount(undefined, { selection: ['a'] })
     down(document.querySelector('[data-handle="n2"]')!, 2, 2)
     move(3.1, 2.6)
-    expect(S().doc.nodes[0]).toMatchObject({ x: 0, y: 0, scale: 1.5 })
+    // shown at its new size while the corner is held; written when it is let go
+    expect(hit('node', 'a').querySelector('.nd-body g')!.getAttribute('transform')).toBe('scale(1.5)')
+    expect(S().doc.nodes[0].scale).toBeUndefined()
     move(4.2, 4.2)
     up(4.2, 4.2)
     expect(S().doc.nodes[0]).toMatchObject({ x: 0, y: 0, scale: 2 })
@@ -301,7 +328,7 @@ describe('tools', () => {
     expect(document.querySelector('.wire')).not.toBeNull()
     vi.mocked(document.elementFromPoint).mockReturnValue(hit('node', 'b'))
     move(9, 1)
-    expect(document.querySelector('.wire')!.getAttribute('d')).toContain('L') // snapped to a routed path
+    expect(document.querySelector('.wire.caught path')!.getAttribute('d')).toContain('L') // snapped to a routed path
     up(9, 1)
     expect(S().doc.edges).toHaveLength(1)
     expect(S().doc.edges[0]).toMatchObject({ from: 'a', to: 'b', arrow: 'end', style: 'solid' })
@@ -723,8 +750,9 @@ describe('touch: press and hold', () => {
     expect(vibrate).toHaveBeenCalledWith(12)
     expect(busy()).toBe(true) // lifted
     f1.move(9, 4)
-    expect(S().doc.nodes[1]).toMatchObject({ x: 8, y: 3 })
+    expect(drawnAt('b')).toEqual([8, 3])
     f1.up(9, 4)
+    expect(S().doc.nodes[1]).toMatchObject({ x: 8, y: 3 })
     expect(busy()).toBe(false)
     expect(S().past).toHaveLength(1)
     expect(S().view).toEqual({ x: 600, y: 300, k: 1 })
@@ -968,7 +996,7 @@ describe('touch: two fingers', () => {
     mount(undefined, { selection: ['a'] })
     f1.down(hit('node', 'a'), 1, 1)
     f1.move(3, 1)
-    expect(S().doc.nodes[0].x).toBe(2)
+    expect(drawnAt('a')[0]).toBe(2)
     const p = at(3, 1)
     f2.downAt(p.clientX + 200, p.clientY)
     f1.moveTo(p.clientX - 100, p.clientY)
@@ -1247,7 +1275,8 @@ describe('alignment guides', () => {
 })
 
 describe('touch targets and the phone layout', () => {
-  const targets = () => [...document.querySelectorAll('.overlay circle[fill="transparent"]')]
+  // an invisible target big enough for a fingertip (a mouse's doors have a small one of their own)
+  const targets = () => [...document.querySelectorAll('.overlay circle[fill="transparent"]')].filter((c) => Number(c.getAttribute('r')) >= 15)
   it('a mouse gets no enlarged targets', () => {
     mount(undefined, { selection: ['a'] })
     expect(targets()).toHaveLength(0)
@@ -1256,8 +1285,8 @@ describe('touch targets and the phone layout', () => {
     stubMedia(COARSE)
     mount(undefined, { selection: ['a'] })
     expect(handles('n')).toHaveLength(4)
-    // four resize corners and the connect handle
-    expect(targets()).toHaveLength(5)
+    // four resize corners and the four doors a connection is pulled from
+    expect(targets()).toHaveLength(8)
     for (const c of targets()) expect(Number(c.getAttribute('r'))).toBeGreaterThanOrEqual(15)
     // a press on the target starts the resize, as a press on the square does
     const corner = document.querySelector('g[data-handle="n2"] circle')!
@@ -1292,10 +1321,12 @@ describe('touch targets and the phone layout', () => {
     up(8, 5)
     expect(S().doc.areas[0]).toMatchObject({ w: 8, d: 5 })
   })
-  it('on a phone the dock connects, so the on-canvas connect handle is left out', () => {
-    stubMedia(PHONE)
+  it('on a phone the selected component has its four doors too, each with a fingertip of room', () => {
+    stubMedia((q) => PHONE(q) || COARSE(q))
     mount(undefined, { selection: ['a'] })
-    expect(document.querySelector('[data-handle="connect"]')).toBeNull()
+    const doors = [...document.querySelectorAll('[data-handle="connect"]')]
+    expect(doors.map((d) => d.getAttribute('data-side')).sort()).toEqual(['e', 'n', 's', 'w'])
+    for (const d of doors) expect(Number(d.querySelector('circle')!.getAttribute('r'))).toBeGreaterThanOrEqual(20)
     expect(handles('n')).toHaveLength(4)
   })
   it('the empty canvas speaks to both kinds of device', () => {
@@ -1332,77 +1363,155 @@ describe('shaping a connection', () => {
   const handle = (name: string) => document.querySelector(`[data-handle="${name}"]`)!
   const names = () => [...new Set([...document.querySelectorAll('[data-handle]')].map((h) => h.getAttribute('data-handle')!))].sort()
 
-  it('a selected connection shows its two ends, a dot on each straight run, and both components marked', () => {
+  // b four cells down from a: the line between them is a Z, out of a at y = 1, down at x = 5, into b at y = 5
+  const bent = (extra: object = {}, state: object = {}) => mount(
+    docOf([node('a', 'ec2', 0, 0, { name: 'web' }), node('b', 'rds', 8, 4, { name: 'db' })], [edge('e', 'a', 'b', extra)]),
+    { selection: ['e'], ...state },
+  )
+  const track = { fromSide: 'e', toSide: 'w', fromAt: 0, toAt: 0 } as const
+  const drawn = () => document.querySelector('.edge-hit')!.getAttribute('d')!
+
+  it('a selected connection shows its two ends, each run as something to take hold of, and both components marked', () => {
     linked()
-    expect(names()).toEqual(['ea', 'eb', 'm0'])
+    expect(names()).toEqual(['ea', 'eb', 's0'])
     // the two components it joins are outlined along with the line
     expect(document.querySelectorAll('.overlay path[stroke-opacity="0.8"]')).toHaveLength(2)
+    cleanup()
+    bent()
+    expect(names()).toEqual(['ea', 'eb', 's0', 's1', 's2'])
+    // a grip in the middle of each run long enough to hold one
+    expect(document.querySelectorAll('.run-grip').length).toBe(6)
   })
   it('shows no handles when it is one of several things selected, or while another tool is up', () => {
     linked({}, { selection: ['e', 'a'] })
-    expect(names().filter((n) => /^(ea|eb|m\d|w\d)$/.test(n))).toEqual([])
+    expect(names().filter((n) => /^(ea|eb|s\d)$/.test(n))).toEqual([])
     cleanup()
     linked({}, { tool: 'connect' })
-    expect(names().filter((n) => /^(ea|eb|m\d|w\d)$/.test(n))).toEqual([])
+    expect(names().filter((n) => /^(ea|eb|s\d)$/.test(n))).toEqual([])
   })
-  it('pulling the dot on a run puts a waypoint there, snapped to the half grid, as one undo step', () => {
-    linked()
-    down(handle('m0'), 5, 1)
-    expect(E().via).toEqual([[5, 1]])
-    move(5.2, 4.3)
-    move(5.2, 4.8)
-    expect(E().via).toEqual([[5, 5]])
-    up(5.2, 4.8)
-    expect(E().via).toEqual([[5, 5]])
-    expect(names()).toContain('w0')
+  it('a direct line or a curve has ends to move but no runs', () => {
+    linked({ shape: 'direct' })
+    expect(names()).toEqual(['ea', 'eb'])
+    cleanup()
+    linked({ shape: 'curved' })
+    expect(names()).toEqual(['ea', 'eb'])
+    expect(drawn()).toContain('C')
+  })
+  it('pulling a run moves just that run: shown as it goes, written once when it is let go', () => {
+    bent()
+    const was = drawn()
+    down(handle('s1'), 5, 3)
+    move(3.6, 3)
+    move(3.2, 3)
+    // in the hand: drawn where it is, and not yet part of the blueprint
+    expect(drawn()).not.toBe(was)
+    expect(E().runs).toBeUndefined()
+    expect(S().past).toHaveLength(0)
+    up(3.2, 3)
+    expect(E()).toMatchObject({ ...track, runs: [3] })
     expect(S().past).toHaveLength(1)
     act(() => S().undo())
-    expect(E().via).toBeUndefined()
-    expect(S().selection).toEqual(['e']) // still selected, handles still there
+    expect(E().runs).toBeUndefined()
+    expect(drawn()).toBe(was)
+    expect(S().selection).toEqual(['e']) // still selected, still ready to be shaped
   })
-  it('a waypoint drags to a new place', () => {
-    linked({ via: [[5, 5]] })
-    expect(names()).toContain('w0')
-    drag(handle('w0'), [5, 5], [3, 6.2])
-    expect(E().via).toEqual([[3, 6]])
-    expect(S().past).toHaveLength(1)
+  it('a run keeps to the half grid in the open, and cannot be pushed into the component at its end', () => {
+    bent()
+    drag(handle('s1'), [5, 3], [6.3, 3])
+    expect(E().runs).toEqual([6.5])
+    drag(handle('s1'), [6.5, 3], [0, 3])
+    expect(E().runs).toEqual([2.3])
   })
-  it('a press on a waypoint that never moves changes nothing', () => {
-    linked({ via: [[5, 5]] })
-    down(handle('w0'), 5, 5); up(5, 5)
-    expect(E().via).toEqual([[5, 5]])
+  it('a press on a run that never moves, or barely moves, changes nothing', () => {
+    bent()
+    down(handle('s1'), 5, 3); up(5, 3)
+    down(handle('s1'), 5, 3); move(5.02, 3); up(5.02, 3)
+    expect(E().runs).toBeUndefined()
     expect(S().past).toHaveLength(0)
   })
-  it('dropping a waypoint back on the line takes it out again', () => {
-    linked({ via: [[5, 5]] })
-    drag(handle('w0'), [5, 5], [5, 1]) // straight between the two ends
+  it('the first run pulled level with the last makes the line straight: the turn between them is taken out', () => {
+    // a is at y 0 to 2 and b at y 1 to 3, with a Z laid between them
+    mount(docOf([node('a'), node('b', 'rds', 8, 1)], [edge('e', 'a', 'b', { ...track, runs: [5] })]), { selection: ['e'] })
+    expect(names()).toEqual(['ea', 'eb', 's0', 's1', 's2'])
+    down(handle('s0'), 3, 1)
+    move(3, 1.9) // near enough to the last run (y = 2) to be drawn onto its line
+    expect(names()).toContain('ea')
+    up(3, 1.9)
+    expect(E().runs).toEqual([])
+    expect(E().fromAt! + 1).toBe(E().toAt! + 2) // both ends on one line
+    expect(names()).toEqual(['ea', 'eb', 's0'])
+    expect(S().past).toHaveLength(1)
+  })
+  it('a straight line pulled sideways slides along both components, and past their corners steps out and round', () => {
+    linked()
+    drag(handle('s0'), [5, 1], [5, 1.45])
+    expect(E()).toMatchObject({ fromAt: 0.5, toAt: 0.5, runs: [] })
+    drag(handle('s0'), [5, 1.5], [5, 4])
+    expect(E().runs).toEqual([2.5, 4, 7.5])
+    expect(names()).toEqual(['ea', 'eb', 's0', 's1', 's2', 's3', 's4'])
+    // and pulled back onto the line it left, it is straight again
+    drag(handle('s2'), [5, 4], [5, 1.4])
+    expect(E().runs).toEqual([])
+  })
+  it('putting a run back where it was takes no undo step', () => {
+    bent({ ...track, runs: [5] })
+    down(handle('s1'), 5, 3); move(3, 3); move(5, 3); up(5, 3)
+    expect(S().past).toHaveLength(0)
+  })
+  it('an older line through a point becomes a track the moment a run of it is moved, and its dead end goes', () => {
+    linked({ via: [[5, 4]] })
+    drag(handle('s1'), [5, 2], [3, 2])
     expect(E().via).toBeUndefined()
+    expect(E().runs).toEqual([])
   })
-  it('dropping one waypoint onto its neighbour merges them', () => {
-    linked({ via: [[4, 5], [7, 5]] })
-    drag(handle('w1'), [7, 5], [4.2, 5.1])
-    expect(E().via).toEqual([[4, 5]])
+  it('Escape puts a run back exactly as it was', () => {
+    bent()
+    const was = drawn()
+    down(handle('s1'), 5, 3); move(3, 3)
+    fireEvent.keyDown(window, { key: 'Escape' })
+    up(3, 3)
+    expect(E().runs).toBeUndefined()
+    expect(drawn()).toBe(was)
+    expect(S().past).toHaveLength(0)
   })
-  it('double-clicking a waypoint removes it', () => {
-    linked({ via: [[4, 5], [7, 5]] })
-    vi.mocked(document.elementFromPoint).mockReturnValue(handle('w0'))
-    fireEvent.doubleClick(svg(), at(4, 5))
-    expect(E().via).toEqual([[7, 5]])
-    vi.mocked(document.elementFromPoint).mockReturnValue(handle('w0'))
-    fireEvent.doubleClick(svg(), at(7, 5))
-    expect(E().via).toBeUndefined()
+  it('the bar at the line straightens it, changes how it is drawn, and hands it back to the router', () => {
+    linked({ ...track, runs: [2.5, 4, 7.5] })
+    const bar = document.querySelector('.edge-bar')!
+    const press = (name: string) => fireEvent.click(bar.querySelector(`[aria-label="${name}"]`)!)
+    press('Straighten')
+    expect(E().runs).toEqual([])
+    expect(bar.querySelector('[aria-label="Straighten"]')).toBeDisabled()
+    press('Curved')
+    expect(E().shape).toBe('curved')
+    expect(bar.querySelector('[aria-label="Curved"]')).toHaveAttribute('aria-pressed', 'true')
+    press('Direct')
+    expect(E().shape).toBe('direct')
+    press('Right-angled')
+    expect(E().shape).toBeUndefined()
+    expect(bar.querySelector('[aria-label="Route automatically"]')).toBeDisabled()
+    press('Straighten'); press('Route automatically')
+    expect(E().runs).toBeUndefined()
   })
-  it('a new waypoint on a shaped line goes in between the right two', () => {
-    linked({ via: [[4, 6], [7, 6]] })
-    // the run between the two existing waypoints
-    const runs = names().filter((n) => n.startsWith('m'))
-    const middle = runs.find((n) => { const el = handle(n); return Math.abs(Number(el.getAttribute('cy')) - at(5.5, 6).clientY + S().view.y) < 400 })!
-    expect(middle).toBeTruthy()
-    const before = E().via!.length
-    down(handle(runs[Math.floor(runs.length / 2)]), 5.5, 6); move(5.5, 9); up(5.5, 9)
-    expect(E().via!.length).toBe(before + 1)
-    expect(E().via![0]).toEqual([4, 6])
-    expect(E().via!.at(-1)).toEqual([7, 6])
+  it('for two components that are out of line the bar offers to line them up, and for one with something between says what straight will mean', () => {
+    bent()
+    const wide = () => document.querySelector('.edge-bar .wide')!
+    expect(wide()).toHaveAttribute('aria-label', 'Line up')
+    fireEvent.click(wide())
+    expect(S().doc.nodes[1]).toMatchObject({ x: 8, y: 0 })
+    expect(E().runs).toEqual([])
+    cleanup()
+    mount(docOf([node('a'), node('b', 'rds', 10, 0), node('x', 's3', 5, 0)], [edge('e', 'a', 'b')]), { selection: ['e'] })
+    expect(wide().getAttribute('data-tip')).toMatch(/passing under/)
+  })
+  it('the bar sits above the whole line, and goes away while something is in the hand', () => {
+    bent()
+    const bar = document.querySelector<HTMLElement>('.edge-bar')!
+    const top = Math.min(at(2, 1).clientY, at(8, 5).clientY)
+    expect(parseFloat(bar.style.top)).toBeLessThan(top)
+    down(handle('s1'), 5, 3); move(3, 3)
+    expect(document.querySelector('.edge-bar')).toBeNull()
+    up(3, 3)
+    expect(document.querySelector('.edge-bar')).not.toBeNull()
   })
   it('dragging an end onto another component reconnects it there', () => {
     linked()
@@ -1416,12 +1525,18 @@ describe('shaping a connection', () => {
     expect(document.querySelector('.wire')).toBeNull()
     expect(S().past).toHaveLength(1)
   })
-  it('dropping an end near an edge of a component pins that side', () => {
+  it('aiming an end at one of a component\'s doors pins that side; anywhere else on it leaves the router to choose', () => {
     linked()
     down(handle('eb'), 8, 1)
     vi.mocked(document.elementFromPoint).mockReturnValue(hit('node', 'b'))
-    move(9, 1.9); up(9, 1.9) // the bottom edge of the same component
-    expect(E()).toMatchObject({ to: 'b', toSide: 's' })
+    move(9, -0.4) // the door in the middle of its far side
+    // the door being aimed at says so
+    expect(document.querySelector('.door.aimed')).toHaveAttribute('data-side', 'n')
+    up(9, -0.4)
+    expect(E()).toMatchObject({ to: 'b', toSide: 'n' })
+    down(handle('eb'), 9, 2)
+    move(9.3, 1.2); up(9.3, 1.2) // on the body, at no door in particular
+    expect(E().toSide).toBeUndefined()
   })
   it('dropping an end on bare ground leaves the connection as it was', () => {
     linked()
@@ -1443,22 +1558,26 @@ describe('shaping a connection', () => {
     expect(E()).toMatchObject({ from: 'a', to: 'b' })
     expect(document.querySelector('.wire')).toBeNull()
   })
-  it('fingers get a generous invisible target around every handle', () => {
+  it('fingers get a generous invisible target around each end and along every run', () => {
     stubMedia(COARSE)
-    linked({ via: [[5, 5]] })
-    for (const n of ['ea', 'eb', 'w0']) {
+    bent()
+    for (const n of ['ea', 'eb']) {
       const big = [...document.querySelectorAll(`[data-handle="${n}"]`)].find((el) => el.getAttribute('fill') === 'transparent')!
       expect(Number(big.getAttribute('r'))).toBeGreaterThanOrEqual(17)
     }
+    expect(Number(handle('s1').querySelector('line')!.getAttribute('stroke-width'))).toBeGreaterThanOrEqual(30)
   })
-  it('a finger drags a waypoint without panning the view', () => {
+  it('a finger drags a run without panning the view, with a tick when a turn drops out', () => {
     stubMedia(COARSE)
-    linked({ via: [[5, 5]] })
+    const buzz = vi.fn<(n: number) => boolean>(() => true)
+    vi.stubGlobal('navigator', { ...navigator, vibrate: buzz })
+    mount(docOf([node('a'), node('b', 'rds', 8, 1)], [edge('e', 'a', 'b', { ...track, runs: [5] })]), { selection: ['e'] })
     const view = S().view
     const o = { pointerType: 'touch', pointerId: 31 }
-    down(handle('w0'), 5, 5, o); move(5, 8, o); up(5, 8, o)
-    expect(E().via).toEqual([[5, 8]])
+    down(handle('s0'), 3, 1, o); move(3, 1.5, o); move(3, 2, o); up(3, 2, o)
+    expect(E().runs).toEqual([])
     expect(S().view).toEqual(view)
+    expect(buzz).toHaveBeenCalled()
   })
 })
 
@@ -1503,7 +1622,456 @@ describe('what a connection shows', () => {
     vi.mocked(document.elementFromPoint).mockReturnValue(hit('node', 'b'))
     move(9, 1)
     // not a straight line through the component in between
-    expect(document.querySelector('.wire')!.getAttribute('d')!.match(/[LQ]/g)!.length).toBeGreaterThan(2)
+    expect(document.querySelector('.wire path')!.getAttribute('d')!.match(/[LQ]/g)!.length).toBeGreaterThan(2)
     up(9, 1)
+  })
+})
+
+// ---- direct manipulation: what is in the hand, doors, and forgiving connections -----------------------------
+
+const hover = (el: Element, wx: number, wy: number) => fireEvent.pointerMove(el, { pointerId: 1, pointerType: 'mouse', ...at(wx, wy) })
+const doorsOf = (id: string) => [...document.querySelectorAll(`.door[data-id="${id}"]`)]
+const doorOf = (id: string, side: string) => document.querySelector(`.door[data-id="${id}"][data-side="${side}"]`)!
+const quick = () => screen.queryByRole('dialog', { name: 'Add and connect a component' })
+
+describe('doors', () => {
+  it('show on the component under the pointer, with nothing selected and no tool chosen', () => {
+    mount()
+    expect(document.querySelectorAll('.door')).toHaveLength(0)
+    hover(hit('node', 'b'), 9, 1)
+    expect(doorsOf('b').map((d) => d.getAttribute('data-side')).sort()).toEqual(['e', 'n', 's', 'w'])
+    expect(document.querySelector('.hover-mark')).not.toBeNull()
+    expect(S().selection).toEqual([])
+  })
+  it('stay while the pointer leaves the body to reach one, and go when it moves away', () => {
+    mount()
+    hover(hit('node', 'b'), 9, 1)
+    hover(svg(), 10.6, 1) // off the body, on the way to the east door
+    expect(doorsOf('b')).toHaveLength(4)
+    hover(doorOf('b', 'e'), 10.42, 1)
+    expect(doorsOf('b')).toHaveLength(4)
+    hover(svg(), 14, 1)
+    expect(document.querySelectorAll('.door')).toHaveLength(0)
+    hover(hit('node', 'b'), 9, 1)
+    fireEvent.pointerLeave(svg())
+    expect(document.querySelectorAll('.door')).toHaveLength(0)
+  })
+  it('the one on the side the name is written sits further out, clear of the text, unless names are hidden', () => {
+    mount(undefined, { selection: ['a'] })
+    const far = () => SIDE_OUT().filter((d) => d > 0.9).length
+    const SIDE_OUT = () => doorsOf('a').map((d) => {
+      const c = d.querySelector('.door-dot')!, v = S().view
+      const [wx, wy] = unproject(projNow(), (Number(c.getAttribute('cx'))), (Number(c.getAttribute('cy'))))
+      void v
+      return Math.max(Math.abs(wx - 1), Math.abs(wy - 1)) - 1
+    })
+    expect(far()).toBe(1)
+    act(() => { useStore.setState({ showLabels: false }) })
+    expect(far()).toBe(0)
+  })
+  it('a touch does not show them by hovering, and other tools do not show them at all', () => {
+    mount()
+    fireEvent.pointerMove(hit('node', 'b'), { pointerId: 1, pointerType: 'touch', ...at(9, 1) })
+    expect(document.querySelectorAll('.door')).toHaveLength(0)
+    act(() => { useStore.setState({ tool: 'area' }) })
+    hover(hit('node', 'b'), 9, 1)
+    expect(document.querySelectorAll('.door')).toHaveLength(0)
+  })
+  it('the selected component keeps its doors while the pointer is elsewhere, and another under the pointer shows its own', () => {
+    mount(undefined, { selection: ['a'] })
+    expect(doorsOf('a')).toHaveLength(4)
+    hover(hit('node', 'b'), 9, 1)
+    expect(document.querySelectorAll('.door')).toHaveLength(8)
+    // the selected one is already marked: no second mark for it under the pointer
+    hover(hit('node', 'a'), 1, 1)
+    expect(document.querySelector('.hover-mark')).toBeNull()
+  })
+})
+
+describe('pulling a connection', () => {
+  const pull = (id: string, side: string, to: [number, number], under: Element = svg()) => {
+    hover(hit('node', id), ...(id === 'a' ? [1, 1] : [9, 1]) as [number, number])
+    const d = doorOf(id, side), c = d.querySelector('.door-dot')!
+    const from = unproject(projNow(), Number(c.getAttribute('cx')), Number(c.getAttribute('cy')))
+    down(d, from[0], from[1])
+    vi.mocked(document.elementFromPoint).mockReturnValue(under as Element)
+    move(...to)
+  }
+  it('from a door of a component that was never selected, to somewhere near another: one gesture, one connection', () => {
+    mount()
+    pull('a', 'e', [7.3, 1.2]) // most of a cell short of `b`
+    expect(document.querySelector('.wire.caught')).not.toBeNull()
+    expect(document.querySelector('.wire-target')).not.toBeNull()
+    // what it has caught offers its own doors
+    expect(doorsOf('b')).toHaveLength(4)
+    expect(doorsOf('a')).toHaveLength(0)
+    up(7.3, 1.2)
+    expect(S().doc.edges).toHaveLength(1)
+    expect(S().doc.edges[0]).toMatchObject({ from: 'a', to: 'b', origin: 'drawn' })
+    expect(S().doc.edges[0].toSide).toBeUndefined()
+    expect(S().selection).toEqual([S().doc.edges[0].id])
+    expect(S().past).toHaveLength(1)
+    expect(document.querySelector('.wire')).toBeNull()
+  })
+  it('out in the open it is a loose end: one elbow to the pointer, dashed, with a dot at its tip', () => {
+    mount()
+    pull('a', 'e', [5, 4])
+    const wire = document.querySelector('.wire')!
+    expect(wire).not.toHaveClass('caught')
+    expect(wire.querySelector('path')).toHaveAttribute('stroke-dasharray')
+    expect(wire.querySelector('circle')).not.toBeNull()
+    expect(wire.querySelector('polygon')).toBeNull()
+    expect(document.querySelector('.wire-target')).toBeNull()
+    up(5, 4)
+  })
+  it('caught, it is drawn solid with its arrowhead, as the line it will become', () => {
+    mount()
+    pull('a', 'e', [9, 1], hit('node', 'b'))
+    const wire = document.querySelector('.wire.caught')!
+    expect(wire.querySelector('path')).not.toHaveAttribute('stroke-dasharray')
+    expect(wire.querySelector('polygon')).not.toBeNull()
+    up(9, 1)
+  })
+  it('aimed at one door, the line arrives there, in the same undo step', () => {
+    mount()
+    pull('a', 'e', [9, -0.42])
+    expect(document.querySelector('.door.aimed')).toHaveAttribute('data-side', 'n')
+    up(9, -0.42)
+    expect(S().doc.edges[0]).toMatchObject({ from: 'a', to: 'b', toSide: 'n' })
+    expect(S().past).toHaveLength(1)
+  })
+  it('says while it is still in the hand that two components are joined already, then shows the line that joins them', () => {
+    mount(docOf([node('a'), node('b', 'rds', 8, 0)], [edge('e', 'b', 'a')]))
+    pull('a', 'e', [9, 1], hit('node', 'b'))
+    expect(document.querySelector('.wire-target')).toHaveClass('bad')
+    expect(document.querySelector('.wire.caught')).toBeNull()
+    expect(document.querySelectorAll('.door')).toHaveLength(0)
+    up(9, 1)
+    expect(S().doc.edges).toHaveLength(1)
+    expect(S().selection).toEqual(['e'])
+    expect(S().toasts.at(-1)).toMatchObject({ text: 'Those components are already connected', kind: 'warn' })
+    expect(S().past).toHaveLength(0)
+  })
+  it('let go on open ground it asks what to put there, and adds it connected as one step', async () => {
+    mount()
+    pull('a', 's', [1, 8])
+    up(1, 8)
+    expect(quick()).not.toBeNull()
+    // the loose end waits where it was let go
+    expect(document.querySelector('.wire')).not.toBeNull()
+    expect(S().doc.nodes).toHaveLength(2)
+    await userEvent.type(screen.getByRole('combobox', { name: 'Search components' }), 'queue')
+    expect(screen.getAllByRole('option')[0]).toHaveTextContent('Queue')
+    await userEvent.keyboard('{Enter}')
+    expect(quick()).toBeNull()
+    expect(document.querySelector('.wire')).toBeNull()
+    expect(S().doc.nodes).toHaveLength(3)
+    expect(S().doc.nodes[2]).toMatchObject({ type: 'sqs', x: 0, y: 7 })
+    expect(S().doc.edges).toHaveLength(1)
+    expect(S().doc.edges[0]).toMatchObject({ from: 'a', to: S().doc.nodes[2].id })
+    expect(S().past).toHaveLength(1)
+    act(() => S().undo())
+    expect([S().doc.nodes.length, S().doc.edges.length]).toEqual([2, 0])
+  })
+  it('what it adds never lands on something that is already there', async () => {
+    mount(docOf([node('a'), node('b', 'rds', 8, 0), node('c', 's3', 0, 7)]))
+    pull('a', 's', [1.2, 6.4]) // short of `c`, out of its reach, but where a new component would overlap it
+    vi.mocked(document.elementFromPoint).mockReturnValue(svg())
+    act(() => { useStore.setState({ view: { x: 600, y: 300, k: 4 } }) }) // zoomed in, so reach is small
+    move(1.2, 5.2); up(1.2, 5.2)
+    await userEvent.click(screen.getAllByRole('option')[0])
+    const made = S().doc.nodes[3], c = S().doc.nodes[2]
+    expect(made.x + 2 <= c.x || c.x + 2 <= made.x || made.y + 2 <= c.y || c.y + 2 <= made.y).toBe(true)
+    expect(S().doc.nodes.every((n) => n === made || made.x + 2 <= n.x || n.x + 2 <= made.x || made.y + 2 <= n.y || n.y + 2 <= made.y)).toBe(true)
+  })
+  it('Escape in the search, or a press anywhere else, answers "nothing": nothing is added and the loose end goes', async () => {
+    mount()
+    pull('a', 's', [1, 8]); up(1, 8)
+    await userEvent.keyboard('{Escape}')
+    expect(quick()).toBeNull()
+    expect(document.querySelector('.wire')).toBeNull()
+    pull('a', 's', [1, 8]); up(1, 8)
+    expect(quick()).not.toBeNull()
+    fireEvent.pointerDown(svg(), { pointerId: 1, button: 0, ...at(12, 6) })
+    fireEvent.pointerUp(svg(), { pointerId: 1, ...at(12, 6) })
+    expect(quick()).toBeNull()
+    expect(document.querySelector('.wire')).toBeNull()
+    expect(S().doc.nodes).toHaveLength(2)
+    expect(S().past).toHaveLength(0)
+  })
+  it('a pull that barely leaves its own component is not a question about open ground', () => {
+    mount()
+    pull('a', 'e', [3, 1.5])
+    up(3, 1.5)
+    expect(quick()).toBeNull()
+    expect(document.querySelector('.wire')).toBeNull()
+    expect(S().doc.edges).toHaveLength(0)
+  })
+  it('Escape drops a line that is being pulled', () => {
+    mount()
+    pull('a', 'e', [9, 1], hit('node', 'b'))
+    fireEvent.keyDown(window, { key: 'Escape' })
+    expect(document.querySelector('.wire')).toBeNull()
+    up(9, 1)
+    expect(S().doc.edges).toHaveLength(0)
+  })
+  it('a finger gets a longer reach than a mouse', () => {
+    mount(undefined, { selection: ['a'] })
+    const d = doorOf('a', 'e')
+    fireEvent.pointerDown(d, { pointerId: 1, button: 0, pointerType: 'touch', ...at(2.42, 1) })
+    fireEvent.pointerMove(svg(), { pointerId: 1, pointerType: 'touch', ...at(6.95, 1) }) // more than a cell short
+    expect(document.querySelector('.wire.caught')).not.toBeNull()
+    fireEvent.pointerUp(svg(), { pointerId: 1, pointerType: 'touch', ...at(6.95, 1) })
+    expect(S().doc.edges).toHaveLength(1)
+  })
+})
+
+describe('moving an end of a connection', () => {
+  const linked = () => mount(docOf([node('a', 'ec2', 0, 0), node('b', 'rds', 8, 0), node('c', 'sqs', 8, 8)], [edge('e', 'a', 'b', { via: [[5, 3]] })]), { selection: ['e'] })
+  const handle = (name: string) => document.querySelector(`[data-handle="${name}"]`)!
+  it('the line steps back while its end is in the hand, and the end catches what it is near', () => {
+    linked()
+    down(handle('eb'), 8, 1)
+    move(7.4, 9) // beside `c`, not on it
+    expect(hit('edge', 'e').closest('.edge')).toHaveClass('off')
+    expect(document.querySelector('.wire.caught')).not.toBeNull()
+    // the selected line's own highlight and handles are not drawn over where it used to run
+    expect(document.querySelector('[data-handle="ea"]')).toBeNull()
+    up(7.4, 9)
+    expect(S().doc.edges[0]).toMatchObject({ from: 'a', to: 'c' })
+    // a bend drawn for the way to `b` does not follow it to `c`
+    expect(S().doc.edges[0].via).toBeUndefined()
+    expect(hit('edge', 'e').closest('.edge')).not.toHaveClass('off')
+  })
+  it('moving the starting end is previewed from where it would start', () => {
+    linked()
+    down(handle('ea'), 2, 1)
+    vi.mocked(document.elementFromPoint).mockReturnValue(hit('node', 'c'))
+    move(9, 9)
+    const wire = document.querySelector('.wire.caught')!
+    expect(wire.querySelector('polygon')).toBeNull() // no arrowhead on the end being held
+    up(9, 9)
+    expect(S().doc.edges[0]).toMatchObject({ from: 'c', to: 'b' })
+  })
+  it('onto the component at its other end is refused while it is still in the hand', () => {
+    linked()
+    down(handle('eb'), 8, 1)
+    vi.mocked(document.elementFromPoint).mockReturnValue(hit('node', 'a'))
+    move(1, 1)
+    expect(document.querySelector('.wire-target')).toHaveClass('bad')
+    up(1, 1)
+    expect(S().doc.edges[0]).toMatchObject({ from: 'a', to: 'b', via: [[5, 3]] })
+    expect(S().toasts.at(-1)).toMatchObject({ kind: 'warn' })
+  })
+})
+
+describe('carrying', () => {
+  it('Escape puts it back exactly, and nothing was ever written', () => {
+    mount()
+    down(hit('node', 'a'), 1, 1)
+    move(4.4, 2.3)
+    expect(document.querySelector('.landing')).not.toBeNull()
+    fireEvent.keyDown(window, { key: 'Escape' })
+    expect(drawnAt('a')).toEqual([0, 0])
+    expect(document.querySelector('.landing')).toBeNull()
+    expect(document.querySelector('.canvas-wrap')).not.toHaveClass('busy')
+    move(6, 3); up(6, 3) // the rest of the gesture is ignored
+    expect(S().doc.nodes[0]).toMatchObject({ x: 0, y: 0 })
+    expect(S()).toMatchObject({ past: [], saved: true })
+  })
+  it('Escape also takes back the copies an alt-drag made', () => {
+    mount()
+    down(hit('node', 'a'), 1, 1, { altKey: true })
+    move(4, 4, { altKey: true })
+    expect(S().doc.nodes).toHaveLength(3)
+    fireEvent.keyDown(window, { key: 'Escape' })
+    expect(S().doc.nodes).toHaveLength(2)
+    expect(S().past).toHaveLength(0)
+  })
+  it('Escape with nothing in the hand is left for the rest of the editor', () => {
+    mount(undefined, { selection: ['a'] })
+    const seen = vi.fn<(e: KeyboardEvent) => void>()
+    window.addEventListener('keydown', seen)
+    fireEvent.keyDown(window, { key: 'Escape' })
+    down(hit('node', 'a'), 1, 1) // pressed, not yet carried
+    fireEvent.keyDown(window, { key: 'Escape' })
+    expect(seen).toHaveBeenCalledTimes(2)
+    window.removeEventListener('keydown', seen)
+    up(1, 1)
+  })
+  it('never lands on another component: the nearest free cell is marked and taken', () => {
+    mount()
+    down(hit('node', 'a'), 1, 1)
+    move(9, 1) // straight onto `b`
+    up(9, 1)
+    const [a, b] = S().doc.nodes
+    expect(a.x + 2 <= b.x || b.x + 2 <= a.x || a.y + 2 <= b.y || b.y + 2 <= a.y).toBe(true)
+    expect(Math.abs(a.x - 8) + Math.abs(a.y)).toBe(2)
+    expect(S().past).toHaveLength(1)
+  })
+  it('shift keeps the move to the axis it has gone furthest along', () => {
+    mount()
+    down(hit('node', 'a'), 1, 1)
+    move(4, 2.4, { shiftKey: true })
+    expect(drawnAt('a')[1]).toBe(0)
+    up(4, 2.4, { shiftKey: true })
+    expect(S().doc.nodes[0]).toMatchObject({ x: 3, y: 0 })
+    down(hit('node', 'a'), 4, 1)
+    move(5.2, 6, { shiftKey: true }); up(5.2, 6, { shiftKey: true })
+    expect(S().doc.nodes[0]).toMatchObject({ x: 3, y: 5 })
+  })
+  it('marks equal gaps as a component comes level with its neighbours at their spacing', () => {
+    mount(docOf([node('a', 'ec2', 0, 0), node('b', 'rds', 6, 0), node('m', 'sqs', 13, 5)]))
+    down(hit('node', 'm'), 14, 6)
+    move(13, 1)
+    expect(document.querySelectorAll('.gap')).toHaveLength(2)
+    move(14, 1)
+    expect(document.querySelectorAll('.gap')).toHaveLength(0)
+    move(13, 1); up(13, 1)
+    expect(document.querySelectorAll('.gap')).toHaveLength(0)
+    expect(S().doc.nodes[2]).toMatchObject({ x: 12, y: 0 })
+  })
+  it('lights up the group it is about to join, and not the one it is already in', () => {
+    mount(docOf([node('a', 'ec2', 0, 0), node('b', 'rds', 11, 1)], [], { areas: [area('r', 10, 0, 6, 6)] }))
+    down(hit('node', 'a'), 1, 1)
+    move(4, 1)
+    expect(document.querySelector('.drop-area')).toBeNull()
+    move(14.2, 4)
+    expect(document.querySelector('.drop-area')).not.toBeNull()
+    up(14.2, 4)
+    expect(document.querySelector('.drop-area')).toBeNull()
+    // moved about inside its own group, nothing lights up
+    down(hit('node', 'a'), 14, 4)
+    move(14, 5.2)
+    expect(document.querySelector('.drop-area')).toBeNull()
+    up(14, 5.2)
+  })
+  it('eases the last step into its cell, briefly', () => {
+    vi.useFakeTimers()
+    mount()
+    drag(hit('node', 'a'), [1, 1], [3.3, 1])
+    expect(document.querySelector('.canvas-wrap')).toHaveClass('settle')
+    act(() => { vi.advanceTimersByTime(200) })
+    expect(document.querySelector('.canvas-wrap')).not.toHaveClass('settle')
+    // a press that never became a carry settles nothing
+    drag(hit('node', 'a'), [3, 1], [3.01, 1])
+    expect(document.querySelector('.canvas-wrap')).not.toHaveClass('settle')
+  })
+  it('carried to the edge of the clear ground, the view moves on and the component with it', () => {
+    vi.useFakeTimers()
+    mount()
+    const before = S().view.x
+    down(hit('node', 'a'), 1, 1)
+    fireEvent.pointerMove(svg(), { pointerId: 1, clientX: 700, clientY: 400 })
+    const mid = drawnAt('a')[0]
+    // the right-hand edge of the ground the inspector leaves clear
+    fireEvent.pointerMove(svg(), { pointerId: 1, clientX: 860, clientY: 400 })
+    act(() => { vi.advanceTimersByTime(200) })
+    expect(S().view.x).toBeLessThan(before - 40)
+    expect(drawnAt('a')[0]).toBeGreaterThan(mid + 1)
+    // back in the middle it stops
+    fireEvent.pointerMove(svg(), { pointerId: 1, clientX: 600, clientY: 400 })
+    act(() => { vi.advanceTimersByTime(60) })
+    const rest = S().view.x
+    act(() => { vi.advanceTimersByTime(200) })
+    expect(S().view.x).toBe(rest)
+    fireEvent.pointerUp(svg(), { pointerId: 1, clientX: 600, clientY: 400 })
+  })
+  it('a very large group is redrawn every quarter cell instead of every pixel', () => {
+    const many = Array.from({ length: 48 }, (_, i) => node('n' + i, 'ec2', (i % 8) * 4, Math.floor(i / 8) * 4))
+    mount(docOf(many), { selection: many.map((n) => n.id) })
+    down(hit('node', 'n0'), 1, 1)
+    move(1.37, 1)
+    const x = drawnAt('n0')[0]
+    expect(Math.abs(x * 4 - Math.round(x * 4))).toBeLessThan(1e-6)
+    move(3.2, 1); up(3.2, 1)
+    expect(S().doc.nodes[0].x).toBe(2)
+    expect(S().doc.nodes[47].x).toBe(30)
+  })
+  it('an area corner is shown where it is dragged and written when it is let go', () => {
+    mount(docOf([], [], { areas: [area('r', 0, 0, 6, 4)] }), { selection: ['r'] })
+    down(document.querySelector('[data-handle="r2"]')!, 6, 4)
+    move(8, 5)
+    expect(S().doc.areas[0]).toMatchObject({ w: 6, d: 4 })
+    expect(S().past).toHaveLength(0)
+    up(8, 5)
+    expect(S().doc.areas[0]).toMatchObject({ w: 8, d: 5 })
+    expect(S().past).toHaveLength(1)
+  })
+})
+
+describe('selecting with a box', () => {
+  it('lights up what it has caught as it grows', () => {
+    mount(docOf([node('a', 'ec2', 0, 0), node('b', 'rds', 8, 0), node('c', 's3', 0, 20)]), { selection: ['a'] })
+    const p = at(-2, -2), q = at(11, 3)
+    fireEvent.pointerDown(svg(), { pointerId: 1, button: 0, shiftKey: true, clientX: Math.min(p.clientX, q.clientX) - 150, clientY: Math.min(p.clientY, q.clientY) - 150 })
+    fireEvent.pointerMove(svg(), { pointerId: 1, shiftKey: true, clientX: Math.max(p.clientX, q.clientX) + 150, clientY: Math.max(p.clientY, q.clientY) + 150 })
+    // `b` is new to the selection; `a` is already marked as selected
+    expect(document.querySelectorAll('.picking')).toHaveLength(1)
+    fireEvent.pointerUp(svg(), { pointerId: 1, clientX: Math.max(p.clientX, q.clientX) + 150, clientY: Math.max(p.clientY, q.clientY) + 150 })
+    expect(document.querySelectorAll('.picking')).toHaveLength(0)
+    expect(S().selection.sort()).toEqual(['a', 'b'])
+  })
+  it('the group can be lined up and spaced out from the bar above it, a step each', async () => {
+    mount(docOf([node('a', 'ec2', 0, 0), node('b', 'rds', 5, 1), node('c', 's3', 14, 2)]), { selection: ['a', 'b', 'c'] })
+    await userEvent.click(screen.getByRole('button', { name: 'Line up' }))
+    expect(S().doc.nodes.map((n) => n.y)).toEqual([1, 1, 1])
+    await userEvent.click(screen.getByRole('button', { name: 'Space evenly' }))
+    expect(S().doc.nodes.map((n) => n.x)).toEqual([0, 7, 14])
+    expect(S().past).toHaveLength(2)
+    // two is a line, but not something to space
+    act(() => S().select(['a', 'b']))
+    expect(screen.queryByRole('button', { name: 'Space evenly' })).toBeNull()
+    expect(screen.getByRole('button', { name: 'Line up' })).toBeInTheDocument()
+  })
+})
+
+describe('placing from the library, continued', () => {
+  it('the ghost follows the pointer between cells while the cell it will land in is marked', () => {
+    mount(docOf(), { placing: 'rds' })
+    fireEvent.pointerMove(window, at(4.3, 6.8))
+    const body = document.querySelector('.ghost g[transform]')!.getAttribute('transform')!.match(/translate\((-?[\d.]+) (-?[\d.]+)\)/)!
+    const [wx] = unproject(projNow(), Number(body[1]), Number(body[2]))
+    expect(wx).toBeGreaterThan(3.05)
+    expect(wx).toBeLessThan(3.3)
+  })
+  it('lines up with what is already there show while it is carried in', () => {
+    mount(undefined, { placing: 'rds' })
+    fireEvent.pointerMove(window, at(1, 9))
+    expect(document.querySelectorAll('.guide').length).toBeGreaterThan(0)
+    fireEvent.pointerUp(window, at(1, 9))
+    expect(document.querySelectorAll('.guide')).toHaveLength(0)
+  })
+  it('never lands on a component that is already there', () => {
+    mount(undefined, { placing: 'rds' })
+    fireEvent.pointerUp(window, at(1.2, 1.1)) // right on top of `a`
+    const [a, , made] = S().doc.nodes
+    expect(made.x + 2 <= a.x || a.x + 2 <= made.x || made.y + 2 <= a.y || a.y + 2 <= made.y).toBe(true)
+  })
+  it('dropped on a connection, it goes into the middle of it: the line lights up first, and it is one step', () => {
+    mount(docOf([node('a'), node('b', 'rds', 8, 0)], [edge('e', 'a', 'b', { label: 'orders', kind: 'data', via: [[5, 3]], toSide: 's' })]), { placing: 'lambda' })
+    vi.mocked(document.elementFromPoint).mockReturnValue(hit('edge', 'e'))
+    fireEvent.pointerMove(window, at(5, 1))
+    expect(document.querySelector('.splice')).not.toBeNull()
+    fireEvent.pointerUp(window, at(5, 1))
+    expect(document.querySelector('.splice')).toBeNull()
+    const made = S().doc.nodes[2]
+    expect(S().doc.edges.map((e) => [e.from, e.to])).toEqual([['a', made.id], [made.id, 'b']])
+    // both halves are what the line was; its name stays on the first, its hand-drawn path is let go, the far door is kept
+    expect(S().doc.edges[0]).toMatchObject({ id: 'e', label: 'orders', kind: 'data' })
+    expect(S().doc.edges[1]).toMatchObject({ kind: 'data', toSide: 's' })
+    expect(S().doc.edges[1].label).toBeUndefined()
+    expect(S().doc.edges.every((e) => e.via === undefined)).toBe(true)
+    expect(S().past).toHaveLength(1)
+    act(() => S().undo())
+    expect(S().doc.edges.map((e) => [e.from, e.to])).toEqual([['a', 'b']])
+  })
+  it('over a component rather than the line behind it, it is an ordinary drop', () => {
+    mount(docOf([node('a'), node('b', 'rds', 8, 0)], [edge('e', 'a', 'b')]), { placing: 'lambda' })
+    vi.mocked(document.elementFromPoint).mockReturnValue(hit('node', 'b'))
+    fireEvent.pointerMove(window, at(9, 1))
+    expect(document.querySelector('.splice')).toBeNull()
+    fireEvent.pointerUp(window, at(9, 1))
+    expect(S().doc.edges).toHaveLength(1)
   })
 })

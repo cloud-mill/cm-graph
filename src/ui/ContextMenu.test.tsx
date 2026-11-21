@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { fireEvent, render, screen } from '@testing-library/react'
+import { act, fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { useStore } from '../core/store'
@@ -28,7 +28,7 @@ describe('ContextMenu', () => {
     expect(names()).toEqual(['Duplicate', 'Copy', 'Wrap in group', 'Zoom to selection', 'Follow the flow', 'Edit properties', 'Delete'])
     document.body.innerHTML = ''
     open('edge', ['e'])
-    expect(names()).toEqual(['Follow the flow', 'Reverse direction', 'Add a bend', 'Edit properties', 'Delete'])
+    expect(names()).toEqual(['Straighten', 'Follow the flow', 'Reverse direction', 'Edit properties', 'Delete'])
     document.body.innerHTML = ''
     open('area', ['r'])
     expect(names()).toEqual(['Duplicate', 'Copy', 'Fit to contents', 'Edit properties', 'Delete'])
@@ -84,6 +84,26 @@ describe('ContextMenu', () => {
     open('edge', ['e'])
     await click('Reverse direction')
     expect(S().doc.edges[0]).toMatchObject({ from: 'b', to: 'a' })
+  })
+  it('straightens a connection, and hands a shaped one back to the router', async () => {
+    const onClose = open('edge', ['e'])
+    act(() => S().patchEdge(['e'], { fromSide: 'e', toSide: 'w', fromAt: 0, toAt: 0, runs: [4.5, 6, 9.5] }))
+    await click('Straighten')
+    expect(S().doc.edges[0].runs).toEqual([])
+    expect(onClose).toHaveBeenCalled()
+    document.body.innerHTML = ''
+    render(<ContextMenu menu={{ x: 100, y: 120, wx: 4, wy: 7, target: 'edge' }} onClose={onClose} />)
+    expect(names()).toContain('Route automatically')
+    await click('Route automatically')
+    expect(S().doc.edges[0].runs).toBeUndefined()
+  })
+  it('says when straightening will move a component, and does it', async () => {
+    resetStore({ doc: docOf([node('a', 'ec2', 0, 0), node('b', 'rds', 10, 6, { name: 'db' })], [edge('e', 'a', 'b')]), selection: ['e'] })
+    render(<ContextMenu menu={{ x: 100, y: 120, wx: 4, wy: 7, target: 'edge' }} onClose={() => {}} />)
+    expect(names()[0]).toBe('Line up and straighten')
+    await click('Line up and straighten')
+    expect(S().doc.nodes[1]).toMatchObject({ x: 10, y: 0 })
+    expect(S().doc.edges[0].runs).toEqual([])
   })
   it('fits an area to its contents', async () => {
     open('area', ['r'])

@@ -1,5 +1,5 @@
 import { useMemo } from 'react'
-import { ArrowLeftRight, Copy, ExternalLink, Maximize2, RotateCcw, Route, Spline, Trash2 } from 'lucide-react'
+import { ArrowLeftRight, Copy, ExternalLink, Maximize2, Minus, RotateCcw, Route, Trash2 } from 'lucide-react'
 import { fitView } from '../canvas/camera'
 import { ModelIcon } from '../canvas/models'
 import { CATEGORIES, HOURS, PROVIDERS, REGIONS, type PropDef, costOf, defOf, defaultProps, docCost, docProviders, money, nodeColor, nodeName, translateDoc } from '../core/catalog'
@@ -8,7 +8,8 @@ import { KINDS, ORIGINS, captionOf, describe, kindInfo, linkProblems, traceFlow 
 import { coalesce, useStore } from '../core/store'
 import { type AreaT, type EdgeT, type LabelT, type LinkKind, type NodeT, centerOf } from '../core/types'
 import { NumberInput, Row, Segmented, Select, Swatches, TextInput, Toggle, keys } from './atoms'
-import { fitAreaToContents, translateTo } from './actions'
+import { isShaped, straightness } from '../core/shape'
+import { fitAreaToContents, straightenLinks, translateTo } from './actions'
 
 /** what each kind of figure rests on, in a sentence */
 export const BASIS = {
@@ -173,8 +174,9 @@ function EdgeInspector({ edges }: { edges: EdgeT[] }) {
   const a = doc.nodes.find((n) => n.id === e.from), b = doc.nodes.find((n) => n.id === e.to)
   const kind = kindInfo(e.kind)
   const problems = one ? linkProblems(doc, e) : []
-  const shaped = edges.filter((x) => x.via?.length || x.fromSide || x.toSide)
-  const bends = e.via?.length ?? 0
+  const shaped = edges.filter(isShaped)
+  const straight = one ? straightness(doc, e) : null
+  const mover = straight?.state === 'apart' ? doc.nodes.find((n) => n.id === straight.move) : null
   return (
     <>
       <div className="insp-hero slim">
@@ -227,14 +229,26 @@ function EdgeInspector({ edges }: { edges: EdgeT[] }) {
       </section>
       <section className="sect">
         <h5>Path</h5>
+        <Row label="Shape">
+          <Segmented size="sm" value={e.shape ?? 'ortho'} onChange={(v) => s.setShape(ids, v === 'ortho' ? undefined : v)}
+            options={[{ value: 'ortho', label: 'Right-angled' }, { value: 'direct', label: 'Direct' }, { value: 'curved', label: 'Curved' }]} />
+        </Row>
         <p className="insp-note">
           {one
-            ? bends ? `Shaped by hand, through ${bends} ${bends === 1 ? 'point' : 'points'}. It keeps this shape when things move.` : e.fromSide || e.toSide ? 'Routed automatically, from the side you chose.' : 'Routed automatically around other components.'
+            ? e.shape === 'direct' ? 'One straight line from one to the other, at whatever angle that is.'
+              : e.shape === 'curved' ? 'A single curve from one side to the other.'
+              : straight?.state === 'straight' ? (e.runs ? 'Straight, and kept straight: its ends slide along the sides as things move.' : 'Straight.')
+              : straight?.state === 'apart' ? `${mover ? nodeName(mover) : 'One end'} is not in line with the other end, so a right-angled line has to turn. Lining them up moves it across.`
+              : !e.runs && !e.via?.length && straight?.state === 'can' && straight.through ? 'Something stands between the two, so the line goes round it. Straighten takes it under instead.'
+              : e.runs ? 'Shaped by hand. It keeps this shape when things move: only the runs next to a component stretch.'
+              : e.via?.length ? 'Shaped by hand in an older version. Drag any run of it to reshape it.'
+              : e.fromSide || e.toSide ? 'Routed automatically, from the side you chose.'
+              : 'Routed automatically around other components.'
             : shaped.length ? `${shaped.length} of these ${shaped.length === 1 ? 'has' : 'have'} been shaped by hand.` : 'All routed automatically.'}
-          {one && ' Drag a dot on the line to bend it, or an end to move it to another component.'}
+          {one && !e.shape && ' Drag any run of the line sideways to move it, or an end to move it to another component.'}
         </p>
         <div className="insp-actions inline">
-          {one && <button className="btn ghost" onClick={() => s.addBend(e.id)}><Spline size={14} />Add a bend</button>}
+          <button className="btn ghost" disabled={one && (e.shape === 'direct' || (straight?.state === 'straight' && !!e.runs))} onClick={() => straightenLinks(ids)}><Minus size={14} />{straight?.state === 'apart' ? 'Line up' : 'Straighten'}</button>
           <button className="btn ghost" disabled={!shaped.length} onClick={() => s.resetRoute(ids)}><RotateCcw size={14} />Route automatically</button>
         </div>
       </section>

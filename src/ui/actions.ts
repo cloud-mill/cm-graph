@@ -1,6 +1,7 @@
 import { navigate } from '../core/nav'
 import { fitView, groundAt, setFlat } from '../canvas/camera'
-import { PROVIDERS, translateDoc } from '../core/catalog'
+import { PROVIDERS, nodeName, translateDoc } from '../core/catalog'
+import { straightness } from '../core/shape'
 import { autoLayout, fitArea, inArea } from '../core/layout'
 import { addSnapshot, encodeShare } from '../core/storage'
 import { useStore } from '../core/store'
@@ -73,3 +74,21 @@ export function wrapSelectionInArea() {
 
 export const toggleFlat = () => setFlat(!S().flat)
 export const go = (hash: string) => navigate(hash)
+
+/**
+ * Make connections straight. One whose components do not line up has the lighter of the two moved level with the other;
+ * several at once are straightened where they can be, and the rest say why they were not.
+ */
+export function straightenLinks(ids: string[]) {
+  const s = useStore.getState()
+  const e = ids.length === 1 ? s.doc.edges.find((x) => x.id === ids[0]) : null
+  const state = e ? straightness(s.doc, e) : null
+  if (e && state?.state === 'apart') {
+    const moved = s.doc.nodes.find((n) => n.id === state.move)
+    s.lineUp(e.id)
+    if (moved) s.toast(`Moved ${nodeName(moved)} into line`)
+    return
+  }
+  const r = s.straighten(ids)
+  if (r.apart) s.toast(`${r.apart} could not be straight: the components are not in line`, 'warn')
+}

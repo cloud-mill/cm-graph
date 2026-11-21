@@ -374,7 +374,9 @@ test.describe('phone: building a diagram', () => {
     await fingers.tap(await app.world(1, 7))
     await expect(app.toast('already connected')).toBeVisible()
     await expect(app.edges()).toHaveCount(1)
-    // either way the tool has let go and the usual dock is back
+    // the tool has let go, and the line that already joins them is the one in hand
+    await expect(dock(page).getByText('Connection', { exact: true })).toBeVisible()
+    await page.getByRole('button', { name: 'Deselect' }).tap()
     await expect(dock(page).getByRole('button', { name: 'Add', exact: true })).toBeVisible()
     await dock(page).getByRole('button', { name: 'Area' }).tap()
     await dock(page).getByRole('button', { name: 'Cancel' }).tap()

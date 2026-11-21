@@ -11,9 +11,12 @@ import { type EdgeT, type NodeT, type Side, footOf } from './types'
  *    they fan out instead of piling onto one point and crossing at the door.
  *  - Between the ports an automatic route finds the shortest path with the
  *    fewest turns that does not pass through any component.
- *  - A route the user has shaped (it has waypoints) is theirs: it goes through
- *    those points in order and only the short runs at each end follow the
- *    components when they move. It is never re-planned behind their back.
+ *  - Two sides that face each other are joined by one straight run whenever their
+ *    ports can be slid to meet: a line is never left with a kink it has no need of.
+ *  - A route the user has shaped is theirs. It is kept as a track (the position of
+ *    each run), so when a component moves the runs next to it stretch and the rest
+ *    stay exactly where they were put. It is never re-planned behind their back.
+ *  - A line can also be drawn direct (one straight line, at any angle) or curved.
  *
  * Everything here is pure and deterministic: the same diagram always gives the
  * same lines, so nothing jumps about between redraws.
@@ -27,8 +30,10 @@ export interface Routed {
   leg: number[]
   fromSide: Side
   toSide: Side
-  /** shaped by hand (has waypoints) */
+  /** following a shape the user gave it, not one the router chose */
   manual: boolean
+  /** right-angled runs through `pts`; one straight line between two points; or a curve whose `pts` are its start, two control points and end */
+  shape: 'ortho' | 'direct' | 'curved'
 }
 
 interface Rect { x0: number; y0: number; x1: number; y1: number }
@@ -83,7 +88,8 @@ const between = (b: W, a: W, q: W) => (a[0] - b[0]) * (q[0] - a[0]) >= 0 && (a[1
 
 // ---- automatic routing ---------------------------------------------------------------
 
-const cache = new Map<string, W[]>()
+// two generations: when the young one fills up it becomes the old one, so routes still in use are never all forgotten at once
+let cache = new Map<string, W[]>(), aged = new Map<string, W[]>()
 
 /**
  * Shortest right-angled path from `s` (heading `sd`) to `t` (arriving along `td`)
@@ -93,11 +99,18 @@ const cache = new Map<string, W[]>()
 export function findPath(s: W, sd: W, t: W, td: W, blocks: Rect[], lane = 0): W[] {
   const lo: W = [Math.min(s[0], t[0]) - 3, Math.min(s[1], t[1]) - 3], hi: W = [Math.max(s[0], t[0]) + 3, Math.max(s[1], t[1]) + 3]
   const near = blocks.filter((b) => b.x1 > lo[0] && b.x0 < hi[0] && b.y1 > lo[1] && b.y0 < hi[1])
-  const key = [s, sd, t, td, lane, near.map((b) => [b.x0, b.y0, b.x1, b.y1])].join('|')
-  const hit = cache.get(key)
-  if (hit) return hit
+  // the same arrangement anywhere on the ground has the same route, so it is remembered relative to where it starts:
+  // a whole group carried across the canvas costs nothing to re-route
+  const onGrid = (v: number) => Math.abs(v * 2 - Math.round(v * 2)) < 1e-6
+  const gx = onGrid(s[0]) && onGrid(t[0]), gy = onGrid(s[1]) && onGrid(t[1])
+  const key = [r3(t[0] - s[0]), r3(t[1] - s[1]), sd, td, lane, gx, gy, near.map((b) => [r3(b.x0 - s[0]), r3(b.y0 - s[1]), r3(b.x1 - s[0]), r3(b.y1 - s[1])])].join('|')
+  const hit = cache.get(key) ?? aged.get(key)
+  if (hit) { cache.set(key, hit); return hit.map((q) => [r3(q[0] + s[0]), r3(q[1] + s[1])] as W) }
 
-  const mx = r3(Math.round(((s[0] + t[0]) / 2) * 2) / 2 + lane * 0.4), my = r3(Math.round(((s[1] + t[1]) / 2) * 2) / 2 + lane * 0.4)
+  // the middle channel sits on the half-cell grid when the ends do; while something is being dragged between
+  // grid positions it follows smoothly instead, so the elbow glides with the component and does not tick
+  const midOf = (a: number, b: number, grid: boolean) => (grid ? Math.round(((a + b) / 2) * 2) / 2 : (a + b) / 2)
+  const mx = r3(midOf(s[0], t[0], gx) + lane * 0.4), my = r3(midOf(s[1], t[1], gy) + lane * 0.4)
   const xsSet = new Set<number>([s[0], t[0], mx]), ysSet = new Set<number>([s[1], t[1], my])
   for (const b of near) { xsSet.add(r3(b.x0 - STUB)); xsSet.add(r3(b.x1 + STUB)); ysSet.add(r3(b.y0 - STUB)); ysSet.add(r3(b.y1 + STUB)) }
   const xs = [...xsSet].sort((a, b) => a - b), ys = [...ysSet].sort((a, b) => a - b)
@@ -170,47 +183,107 @@ export function findPath(s: W, sd: W, t: W, td: W, blocks: Rect[], lane = 0): W[
     out.reverse()
   }
   out = tidy(out)
-  if (cache.size > 4000) cache.clear()
-  cache.set(key, out)
+  if (cache.size > 3000) { aged = cache; cache = new Map() }
+  cache.set(key, out.map((q) => [r3(q[0] - s[0]), r3(q[1] - s[1])] as W))
   return out
 }
 
 // ---- whole diagram ---------------------------------------------------------------------
 
-interface End { edge: string; node: string; side: Side; toward: number; port: W; out: W; lane: number }
+interface End { edge: string; node: string; side: Side; toward: number; port: W; out: W; lane: number; at?: number; mates: number; list: End[] }
+
+/** how close to a corner of its component a line may leave a side */
+export const EDGE = 0.15
+/** the least a shaped line runs out of a side before it turns */
+export const MIN_OUT = 0.3
+/** how far from the middle of a side, as a share of the side, the router slides a port of its own accord to save a line two turns */
+const SLIDE = 0.3
+/** the room two ports on one side keep between them */
+const APART = 0.2
+
+const centreOn = (r: Rect, s: Side) => (horizontal(s) ? (r.y0 + r.y1) / 2 : (r.x0 + r.x1) / 2)
+const across = (s: Side, p: W) => (horizontal(s) ? p[1] : p[0])
+const opposite = (a: Side, b: Side) => DIR[a][0] + DIR[b][0] === 0 && DIR[a][1] + DIR[b][1] === 0
+/** `rb` lies wholly beyond side `s` of `ra` */
+const beyond = (ra: Rect, s: Side, rb: Rect) => (s === 'e' ? rb.x0 > ra.x1 : s === 'w' ? rb.x1 < ra.x0 : s === 's' ? rb.y0 > ra.y1 : rb.y1 < ra.y0)
+/** how far the port at this end is out from its side, measured to `p` */
+const outBy = (r: Rect, s: Side, p: W) => (s === 'e' ? p[0] - r.x1 : s === 'w' ? r.x0 - p[0] : s === 's' ? p[1] - r.y1 : r.y0 - p[1])
+const put = (end: End, r: Rect, c: number) => { const off = r3(c - centreOn(r, end.side)); end.port = portAt(r, end.side, off); end.out = portAt(r, end.side, off, STUB) }
+
+/** Nothing but the two components themselves stands on the straight run from `p` to `q`. */
+function clearRun(p: W, q: W, blocks: Rect[], skip: Rect[]): boolean {
+  const x0 = Math.min(p[0], q[0]), x1 = Math.max(p[0], q[0]), y0 = Math.min(p[1], q[1]), y1 = Math.max(p[1], q[1])
+  return blocks.every((b) => skip.includes(b) || !(b.x1 + CLEAR > x0 && b.x0 - CLEAR < x1 && b.y1 + CLEAR > y0 && b.y0 - CLEAR < y1))
+}
+
+/** Where the straight line from the middle of `r` towards `t` leaves it. */
+function exitOf(r: Rect, t: W): W {
+  const [cx, cy] = mid(r), dx = t[0] - cx, dy = t[1] - cy
+  if (!dx && !dy) return [cx, cy]
+  const k = Math.min(dx ? (r.x1 - r.x0) / 2 / Math.abs(dx) : Infinity, dy ? (r.y1 - r.y0) / 2 / Math.abs(dy) : Infinity)
+  return [r3(cx + dx * k), r3(cy + dy * k)]
+}
+
+/**
+ * A line along the track the user gave it: out of `a`, along each run in turn, into `b`.
+ * Nothing here is planned: the only liberty taken is to keep the first and last turn outside
+ * the components they belong to. When the components have moved so far that the track no
+ * longer makes a line at all (it would have to start inside one of them), there is no answer.
+ */
+function tracked(a: End, b: End, ra: Rect, rb: Rect, runs: number[]): W[] | null {
+  const m = runs.length, h0 = horizontal(a.side)
+  // runs alternate, so between two sides on the same axis there is an odd number of them, and an even number otherwise
+  if ((m % 2 === 1) !== (h0 === horizontal(b.side))) return null
+  const c = [...runs]
+  const outward = (r: Rect, s: Side, v: number) => (s === 'e' ? Math.max(v, r.x1 + MIN_OUT) : s === 'w' ? Math.min(v, r.x0 - MIN_OUT) : s === 's' ? Math.max(v, r.y1 + MIN_OUT) : Math.min(v, r.y0 - MIN_OUT))
+  if (m) { c[0] = outward(ra, a.side, c[0]); c[m - 1] = outward(rb, b.side, c[m - 1]) }
+  const pts: W[] = [a.port]
+  let cur = a.port, h = h0
+  for (const v of c) { cur = h ? [v, cur[1]] : [cur[0], v]; pts.push(cur); h = !h }
+  pts.push(h ? [b.port[0], cur[1]] : [cur[0], b.port[1]], b.port)
+  if (outBy(ra, a.side, pts[1]) < MIN_OUT - 1e-6 || outBy(rb, b.side, pts[pts.length - 2]) < MIN_OUT - 1e-6) return null
+  return pts
+}
 
 /** Routes for every connection in the diagram, keyed by connection id. */
 export function routeAll(nodes: NodeT[], edges: EdgeT[]): Map<string, Routed> {
   const byId = new Map(nodes.map((n) => [n.id, n]))
   const rects = new Map(nodes.map((n) => [n.id, rectOf(n)]))
   const live = edges.filter((e) => byId.has(e.from) && byId.has(e.to) && e.from !== e.to)
+  const sided = live.filter((e) => e.shape !== 'direct')
+  const viaOf = (e: EdgeT) => (e.shape || e.runs ? [] : e.via ?? [])
 
   // 1. which side each end uses
   const ends = new Map<string, { a: End; b: End }>()
-  for (const e of live) {
+  for (const e of sided) {
     const ra = rects.get(e.from)!, rb = rects.get(e.to)!
-    const via = e.via ?? []
+    const via = viaOf(e)
     const ta = via.length ? via[0] : mid(rb), tb = via.length ? via[via.length - 1] : mid(ra)
     const sa = e.fromSide ?? facing(ra, ta, via.length ? undefined : rb), sb = e.toSide ?? facing(rb, tb, via.length ? undefined : ra)
     const along = (s: Side, t: W) => (horizontal(s) ? t[1] : t[0])
+    const at = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : undefined)
     ends.set(e.id, {
-      a: { edge: e.id, node: e.from, side: sa, toward: along(sa, ta), port: [0, 0], out: [0, 0], lane: 0 },
-      b: { edge: e.id, node: e.to, side: sb, toward: along(sb, tb), port: [0, 0], out: [0, 0], lane: 0 },
+      a: { edge: e.id, node: e.from, side: sa, toward: along(sa, ta), port: [0, 0], out: [0, 0], lane: 0, at: at(e.fromAt), mates: 1, list: [] },
+      b: { edge: e.id, node: e.to, side: sb, toward: along(sb, tb), port: [0, 0], out: [0, 0], lane: 0, at: at(e.toAt), mates: 1, list: [] },
     })
   }
 
-  // 2. spread the lines that share a side along it, in the order of where they lead
+  // 2. an end the user placed sits where they put it. The rest that share a side are spread along it, in the order of where they lead
   const sides = new Map<string, End[]>()
-  for (const { a, b } of ends.values()) for (const end of [a, b]) { const k = end.node + ':' + end.side; (sides.get(k) ?? sides.set(k, []).get(k)!).push(end) }
+  for (const { a, b } of ends.values()) for (const end of [a, b]) {
+    const r = rects.get(end.node)!
+    if (end.at !== undefined) { const reach = (r.x1 - r.x0) / 2 - EDGE; put(end, r, centreOn(r, end.side) + Math.max(-reach, Math.min(reach, end.at))); continue }
+    const k = end.node + ':' + end.side
+    ;(sides.get(k) ?? sides.set(k, []).get(k)!).push(end)
+  }
   for (const list of sides.values()) {
     list.sort((p, q) => p.toward - q.toward || (p.edge < q.edge ? -1 : p.edge > q.edge ? 1 : 0))
     const r = rects.get(list[0].node)!, size = r.x1 - r.x0
     const gap = Math.min(0.5, (size * 0.76) / list.length)
-    const centre = horizontal(list[0].side) ? (r.y0 + r.y1) / 2 : (r.x0 + r.x1) / 2
+    const centre = centreOn(r, list[0].side)
     list.forEach((end, i) => {
-      const off = (i - (list.length - 1) / 2) * gap
-      end.port = portAt(r, end.side, off)
-      end.out = portAt(r, end.side, off, STUB)
+      put(end, r, centre + (i - (list.length - 1) / 2) * gap)
+      end.mates = list.length; end.list = list
       // Siblings leaving one side each turn in a channel of their own. Those heading the same way are nested:
       // the one that has furthest to go along the side turns last, so none of them has to cross another.
       const rank = end.toward < centre ? i : list.length - 1 - i
@@ -218,23 +291,72 @@ export function routeAll(nodes: NodeT[], edges: EdgeT[]): Map<string, Routed> {
     })
   }
 
-  // 3. parallel lines between the same two components each get their own lane
+  const blocks = [...rects.values()]
+
+  // 3. two sides that face each other across clear ground are joined by one straight run wherever their ports can be made to meet.
+  //    A line the user straightened may use the whole of both sides to stay straight; one left to the router only slides a port
+  //    a little way from the middle, and never past a neighbour, so lines sharing a side keep their order
+  const straight = new Set<string>()
+  for (const e of sided) {
+    if (e.shape === 'curved' || viaOf(e).length || (e.runs && e.runs.length)) continue
+    const { a, b } = ends.get(e.id)!, ra = rects.get(e.from)!, rb = rects.get(e.to)!
+    if (!opposite(a.side, b.side) || !beyond(ra, a.side, rb)) continue
+    const ca = across(a.side, a.port), cb = across(b.side, b.port)
+    const kept = !!e.runs
+    const room = (end: End, r: Rect, c: number): [number, number] => {
+      const centre = centreOn(r, end.side), size = r.x1 - r.x0
+      if (kept) return [centre - size / 2 + EDGE, centre + size / 2 - EDGE]
+      if (end.at !== undefined) return [c, c]
+      const i = end.list.indexOf(end), before = end.list[i - 1], after = end.list[i + 1]
+      return [Math.max(centre - size * SLIDE, before ? across(end.side, before.port) + APART : -Infinity), Math.min(centre + size * SLIDE, after ? across(end.side, after.port) - APART : Infinity)]
+    }
+    const [a0, a1] = room(a, ra, ca), [b0, b1] = room(b, rb, cb)
+    const lo = Math.max(a0, b0), hi = Math.min(a1, b1)
+    if (lo > hi + 1e-9) continue
+    // a kept line stays where its first end was put; otherwise the busier side stays as it is and the other comes to meet it
+    const want = kept || a.mates > b.mates ? ca : b.mates > a.mates ? cb : (ca + cb) / 2
+    const c = r3(Math.max(lo, Math.min(hi, want)))
+    const was: [W, W, W, W] = [a.port, a.out, b.port, b.out]
+    put(a, ra, c); put(b, rb, c)
+    // the user's word is final; the router's own idea is dropped if something stands in the way
+    if (kept || clearRun(a.port, b.port, blocks, [ra, rb])) straight.add(e.id)
+    else [a.port, a.out, b.port, b.out] = was
+  }
+
+  // 4. parallel lines between the same two components each get their own lane
   const pairs = new Map<string, string[]>()
-  for (const e of live) { const k = e.from < e.to ? e.from + '|' + e.to : e.to + '|' + e.from; (pairs.get(k) ?? pairs.set(k, []).get(k)!).push(e.id) }
+  for (const e of sided) { const k = e.from < e.to ? e.from + '|' + e.to : e.to + '|' + e.from; (pairs.get(k) ?? pairs.set(k, []).get(k)!).push(e.id) }
   const lane = new Map<string, number>()
   for (const ids of pairs.values()) ids.forEach((id, i) => lane.set(id, i - (ids.length - 1) / 2))
 
-  const blocks = [...rects.values()]
   const out = new Map<string, Routed>()
   for (const e of live) {
+    const ra = rects.get(e.from)!, rb = rects.get(e.to)!
+    if (e.shape === 'direct') {
+      // one line from one to the other, wherever they stand: it leaves each where the line between their middles crosses its edge
+      const p = exitOf(ra, mid(rb)), q = exitOf(rb, mid(ra))
+      out.set(e.id, { pts: [p, q], leg: [0], fromSide: facing(ra, mid(rb)), toSide: facing(rb, mid(ra)), manual: false, shape: 'direct' })
+      continue
+    }
     const { a, b } = ends.get(e.id)!
-    const via = e.via ?? []
-    let pts: W[], leg: number[]
-    if (!via.length) {
+    const via = viaOf(e)
+    let pts: W[] | null = null, leg: number[] = [], manual = false
+    if (e.shape === 'curved') {
+      // a single sweep: out of one side, into the other, pulled further the further apart they are
+      const k = Math.max(0.8, Math.min(5, Math.hypot(b.port[0] - a.port[0], b.port[1] - a.port[1]) * 0.4))
+      pts = [a.port, [r3(a.port[0] + DIR[a.side][0] * k), r3(a.port[1] + DIR[a.side][1] * k)], [r3(b.port[0] + DIR[b.side][0] * k), r3(b.port[1] + DIR[b.side][1] * k)], b.port]
+      out.set(e.id, { pts, leg: [0, 0, 0], fromSide: a.side, toSide: b.side, manual: false, shape: 'curved' })
+      continue
+    }
+    if (straight.has(e.id)) { pts = [a.port, b.port]; manual = !!e.runs }
+    else if (e.runs) { const t = tracked(a, b, ra, rb, e.runs); if (t) { pts = tidy(t); manual = true } }
+    if (pts) leg = pts.slice(1).map(() => 0)
+    else if (!via.length) {
       const path = findPath(a.out, DIR[a.side], b.out, [-DIR[b.side][0], -DIR[b.side][1]], blocks, (lane.get(e.id) ?? 0) + a.lane)
       pts = tidy([a.port, ...path, b.port])
       leg = pts.slice(1).map(() => 0)
     } else {
+      manual = true
       // through the user's points in order, turning once between each pair
       const stops: W[] = [a.out, ...via.map((v) => [v[0], v[1]] as W), b.out]
       const raw: { p: W; leg: number }[] = [{ p: a.port, leg: 0 }, { p: a.out, leg: 0 }]
@@ -260,19 +382,66 @@ export function routeAll(nodes: NodeT[], edges: EdgeT[]): Map<string, Routed> {
         pts.push(q)
       }
     }
-    out.set(e.id, { pts, leg, fromSide: a.side, toSide: b.side, manual: via.length > 0 })
+    out.set(e.id, { pts, leg, fromSide: a.side, toSide: b.side, manual, shape: 'ortho' })
   }
   return out
 }
 
+/**
+ * Whether one straight right-angled run can join two components as they stand, and where.
+ * It can when they overlap along one axis: then both ends are slid along their sides to the
+ * same line, as near the middle of the two as the ground between them allows.
+ * A line with nothing standing on it is preferred; when there is none, the one nearest the middle is given
+ * with `clear` false, because whether to pass under something is for whoever asked to decide.
+ * `apart` means the two do not overlap on either axis, so no such run exists.
+ */
+export function straightBetween(a: NodeT, b: NodeT, nodes: NodeT[]): { fromSide: Side; toSide: Side; fromAt: number; toAt: number; clear: boolean } | 'apart' {
+  const ra = rectOf(a), rb = rectOf(b), [ax, ay] = mid(ra), [bx, by] = mid(rb)
+  const blocks = nodes.filter((n) => n.id !== a.id && n.id !== b.id).map(rectOf)
+  let through: { fromSide: Side; toSide: Side; fromAt: number; toAt: number; clear: boolean } | null = null
+  for (const along of ['x', 'y'] as const) {
+    // a run along x needs the two to overlap in y and stand apart in x; and the other way round
+    const [a0, a1, b0, b1] = along === 'x' ? [ra.y0, ra.y1, rb.y0, rb.y1] : [ra.x0, ra.x1, rb.x0, rb.x1]
+    const lo = Math.max(a0, b0) + EDGE, hi = Math.min(a1, b1) - EDGE
+    const fromSide: Side | null = along === 'x' ? (rb.x0 > ra.x1 ? 'e' : rb.x1 < ra.x0 ? 'w' : null) : rb.y0 > ra.y1 ? 's' : rb.y1 < ra.y0 ? 'n' : null
+    if (lo > hi + 1e-9 || !fromSide) continue
+    const toSide = ({ e: 'w', w: 'e', s: 'n', n: 's' } as const)[fromSide]
+    const ca = along === 'x' ? ay : ax, cb = along === 'x' ? by : bx
+    const want = Math.max(lo, Math.min(hi, (ca + cb) / 2))
+    // nearest the middle first, then a quarter cell at a time to either side
+    const tries = [want]
+    for (let d = 0.25; want - d >= lo - 1e-9 || want + d <= hi + 1e-9; d += 0.25) { if (want - d >= lo - 1e-9) tries.push(want - d); if (want + d <= hi + 1e-9) tries.push(want + d) }
+    for (const c of tries) {
+      const p: W = along === 'x' ? [fromSide === 'e' ? ra.x1 : ra.x0, c] : [c, fromSide === 's' ? ra.y1 : ra.y0]
+      const q: W = along === 'x' ? [fromSide === 'e' ? rb.x0 : rb.x1, c] : [c, fromSide === 's' ? rb.y0 : rb.y1]
+      if (clearRun(p, q, blocks, [])) return { fromSide, toSide, fromAt: r3(c - ca), toAt: r3(c - cb), clear: true }
+    }
+    through ??= { fromSide, toSide, fromAt: r3(want - ca), toAt: r3(want - cb), clear: false }
+  }
+  return through ?? 'apart'
+}
+
 /** A preview route between two components, as it would be drawn if they were connected now. */
-export function routePair(a: NodeT, b: NodeT, nodes: NodeT[]): W[] {
-  const e: EdgeT = { id: '~preview', from: a.id, to: b.id, style: 'solid', arrow: 'end', width: 2 }
+export function routePair(a: NodeT, b: NodeT, nodes: NodeT[], pin: Partial<Pick<EdgeT, 'fromSide' | 'toSide' | 'via' | 'shape'>> = {}): W[] {
+  const e: EdgeT = { id: '~preview', from: a.id, to: b.id, style: 'solid', arrow: 'end', width: 2, ...pin }
   return routeAll(nodes, [e]).get(e.id)?.pts ?? []
 }
 
-/** Where along a route a new waypoint dropped on run `i` belongs: its index in the waypoint list. */
-export const legOfRun = (r: Routed, i: number) => r.leg[Math.max(0, Math.min(r.leg.length - 1, i))] ?? 0
+/**
+ * A preview route from a component to a loose point on the ground: what a
+ * connection being drawn looks like before it has found its other end. It
+ * leaves by the side facing the point and bends round whatever is in the way.
+ */
+export function routeToPoint(a: NodeT, p: W, nodes: NodeT[], side?: Side): W[] {
+  const r = rectOf(a), s = side ?? facing(r, p)
+  const from = portAt(r, s, 0), q: W = [r3(p[0]), r3(p[1])]
+  void nodes
+  // one clean elbow: straight out of the door as far as the pointer has gone that way, then across to it.
+  // Nothing cleverer: a loose end that re-plans itself round every obstacle as it moves is restless to watch
+  const reachOut = horizontal(s) ? (q[0] - from[0]) * DIR[s][0] : (q[1] - from[1]) * DIR[s][1]
+  const turn: W = horizontal(s) ? [from[0] + DIR[s][0] * Math.max(STUB, reachOut), from[1]] : [from[0], from[1] + DIR[s][1] * Math.max(STUB, reachOut)]
+  return tidy([from, turn, horizontal(s) ? [turn[0], q[1]] : [q[0], turn[1]], q])
+}
 
 /** The side of a component nearest to a point (for pinning an end where the user drops it). */
 export function nearestSide(n: Box, p: W): Side {

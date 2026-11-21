@@ -136,6 +136,10 @@ export function coerceDoc(raw: any): Doc | null {
           ? { via: e.via.map((p: any) => [p[0], p[1]] as [number, number]) } : {}),
         ...(['n', 'e', 's', 'w'].includes(e.fromSide) ? { fromSide: e.fromSide } : {}),
         ...(['n', 'e', 's', 'w'].includes(e.toSide) ? { toSide: e.toSide } : {}),
+        ...(e.shape === 'direct' || e.shape === 'curved' ? { shape: e.shape } : {}),
+        ...(Array.isArray(e.runs) && e.runs.length <= 64 && e.runs.every((v: any) => Number.isFinite(v)) ? { runs: e.runs.map(Number) } : {}),
+        ...(Number.isFinite(e.fromAt) ? { fromAt: e.fromAt } : {}),
+        ...(Number.isFinite(e.toAt) ? { toAt: e.toAt } : {}),
       })),
     areas: list(raw.areas).map((a) => ({
       id: idOf(a.id), x: n(a.x), y: n(a.y), w: Math.max(1, n(a.w, 4)), d: Math.max(1, n(a.d, 4)), name: s(a.name, 'Area'),

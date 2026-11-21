@@ -315,7 +315,9 @@ select.input {
 .edge.off { opacity: 0.1; } .nd.off { opacity: 0.22; }
 .edge.on .edge-line { stroke: var(--text); }
 .edge-flow.both { stroke-dasharray: 1.5 22; }
-.handle.bend-add { opacity: 0.7; transition: opacity 0.14s; } .handle.bend-add:hover { opacity: 1; }
+/* a run of the selected connection: its grip wakes up under the pointer, and the whole run is the handle */
+.run-hit .run-grip { transition: stroke-width 0.12s; }
+.run-hit:hover .run-grip:last-child { stroke-width: 5.5px; vector-effect: non-scaling-stroke; }
 /* the area that selects a line is the same size on screen however far the view is zoomed out */
 .edge-hit { vector-effect: non-scaling-stroke; }
 @media (pointer: coarse) { .edge-hit { stroke-width: 32px; } }
@@ -324,13 +326,39 @@ select.input {
 /* traffic holds still while the view or a component is being dragged, so every frame goes to the drag */
 .canvas-wrap.busy .edge-flow { animation-play-state: paused; }
 @keyframes flow { to { stroke-dashoffset: -47.5; } }
-.wire { animation: wire 0.5s linear infinite; }
+.wire:not(.caught) path { animation: wire 0.5s linear infinite; }
+/* in the hand: lifted while it is carried, eased into its cell when it is let go */
+.nd.up .nd-body { transform: translateY(-5px); transition-duration: 0.12s; }
+.nd.up { cursor: grabbing !important; }
+.canvas-wrap.settle .nd { transition: transform 0.16s var(--ease), opacity 0.22s var(--ease); }
+.landing, .drop-area, .picking, .hover-mark, .gap, .splice { animation: fade 0.12s both; }
+.splice { opacity: 0.9; }
+/* doors: quiet until the pointer is near, then plainly something to pull on */
+.door { animation: fade 0.16s 0.04s both; }
+.door-dot { transition: r 0.12s var(--ease), fill 0.12s; }
+.door:hover .door-dot { fill: var(--accent); r: 6px; }
+.wire-target { animation: fade 0.1s both; }
+
+/* what to connect to, asked where the line was let go */
+.quick-add {
+  position: absolute; z-index: 6; width: 244px; padding: 6px; border-radius: var(--r-md); background: var(--glass-pop); backdrop-filter: var(--blur); box-shadow: var(--pop-shadow);
+  animation: pop 0.16s var(--ease) both; transform-origin: 14px 0;
+}
+.quick-add input { width: 100%; height: 32px; padding: 0 9px; border-radius: 7px; background: var(--raised); font-size: 13px; color: var(--text); outline: none; box-shadow: inset 0 0 0 1px var(--line); }
+.quick-add input:focus { box-shadow: inset 0 0 0 1px var(--line-strong); }
+.quick-add [role='listbox'] { display: grid; gap: 1px; margin-top: 6px; }
+.quick-add button { display: grid; grid-template-columns: 8px 1fr auto; align-items: center; gap: 9px; height: 32px; padding: 0 9px; border-radius: 7px; text-align: left; color: var(--text); font-size: 12.5px; }
+.quick-add button.on { background: var(--hover); }
+.quick-add button i { width: 8px; height: 8px; border-radius: 2px; }
+.quick-add button b { font-weight: 550; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.quick-add button span { font-family: var(--mono); font-size: 10px; color: var(--dim); max-width: 92px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.quick-add p { padding: 8px 9px; font-size: 12px; color: var(--dim); }
+@media (pointer: coarse) { .quick-add button { height: 42px; } .quick-add input { height: 40px; font-size: 16px; } }
 @keyframes wire { to { stroke-dashoffset: -11; } }
 .sel-mark { animation: fade 0.18s both; }
 .handle { transition: fill 0.12s; }
 .handle:hover { fill: var(--accent); }
 .connect-handle { animation: fade 0.2s 0.05s both; }
-.connect-handle .pulse { transform-box: fill-box; transform-origin: center; animation: ping 1.8s var(--ease) infinite; }
 @keyframes ping { from { transform: scale(0.6); opacity: 0.35; } to { transform: scale(1.25); opacity: 0; } }
 .ghost { animation: fade 0.12s both; }
 
@@ -351,6 +379,11 @@ select.input {
 .sel-bar button:hover { background: var(--hover); color: var(--text); }
 .sel-bar button:active { transform: scale(0.9); }
 .sel-bar button.danger:hover { color: var(--danger); }
+.sel-bar.edge-bar { padding: 0 4px; }
+.sel-bar.edge-bar .sel-bar-sep { margin: 0 5px; }
+.sel-bar button.wide { display: flex; align-items: center; gap: 6px; width: auto; padding: 0 9px 0 7px; font-size: 12.5px; font-weight: 550; color: var(--text); }
+.sel-bar button[aria-pressed='true'] { background: var(--hover); color: var(--text); }
+.sel-bar button:disabled { opacity: 0.35; pointer-events: none; }
 
 .empty-hint { position: absolute; left: calc(50% + (var(--il) - var(--ir)) / 2); top: 46%; transform: translate(-50%, -50%); text-align: center; pointer-events: none; animation: rise 0.6s 0.2s var(--ease) both; }
 .empty-mark { width: 44px; height: 44px; margin: 0 auto 18px; position: relative; }

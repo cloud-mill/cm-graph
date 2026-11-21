@@ -45,7 +45,19 @@ export interface EdgeT {
   /** e.g. 443, or 5432 */
   port?: string
   origin?: LinkOrigin
-  /** waypoints the user placed, in ground coordinates. A route with these is theirs and is never re-planned */
+  /** how the line travels between its ends: absent means right-angled runs, `direct` is one straight line, `curved` a single sweep */
+  shape?: 'direct' | 'curved'
+  /**
+   * The line's own track, once the user has shaped it: where each run between the first and the last lies.
+   * The first run leaves `fromSide` and the last arrives at `toSide`; the ones between alternate across and
+   * along, and each entry is the fixed coordinate of one (x for a run along y, y for a run along x).
+   * An empty track between two facing sides means "one straight run": it is kept straight as things move.
+   */
+  runs?: number[]
+  /** where along its side each end sits, in cells from the middle of it; set once the user has placed it */
+  fromAt?: number
+  toAt?: number
+  /** points an older file asked the line to pass through. Still drawn; shaping the line turns them into a track */
   via?: [number, number][]
   /** sides the user pinned the ends to; otherwise each end uses the side facing where the line goes */
   fromSide?: Side

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { docOf, edge, node } from '../test/helpers'
-import { type W, along, facing, findPath, legOfRun, nearestSide, routeAll, routePair, tidy } from './router'
+import { type W, along, facing, findPath, nearestSide, routeAll, routePair, straightBetween, tidy } from './router'
 import type { EdgeT, NodeT } from './types'
 
 const rect = (n: NodeT) => ({ x0: n.x, y0: n.y, x1: n.x + 2 * (n.scale ?? 1), y1: n.y + 2 * (n.scale ?? 1) })
@@ -161,15 +161,173 @@ describe('routes shaped by hand', () => {
     expect(moved.pts.some((p) => p[0] === 5 && p[1] === 6)).toBe(true)
     expect(square(moved.pts)).toBe(true)
   })
-  it('says which stretch between waypoints each run belongs to, so a new waypoint lands in the right place', () => {
+  it('says which stretch between waypoints each run belongs to', () => {
     const r = one(nodes, { via: [[4, 6], [7, 6]] })
     expect(r.leg.length).toBe(r.pts.length - 1)
     expect(r.leg[0]).toBe(0)
     expect(r.leg.at(-1)).toBe(2)
     expect([...r.leg].sort()).toEqual(r.leg) // never goes backwards
-    expect(legOfRun(r, 0)).toBe(0)
-    expect(legOfRun(r, 99)).toBe(2)
-    expect(legOfRun(one(nodes), 0)).toBe(0)
+  })
+})
+
+describe('lines that ought to be straight are', () => {
+  const row = [node('a', 'ec2', 0, 0), node('b', 'ec2', 6, 0)]
+  it('a line level with its target is not kinked by another line sharing the side', () => {
+    // a also feeds c, below: the two fan out along a's east side, which used to leave a quarter-cell jog in the line to b
+    const nodes = [...row, node('c', 'ec2', 6, 6)]
+    const r = routeAll(nodes, [edge('ab', 'a', 'b'), edge('ac', 'a', 'c')])
+    expect(r.get('ab')!.pts).toHaveLength(2)
+    expect(r.get('ab')!.pts[0][1]).toBe(r.get('ab')!.pts[1][1])
+    // the two still leave from different points, in order
+    expect(r.get('ab')!.pts[0][1]).toBeLessThan(r.get('ac')!.pts[0][1])
+  })
+  it('nor by other lines arriving on the side it arrives at', () => {
+    const nodes = [node('a', 'ec2', 0, 0), node('d', 'ec2', 0, 5), node('b', 'ec2', 6, 0)]
+    const r = routeAll(nodes, [edge('ab', 'a', 'b'), edge('db', 'd', 'b')])
+    expect(r.get('ab')!.pts).toHaveLength(2)
+  })
+  it('components of different sizes with their tops level are joined straight', () => {
+    // middles half a cell apart: nothing the user could move would ever have lined them up
+    const r = one([node('a', 'ec2', 0, 0, { scale: 1.5 }), node('b', 'ec2', 6, 0)])
+    expect(r.pts).toHaveLength(2)
+    expect(r.pts[0][1]).toBe(1.25)
+  })
+  it('components a cell out of line are joined straight too, each end a little off the middle of its side', () => {
+    expect(one([node('a', 'ec2', 0, 0), node('b', 'ec2', 6, 1)]).pts).toEqual([[2, 1.5], [6, 1.5]])
+    expect(one([node('a', 'ec2', 0, 0), node('b', 'ec2', 1, 6)]).pts).toEqual([[1.5, 2], [1.5, 6]])
+  })
+  it('further out of line than a port may slide, the line turns as before', () => {
+    expect(bends(one([node('a', 'ec2', 0, 0), node('b', 'ec2', 6, 1.5)]).pts)).toBe(2)
+  })
+  it('a port is not slid when the straight run it would make has something standing on it', () => {
+    const r = one([node('a', 'ec2', 0, 0), node('b', 'ec2', 10, 1), node('x', 'ec2', 4, 0.5)])
+    expect(crosses(r.pts, node('x', 'ec2', 4, 0.5))).toBe(false)
+    expect(r.pts[0][1]).toBe(1) // left where it was, in the middle
+  })
+  it('a port never slides past its neighbour on the side', () => {
+    const nodes = [node('a', 'ec2', 0, 3), node('b', 'ec2', 6, 0), node('c', 'ec2', 6, 3), node('d', 'ec2', 6, 6)]
+    const r = routeAll(nodes, [edge('ab', 'a', 'b'), edge('ac', 'a', 'c'), edge('ad', 'a', 'd')])
+    const ys = ['ab', 'ac', 'ad'].map((id) => r.get(id)!.pts[0][1])
+    expect(ys).toEqual([...ys].sort((p, q) => p - q))
+    expect(r.get('ac')!.pts).toHaveLength(2)
+  })
+})
+
+describe('a track laid by hand', () => {
+  const nodes = [node('a', 'ec2', 0, 0), node('b', 'ec2', 8, 4)]
+  const z = { fromSide: 'e', toSide: 'w', fromAt: 0, toAt: 0 } as const
+  it('runs out of one side, along each run in turn, and into the other', () => {
+    const r = one(nodes, { ...z, runs: [3] })
+    expect(r.pts).toEqual([[2, 1], [3, 1], [3, 5], [8, 5]])
+    expect(r.manual).toBe(true)
+    expect(one(nodes, { ...z, runs: [3, 7, 6] }).pts).toEqual([[2, 1], [3, 1], [3, 7], [6, 7], [6, 5], [8, 5]])
+  })
+  it('each end sits where it was put along its side, and no further than the side goes', () => {
+    expect(one(nodes, { ...z, fromAt: 0.5, toAt: -0.5, runs: [5] }).pts).toEqual([[2, 1.5], [5, 1.5], [5, 4.5], [8, 4.5]])
+    expect(one(nodes, { ...z, fromAt: 9, runs: [5] }).pts[0]).toEqual([2, 1.85])
+  })
+  it('is not re-planned when something is put in its way', () => {
+    const x = node('x', 'ec2', 4, 2)
+    expect(one([...nodes, x], { ...z, runs: [5] }).pts).toEqual(one(nodes, { ...z, runs: [5] }).pts)
+  })
+  it('when a component moves, the runs next to it stretch and the rest stay where they were put', () => {
+    const moved = one([{ ...nodes[0], y: -3 }, nodes[1]], { ...z, runs: [3, 7, 6] })
+    expect(moved.pts).toEqual([[2, -2], [3, -2], [3, 7], [6, 7], [6, 5], [8, 5]])
+  })
+  it('the first and last turn are kept outside the components they belong to', () => {
+    // a has been moved right, over where the first run was laid
+    const r = one([{ ...nodes[0], x: 2 }, nodes[1]], { ...z, runs: [3] })
+    expect(r.pts[1][0]).toBeGreaterThanOrEqual(4.3)
+    expect(square(r.pts)).toBe(true)
+  })
+  it('one that no longer makes a line at all gives way to the router instead of drawing nonsense', () => {
+    // b is now to the left of a: a line out of a's east side straight into b's west side cannot be had
+    const r = one([nodes[0], { ...nodes[1], x: -8 }], { ...z, runs: [3] })
+    expect(r.manual).toBe(false)
+    expect(square(r.pts)).toBe(true)
+    // and a track with the wrong number of runs for its sides is not followed either
+    expect(one(nodes, { ...z, runs: [3, 4] }).manual).toBe(false)
+  })
+  it('a single corner needs no runs between two sides at right angles', () => {
+    const r = one(nodes, { fromSide: 'e', toSide: 'n', fromAt: 0, toAt: 0, runs: [] })
+    expect(r.pts).toEqual([[2, 1], [9, 1], [9, 4]])
+    // and when the corner would fall inside a component, the router takes over
+    expect(one([nodes[0], { ...nodes[1], x: 1 }], { fromSide: 'e', toSide: 'n', fromAt: 0, toAt: 0, runs: [] }).manual).toBe(false)
+  })
+  it('an empty track between facing sides means straight, and it stays straight as things move', () => {
+    const level = [node('a', 'ec2', 0, 0), node('b', 'ec2', 8, 0)]
+    const keep = { ...z, runs: [] }
+    expect(one(level, keep).pts).toEqual([[2, 1], [8, 1]])
+    // b moves down a little: both ends slide along their sides to stay on one line
+    const r = one([level[0], { ...level[1], y: 1 }], keep)
+    expect(r.pts).toHaveLength(2)
+    expect(r.pts[0][1]).toBe(r.pts[1][1])
+    expect(r.manual).toBe(true)
+    // it passes under something put in its way: the user asked for straight
+    expect(one([...level, node('x', 'ec2', 4, 0)], keep).pts).toHaveLength(2)
+    // moved right out of line, it cannot be straight any more and is routed
+    expect(bends(one([level[0], { ...level[1], y: 6 }], keep).pts)).toBeGreaterThan(0)
+  })
+  it('an older line through points is still drawn, and a track takes its place when both are present', () => {
+    expect(one(nodes, { via: [[5, 9]] }).pts.some((p) => p[1] === 9)).toBe(true)
+    expect(one(nodes, { ...z, runs: [3], via: [[5, 9]] }).pts.some((p) => p[1] === 9)).toBe(false)
+  })
+})
+
+describe('other shapes', () => {
+  const nodes = [node('a', 'ec2', 0, 0), node('b', 'ec2', 8, 4)]
+  it('a direct line is one straight line from edge to edge, at whatever angle', () => {
+    const r = one(nodes, { shape: 'direct' })
+    expect(r.shape).toBe('direct')
+    expect(r.pts).toEqual([[2, 1.5], [8, 4.5]])
+    // straight across when they are level, and nothing at all odd when one sits on the other
+    expect(one([node('a', 'ec2', 0, 0), node('b', 'ec2', 8, 0)], { shape: 'direct' }).pts).toEqual([[2, 1], [8, 1]])
+    expect(one([node('a', 'ec2', 0, 0), node('b', 'ec2', 0, 0)], { shape: 'direct' }).pts).toEqual([[1, 1], [1, 1]])
+    expect(one([node('a', 'ec2', 0, 0), node('b', 'ec2', 0, 8)], { shape: 'direct' }).pts).toEqual([[1, 2], [1, 8]])
+  })
+  it('a direct line takes no place on a side, so it does not push other lines along it', () => {
+    const r = routeAll([...nodes, node('c', 'ec2', 8, 0)], [edge('ab', 'a', 'b', { shape: 'direct' }), edge('ac', 'a', 'c')])
+    expect(r.get('ac')!.pts).toEqual([[2, 1], [8, 1]])
+  })
+  it('a curve leaves one side and arrives at the other, pulled further the further apart they are', () => {
+    const r = one(nodes, { shape: 'curved' })
+    expect(r.shape).toBe('curved')
+    expect(r.pts).toHaveLength(4)
+    expect(r.pts[0]).toEqual([2, 1])
+    expect(r.pts[3]).toEqual([8, 5])
+    expect(r.pts[1][1]).toBe(1) // straight out of the side
+    expect(r.pts[2][1]).toBe(5)
+    expect(r.pts[1][0]).toBeGreaterThan(2)
+    expect(r.pts[2][0]).toBeLessThan(8)
+    const far = one([nodes[0], { ...nodes[1], x: 40 }], { shape: 'curved' })
+    expect(far.pts[1][0] - far.pts[0][0]).toBe(5)
+  })
+})
+
+describe('whether two components can be joined straight', () => {
+  it('side by side or stacked, with any overlap, they can: both ends on one line as near the middle as may be', () => {
+    expect(straightBetween(node('a', 'ec2', 0, 0), node('b', 'ec2', 6, 0), [])).toEqual({ fromSide: 'e', toSide: 'w', fromAt: 0, toAt: 0, clear: true })
+    expect(straightBetween(node('a', 'ec2', 6, 0), node('b', 'ec2', 0, 1), [])).toEqual({ fromSide: 'w', toSide: 'e', fromAt: 0.5, toAt: -0.5, clear: true })
+    expect(straightBetween(node('a', 'ec2', 0, 0), node('b', 'ec2', 1, 6), [])).toMatchObject({ fromSide: 's', toSide: 'n' })
+    expect(straightBetween(node('a', 'ec2', 0, 6), node('b', 'ec2', 0, 0), [])).toMatchObject({ fromSide: 'n', toSide: 's' })
+    // barely overlapping: the line runs along the strip they share
+    const thin = straightBetween(node('a', 'ec2', 0, 0), node('b', 'ec2', 6, 1.5), [])
+    expect(thin).toMatchObject({ fromAt: 0.75, toAt: -0.75 })
+  })
+  it('out of line on both axes, or one on top of the other, they cannot', () => {
+    expect(straightBetween(node('a', 'ec2', 0, 0), node('b', 'ec2', 6, 6), [])).toBe('apart')
+    expect(straightBetween(node('a', 'ec2', 0, 0), node('b', 'ec2', 1, 0), [])).toBe('apart')
+  })
+  it('steps round something standing in the middle when there is room on the sides to do so', () => {
+    // x covers the lower half of the gap: the line shifts up to clear it
+    const a = node('a', 'ec2', 0, 0, { scale: 2 }), b = node('b', 'ec2', 10, 0, { scale: 2 }), x = node('x', 'ec2', 5, 2)
+    const plan = straightBetween(a, b, [a, b, x])
+    expect(plan).toMatchObject({ clear: true })
+    expect((plan as { fromAt: number }).fromAt).toBeLessThan(0)
+  })
+  it('and says when no clear line exists, giving the middle one anyway', () => {
+    const a = node('a', 'ec2', 0, 0), b = node('b', 'ec2', 10, 0), x = node('x', 'ec2', 5, 0)
+    expect(straightBetween(a, b, [a, b, x])).toEqual({ fromSide: 'e', toSide: 'w', fromAt: 0, toAt: 0, clear: false })
   })
 })
 
