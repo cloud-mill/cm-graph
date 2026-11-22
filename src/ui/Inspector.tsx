@@ -8,7 +8,7 @@ import { KINDS, ORIGINS, captionOf, describe, kindInfo, linkProblems, traceFlow 
 import { coalesce, useStore } from '../core/store'
 import { type AreaT, type EdgeT, type LabelT, type LinkKind, type NodeT, centerOf } from '../core/types'
 import { NumberInput, Row, Segmented, Select, Swatches, TextInput, Toggle, keys } from './atoms'
-import { isManual, isShaped, straightness } from '../core/shape'
+import { canReroute, isManual, isShaped, straightness } from '../core/shape'
 import { setPref } from '../core/storage'
 import { fitAreaToContents, straightenLinks, translateTo } from './actions'
 
@@ -258,7 +258,7 @@ function EdgeInspector({ edges }: { edges: EdgeT[] }) {
         {!e.shape && <Row label="Snap"><Toggle value={snap} onChange={(v) => { setPref('snap', v); s.set({ snap: v }) }} label="Snap into place while dragging" /></Row>}
         <div className="insp-actions inline">
           <button className="btn ghost" disabled={one && (e.shape === 'direct' || (straight?.state === 'straight' && !!e.runs))} onClick={() => straightenLinks(ids)}><Minus size={14} />{straight?.state === 'apart' ? 'Line up' : 'Straighten'}</button>
-          <button className="btn ghost" disabled={!shaped.length} onClick={() => s.resetRoute(ids)}><RotateCcw size={14} />Route automatically</button>
+          <button className="btn ghost" disabled={!edges.some(canReroute)} onClick={() => s.resetRoute(ids)}><RotateCcw size={14} />Route automatically</button>
         </div>
       </section>
       <section className="sect">

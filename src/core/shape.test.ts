@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { docOf, edge, node } from '../test/helpers'
-import { routeAll } from './router'
-import { KINK, type Track, addBend, alignRun, bendAt, dragRun, dragTurn, isManual, isShaped, keepPath, lineUpEnds, nearestRun, removeBend, shifted, simplify, snapRun, straighten, straightness, tidyKinks, trackOf, unbend, unshaped, withTrack } from './shape'
+import { routeAll, withPlans } from './router'
+import { KINK, type Track, addBend, alignRun, canReroute, bendAt, dragRun, dragTurn, isManual, isShaped, keepPath, kinked, lineUpEnds, nearestRun, removeBend, shifted, simplify, snapRun, straighten, straightness, tidyKinks, trackOf, unbend, unshaped, withTrack } from './shape'
 import type { EdgeT, NodeT } from './types'
 
 const N = (id: string, x: number, y: number, extra: Partial<NodeT> = {}) => node(id, 'ec2', x, y, extra)
@@ -450,7 +450,7 @@ describe('cleaning the small kinks out of a line', () => {
   })
   it('a step somebody made is left alone, and so is a line with none', () => {
     const made = D({ fromSide: 'e', toSide: 'w', fromAt: 0, toAt: 0, runs: [3, 1 + KINK * 2, 5, 3, 6] })
-    expect(tidyKinks(made, ['e'])).toEqual({ doc: made, tidied: 0 })
+    expect(tidyKinks(made, ['e'])).toEqual({ doc: made, tidied: 0, taken: 0 })
     const plain = D({ fromSide: 'e', toSide: 'w', fromAt: 0, toAt: 0, runs: [5] })
     expect(tidyKinks(plain, ['e']).doc).toBe(plain)
   })
@@ -462,5 +462,41 @@ describe('cleaning the small kinks out of a line', () => {
   it('several kinks in one line all go in one pass', () => {
     const r = cleaned({ fromSide: 'e', toSide: 'w', fromAt: 0, toAt: 0, runs: [3, 1.04, 4, 1.08, 5, 3, 6] })
     expect(r.doc.edges[0].runs).toEqual([5, 3, 6])
+  })
+})
+
+describe('whose line it is after cleaning, and what can be asked of a line', () => {
+  it('a line the router planned becomes the user\'s when a kink is taken out of it, and that is counted', () => {
+    // level to within a twentieth of a cell, with something standing where the straight run would go
+    const nodes = [a, N('b', 8, 0.05), N('wall', 4.5, -0.6)]
+    const planned = withPlans(docOf(nodes, [edge('e', 'a', 'b', { plan: { pts: [[2, 1], [3, 1], [3, 1.05], [8, 1.05]], fromSide: 'e', toSide: 'w', key: '' } })]))
+    const hand = docOf(nodes, [edge('e', 'a', 'b', { fromSide: 'e', toSide: 'w', fromAt: 0, toAt: 0, runs: [3] })])
+    expect(tidyKinks(hand, ['e'])).toMatchObject({ tidied: 1, taken: 0 })
+    const auto = docOf(nodes, [{ ...planned.edges[0], plan: { ...planned.edges[0].plan!, pts: [[2, 1], [3, 1], [3, 1.05], [8, 1.05]] } }])
+    const r = tidyKinks(auto, ['e'])
+    expect(r).toMatchObject({ tidied: 1, taken: 1 })
+    expect(isManual(r.doc.edges[0])).toBe(true)
+    expect(r.doc.edges[0].plan).toBeUndefined()
+  })
+  it('a kink is seen from what the line carries, without routing anything', () => {
+    const D = (e: Partial<EdgeT>) => docOf([a, b], [edge('e', 'a', 'b', e)])
+    const has = (e: Partial<EdgeT>) => { const d = D(e); return kinked(d, d.edges[0]) }
+    expect(has({ fromSide: 'e', toSide: 'w', fromAt: 0, toAt: 0, runs: [3, 1.04, 5, 3, 6] })).toBe(true)
+    expect(has({ fromSide: 'e', toSide: 'w', fromAt: 0, toAt: 0, runs: [3, 1.5, 5, 3, 6] })).toBe(false)
+    expect(has({ fromSide: 'e', toSide: 'w', fromAt: 0, toAt: 0, runs: [5] })).toBe(false)
+    // a planned path is read the same way
+    expect(has({ plan: { pts: [[2, 1], [3, 1], [3, 1.04], [5, 1.04], [5, 5], [8, 5]], fromSide: 'e', toSide: 'w', key: 'k' } })).toBe(true)
+    expect(has({ plan: { pts: [[2, 1], [5, 1], [5, 5], [8, 5]], fromSide: 'e', toSide: 'w', key: 'k' } })).toBe(false)
+    // nothing to read: no path of its own, not right-angled, or an end that is not there
+    expect(has({})).toBe(false)
+    expect(has({ shape: 'curved', runs: [3, 1.04, 5, 3, 6], fromSide: 'e', toSide: 'w' })).toBe(false)
+    expect(kinked(docOf([a], []), edge('e', 'a', 'gone', { runs: [3, 1.04, 5], fromSide: 'e', toSide: 'w' }))).toBe(false)
+    // sides given but no word on where the ends sit: the middle
+    expect(has({ fromSide: 'e', toSide: 'w', runs: [3, 1.04, 5, 3, 6] })).toBe(true)
+  })
+  it('a line can be handed back to the router when it was shaped, or when it has a plan that could be made again', () => {
+    expect(canReroute(edge('e', 'a', 'b'))).toBe(false)
+    expect(canReroute(edge('e', 'a', 'b', { runs: [5], fromSide: 'e', toSide: 'w' }))).toBe(true)
+    expect(canReroute(edge('e', 'a', 'b', { plan: { pts: [[2, 1], [8, 1]], fromSide: 'e', toSide: 'w', key: 'k' } }))).toBe(true)
   })
 })

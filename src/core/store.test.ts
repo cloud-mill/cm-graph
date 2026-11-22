@@ -771,3 +771,27 @@ describe('paths are planned as part of the edit that calls for them', () => {
   })
 
 })
+
+describe('review regressions', () => {
+  it('a planned line turned round keeps its path: the same points, the other way', () => {
+    S().load(docOf([node('a', 'ec2', 0, 0), node('b', 'rds', 8, 4)], [edge('e', 'a', 'b')]))
+    const was = S().doc.edges[0].plan!
+    S().reverseEdge(['e'])
+    const now = S().doc.edges[0]
+    expect(now).toMatchObject({ from: 'b', to: 'a' })
+    expect(now.plan!.pts).toEqual([...was.pts].reverse())
+    expect([now.plan!.fromSide, now.plan!.toSide]).toEqual([was.toSide, was.fromSide])
+    // and the plan still stands: nothing asks for it to be made again
+    const kept = now.plan
+    S().patchNode('a', { name: 'renamed' })
+    expect(S().doc.edges[0].plan).toBe(kept)
+  })
+  it('positions are kept to the thousandth of a cell: fine nudges do not pile up stray decimals', () => {
+    S().load(docOf([node('a', 'ec2', 0, 0)], [], { areas: [area('r', 0.1, 0.1, 4, 4)], labels: [label('l', 0.1, 0.1)] }))
+    useStore.setState({ selection: ['a', 'r', 'l'] })
+    for (let i = 0; i < 3; i++) S().nudge(0.05, 0.05)
+    expect(S().doc.nodes[0]).toMatchObject({ x: 0.15, y: 0.15 })
+    expect(S().doc.areas[0]).toMatchObject({ x: 0.25, y: 0.25 })
+    expect(S().doc.labels[0]).toMatchObject({ x: 0.25, y: 0.25 })
+  })
+})

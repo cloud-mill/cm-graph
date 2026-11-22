@@ -4,7 +4,7 @@ import { ISO_PITCH, ISO_YAW } from './iso'
 import { inArea } from './layout'
 import { guessKind, kindInfo } from './links'
 import { bendAt, isShaped, keepPath, lineUpEnds, shifted, straighten, tidyKinks, unbend, unshaped } from './shape'
-import { withPlans } from './router'
+import { planKey, withPlans } from './router'
 import { getPref, saveDoc, setPref } from './storage'
 import { type AreaT, type Doc, type EdgeT, type LabelT, type LinkKind, type NodeT, type PricingModel, type Side, emptyDoc, uid } from './types'
 
@@ -89,8 +89,8 @@ interface State {
   removeBend: (id: string, corner: number) => void
   /** make connections one straight line where they can be; says how many could not, and why */
   straighten: (ids: string[]) => { straight: number; apart: number }
-  /** take the small kinks out of these connections; says how many it changed */
-  cleanLines: (ids: string[]) => number
+  /** take the small kinks out of these connections; says how many it changed, and how many of those had been the router's */
+  cleanLines: (ids: string[]) => { tidied: number; taken: number }
   /** move one end's component level with the other, so the connection between them is straight */
   lineUp: (id: string) => void
   /** draw connections as right-angled runs (no shape), one direct line, or a curve */
@@ -110,6 +110,7 @@ interface State {
   setTheme: (t: 'dark' | 'light') => void
 }
 
+const r3 = (v: number) => Math.round(v * 1000) / 1000 + 0
 let clipboard: { nodes: NodeT[]; edges: EdgeT[]; areas: AreaT[]; labels: LabelT[] } | null = null
 let pasteCount = 0
 const HISTORY = 120
@@ -267,8 +268,14 @@ export const useStore = create<State>((set, get) => ({
   },
   reverseEdge: (ids) => get().apply((d) => ({
     ...d,
-    // the same line the other way round: its ends swap, and so do the sides and the order of its runs
-    edges: d.edges.map((e) => (ids.includes(e.id) ? { ...e, from: e.to, to: e.from, fromSide: e.toSide, toSide: e.fromSide, fromAt: e.toAt, toAt: e.fromAt, ...(e.via ? { via: [...e.via].reverse() } : {}), ...(e.runs ? { runs: [...e.runs].reverse() } : {}) } : e)),
+    // the same line the other way round: its ends swap, and so do the sides, the order of its runs, and the path planned for it
+    edges: d.edges.map((e) => {
+      if (!ids.includes(e.id)) return e
+      const { plan, ...rest } = e
+      const turned: EdgeT = { ...rest, from: e.to, to: e.from, fromSide: e.toSide, toSide: e.fromSide, fromAt: e.toAt, toAt: e.fromAt, ...(e.via ? { via: [...e.via].reverse() } : {}), ...(e.runs ? { runs: [...e.runs].reverse() } : {}) }
+      const a = d.nodes.find((n) => n.id === turned.from), b = d.nodes.find((n) => n.id === turned.to)
+      return plan && a && b ? { ...turned, plan: { pts: [...plan.pts].reverse(), fromSide: plan.toSide, toSide: plan.fromSide, key: planKey(turned, a, b) } } : turned
+    }),
   })),
   // handing a line to the router is asking for it to be planned now: whatever it carried, and any plan it had, goes
   resetRoute: (ids) => get().apply((d) => ({ ...d, edges: d.edges.map((e) => (ids.includes(e.id) && (isShaped(e) || e.plan) ? unshaped(e) : e)) })),
@@ -281,9 +288,9 @@ export const useStore = create<State>((set, get) => ({
     return count
   },
   cleanLines: (ids) => {
-    const { doc, tidied } = tidyKinks(get().doc, ids)
-    if (tidied) get().apply(() => doc)
-    return tidied
+    const { doc, ...count } = tidyKinks(get().doc, ids)
+    if (count.tidied) get().apply(() => doc)
+    return count
   },
   lineUp: (id) => get().apply((d) => lineUpEnds(d, id)),
   setShape: (ids, shape) => get().apply((d) => ({
@@ -410,9 +417,9 @@ export function moveItems(doc: Doc, base: Doc, sel: Set<string>, dx: number, dy:
   const be = new Map(base.edges.map((e) => [e.id, e]))
   return {
     ...doc,
-    nodes: doc.nodes.map((n) => (carried.has(n.id) && bn.has(n.id) ? { ...n, x: bn.get(n.id)!.x + dx, y: bn.get(n.id)!.y + dy } : n)),
-    areas: doc.areas.map((a) => (carried.has(a.id) && ba.has(a.id) ? { ...a, x: ba.get(a.id)!.x + dx, y: ba.get(a.id)!.y + dy } : a)),
-    labels: doc.labels.map((l) => (carried.has(l.id) && bl.has(l.id) ? { ...l, x: bl.get(l.id)!.x + dx, y: bl.get(l.id)!.y + dy } : l)),
+    nodes: doc.nodes.map((n) => (carried.has(n.id) && bn.has(n.id) ? { ...n, x: r3(bn.get(n.id)!.x + dx), y: r3(bn.get(n.id)!.y + dy) } : n)),
+    areas: doc.areas.map((a) => (carried.has(a.id) && ba.has(a.id) ? { ...a, x: r3(ba.get(a.id)!.x + dx), y: r3(ba.get(a.id)!.y + dy) } : a)),
+    labels: doc.labels.map((l) => (carried.has(l.id) && bl.has(l.id) ? { ...l, x: r3(bl.get(l.id)!.x + dx), y: r3(bl.get(l.id)!.y + dy) } : l)),
     // a hand-shaped line whose two ends move together goes with them; one whose ends part company keeps its track where it was laid
     edges: doc.edges.map((e) => {
       const b = be.get(e.id)

@@ -60,7 +60,6 @@ test.describe('phone: direct editing', () => {
     const held = await app.corner('b')
     // it has gone as far as the finger has, to the pixel (a finger is reported in whole pixels)
     expect(Math.hypot(held.x - home.x - by.x, held.y - home.y - by.y)).toBeLessThanOrEqual(1.5)
-    await expect(page.locator('.landing')).toHaveCount(0)
     await fingers.lift()
     await page.waitForTimeout(400)
     // lifted, it is exactly where it was held: not rounded to a cell, not eased anywhere

@@ -100,6 +100,8 @@ export function straightenLinks(ids: string[]) {
 export function cleanLines(ids?: string[]) {
   const s = useStore.getState()
   const picked = ids ?? s.selection.filter((id) => s.doc.edges.some((e) => e.id === id))
-  const n = s.cleanLines(picked.length ? picked : s.doc.edges.map((e) => e.id))
-  s.toast(n ? `Straightened ${n} ${n === 1 ? 'line' : 'lines'}` : 'No small kinks to take out')
+  const { tidied: n, taken } = s.cleanLines(picked.length ? picked : s.doc.edges.map((e) => e.id))
+  // a line that was routed automatically keeps the path it has now: say so, since that is a change of whose line it is
+  const kept = taken ? `. ${taken === n ? (n === 1 ? 'It keeps' : 'They keep') : `${taken} now ${taken === 1 ? 'keeps' : 'keep'}`} this path` : ''
+  s.toast(n ? `Straightened ${n} ${n === 1 ? 'line' : 'lines'}${kept}` : 'No small kinks to take out')
 }

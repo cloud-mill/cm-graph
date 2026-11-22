@@ -211,8 +211,14 @@ const opposite = (a: Side, b: Side) => DIR[a][0] + DIR[b][0] === 0 && DIR[a][1] 
 const beyond = (ra: Rect, s: Side, rb: Rect) => (s === 'e' ? rb.x0 > ra.x1 : s === 'w' ? rb.x1 < ra.x0 : s === 's' ? rb.y0 > ra.y1 : rb.y1 < ra.y0)
 /** how far the port at this end is out from its side, measured to `p` */
 const outBy = (r: Rect, s: Side, p: W) => (s === 'e' ? p[0] - r.x1 : s === 'w' ? r.x0 - p[0] : s === 's' ? p[1] - r.y1 : r.y0 - p[1])
-const whole = (p: W): W => [r3(p[0]), r3(p[1])]
-const put = (end: End, r: Rect, c: number) => { const off = r3(c - centreOn(r, end.side)); end.port = whole(portAt(r, end.side, off)); end.out = whole(portAt(r, end.side, off, STUB)) }
+/**
+ * Stand an end on the line `c` across its side. The coordinate across the side is `c` itself, not the middle of the component plus
+ * a rounded offset: a middle can have more decimals than a port is kept to, and two ends put on one line must come out on one line.
+ */
+const put = (end: End, r: Rect, c: number) => {
+  const off = c - centreOn(r, end.side), on = (p: W): W => (horizontal(end.side) ? [r3(p[0]), r3(c)] : [r3(c), r3(p[1])])
+  end.port = on(portAt(r, end.side, off)); end.out = on(portAt(r, end.side, off, STUB))
+}
 
 /** Nothing but the two components themselves stands on the straight run from `p` to `q`. */
 function clearRun(p: W, q: W, blocks: Rect[], skip: Rect[]): boolean {
@@ -311,7 +317,9 @@ export function routeAll(nodes: NodeT[], edges: EdgeT[]): Map<string, Routed> {
     ;(sides.get(k) ?? sides.set(k, []).get(k)!).push(end)
   }
   for (const list of sides.values()) {
-    list.sort((p, q) => p.toward - q.toward || (p.edge < q.edge ? -1 : p.edge > q.edge ? 1 : 0))
+    // ends that lead to the same place keep the order the connections were made in (the sort is stable), so a line being drawn,
+    // which is the newest, is shown where it will be once it is let go and has an id of its own
+    list.sort((p, q) => p.toward - q.toward)
     const r = rects.get(list[0].node)!, size = r.x1 - r.x0
     const gap = Math.min(0.5, (size * 0.76) / list.length)
     const centre = centreOn(r, list[0].side)

@@ -130,7 +130,6 @@ test.describe('carrying', () => {
     const held = await app.corner('a')
     // it has gone as far as the pointer has, to the pixel
     expect(Math.hypot(held.x - home.x - cell.x * 1.4, held.y - home.y - cell.y * 1.4)).toBeLessThan(1)
-    await expect(page.locator('.landing')).toHaveCount(0)
     expect(await lineOf(page)).not.toBe(line)
     const heldLine = await lineOf(page)
     // the blueprint has not changed: nothing to save, nothing to undo

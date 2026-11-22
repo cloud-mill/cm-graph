@@ -94,6 +94,17 @@ describe('ContextMenu', () => {
     await click('Clean up small kinks')
     expect(S().doc.edges[0].runs).toEqual([7, 5, 9])
   })
+  it('an automatic line that has a planned path can be asked to plan it again', async () => {
+    resetStore()
+    act(() => S().load(doc()))
+    act(() => S().select(['e']))
+    const was = S().doc.edges[0].plan
+    expect(was).toBeDefined()
+    render(<ContextMenu menu={{ x: 100, y: 120, wx: 4, wy: 7, target: 'edge' }} onClose={vi.fn<(...args: any[]) => void>()} />)
+    await click('Route automatically')
+    expect(S().doc.edges[0].plan).toBeDefined()
+    expect(S().doc.edges[0].plan).not.toBe(was)
+  })
   it('straightens a connection, and hands a shaped one back to the router', async () => {
     const onClose = open('edge', ['e'])
     act(() => S().patchEdge(['e'], { fromSide: 'e', toSide: 'w', fromAt: 0, toAt: 0, runs: [4.5, 6, 9.5] }))

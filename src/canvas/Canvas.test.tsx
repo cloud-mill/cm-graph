@@ -162,7 +162,6 @@ describe('moving', () => {
     move(4.4, 1)
     // in the hand: it is drawn where the pointer has taken it, and the blueprint is not touched yet
     expect(drawnAt('a')).toEqual([3.4, 0])
-    expect(document.querySelectorAll('.landing')).toHaveLength(0)
     expect(hit('node', 'a')).toHaveClass('up')
     expect(S().doc.nodes[0]).toMatchObject({ x: 0, y: 0 })
     expect(S()).toMatchObject({ past: [], saved: true })

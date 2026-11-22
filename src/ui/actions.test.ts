@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it } from 'vitest'
 import { cam } from '../canvas/camera'
 import { CATALOG_LIST, equivalent, providerOf } from '../core/catalog'
 import { decodeShare, listSnapshots } from '../core/storage'
+import { planKey } from '../core/router'
 import { useStore } from '../core/store'
 import type { EdgeT } from '../core/types'
 import { docOf, edge, node, resetStore } from '../test/helpers'
@@ -105,6 +106,15 @@ describe('cleanLines', () => {
     cleanLines()
     expect(S().doc.edges.map((e) => e.runs)).toEqual([[5, 3, 6], [5, 13, 6]])
     expect(S().toasts.at(-1)!.text).toBe('Straightened 2 lines')
+  })
+  it('says so when a line that was routed automatically now keeps its path', () => {
+    const plan = { pts: [[2, 1], [3, 1], [3, 1.04], [5, 1.04], [5, 5], [8, 5]] as [number, number][], fromSide: 'e' as const, toSide: 'w' as const, key: '' }
+    const nodes = [node('a', 'ec2', 0, 0), node('b', 'rds', 8, 4)]
+    const auto = edge('e', 'a', 'b'), key = planKey(auto, nodes[0], nodes[1])
+    resetStore({ doc: docOf(nodes, [{ ...auto, plan: { ...plan, key } }]) })
+    cleanLines(['e'])
+    expect(S().doc.edges[0]).toMatchObject({ runs: [5] })
+    expect(S().toasts.at(-1)!.text).toBe('Straightened 1 line. It keeps this path')
   })
   it('leaves a step somebody made alone, says so, and makes no undo step', () => {
     resetStore({ doc: docOf([node('a', 'ec2', 0, 0), node('b', 'rds', 8, 4)], [edge('e', 'a', 'b', made)]) })

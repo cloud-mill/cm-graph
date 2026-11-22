@@ -121,14 +121,30 @@ export function alignRun(t: Track, a: NodeT, b: NodeT, run: number, v: number, t
 export const KINK = 0.1
 
 /**
+ * Whether a connection has a step small enough to be taken for a slip, read off what it carries (its own track, or the
+ * path planned for it) without routing anything. Cheap enough to ask every time a menu opens.
+ */
+export function kinked(doc: Doc, e: EdgeT, tol = KINK): boolean {
+  const a = doc.nodes.find((n) => n.id === e.from), b = doc.nodes.find((n) => n.id === e.to)
+  if (!a || !b || e.shape) return false
+  const t = e.runs && e.fromSide && e.toSide
+    ? { fromSide: e.fromSide, toSide: e.toSide, fromAt: e.fromAt ?? 0, toAt: e.toAt ?? 0, runs: e.runs }
+    : e.plan && !e.via?.length ? trackOf({ pts: e.plan.pts, leg: [], fromSide: e.plan.fromSide, toSide: e.plan.toSide, manual: false, shape: 'ortho' }, a, b)?.track : null
+  if (!t) return false
+  const L = coordsOf(t, a, b)
+  return L.some((v, i) => i + 2 < L.length && Math.abs(L[i + 2] - v) <= tol && !same(L[i + 2], v))
+}
+
+/**
  * Take the small kinks out of these connections: wherever two runs going the same way stand within `tol` of each
  * other, with a short step between them, one is brought onto the other's line and the step is gone. An end of the
  * line stays where it is on its component when the run beside it can move instead; nothing is planned afresh, and a
- * step bigger than `tol` is a step somebody made and is left alone.
+ * step bigger than `tol` is a step somebody made and is left alone. A line the router had planned becomes the user's
+ * when a kink is taken out of it (`taken` counts those), since its path is then one they chose.
  */
-export function tidyKinks(doc: Doc, ids: string[], tol = KINK): { doc: Doc; tidied: number } {
+export function tidyKinks(doc: Doc, ids: string[], tol = KINK): { doc: Doc; tidied: number; taken: number } {
   const routes = routeAll(doc.nodes, doc.edges), byId = new Map(doc.nodes.map((n) => [n.id, n]))
-  let tidied = 0
+  let tidied = 0, taken = 0
   const edges = doc.edges.map((e) => {
     const r = routes.get(e.id), a = byId.get(e.from), b = byId.get(e.to)
     const from = ids.includes(e.id) && r && a && b ? trackOf(r, a, b) : null
@@ -152,9 +168,11 @@ export function tidyKinks(doc: Doc, ids: string[], tol = KINK): { doc: Doc; tidi
     }
     if (!changed) return e
     tidied++
+    // a line the router had planned is the user's from here on: the path it has now is one they asked for
+    if (!isManual(e)) taken++
     return withTrack(e, t)
   })
-  return tidied ? { doc: { ...doc, edges }, tidied } : { doc, tidied: 0 }
+  return tidied ? { doc: { ...doc, edges }, tidied, taken } : { doc, tidied: 0, taken: 0 }
 }
 
 /**
@@ -344,6 +362,9 @@ export function unbend(doc: Doc, id: string, corner: number): Doc {
   const next = removeBend(d.track, d.a, d.b, d.seg[corner - 1])
   return next ? replaced(doc, withTrack(d.e, next)) : doc
 }
+
+/** There is something to hand back to the router: a path the user gave it, or one planned earlier that could be planned again. */
+export const canReroute = (e: EdgeT) => isShaped(e) || !!e.plan
 
 export const isShaped = (e: EdgeT) => !!(e.via?.length || e.runs || e.fromSide || e.toSide || e.fromAt !== undefined || e.toAt !== undefined)
 

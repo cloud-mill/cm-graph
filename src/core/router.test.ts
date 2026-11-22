@@ -460,3 +460,22 @@ describe('a path is planned once', () => {
   })
 
 })
+
+describe('review regressions', () => {
+  it('a straight run between two components is on one line even when a middle has more decimals than a port is kept to', () => {
+    // resized freely: a footprint of 2.347 puts the middle at 1.1735
+    for (const scale of [1.1735, 1.0005, 0.7615]) for (const y of [0, 0.013, 0.0005]) {
+      const r = one([node('a', 'ec2', 0, 0, { scale }), node('b', 'rds', 8, y)])
+      expect(r.pts).toHaveLength(2)
+      expect(r.pts[0][1]).toBe(r.pts[1][1])
+      const kept = one([node('a', 'ec2', 0, 0, { scale }), node('b', 'rds', 8, y)], { fromSide: 'e', toSide: 'w', fromAt: 0.1, toAt: 0, runs: [] })
+      expect(kept.pts[0][1]).toBe(kept.pts[1][1])
+    }
+  })
+  it('ends that lead to the same place sit in the order the connections were made, whatever they are called', () => {
+    const nodes = [node('a', 'ec2', 0, 0), node('b', 'rds', 8, 0)]
+    const ports = (ids: string[]) => { const r = routeAll(nodes, ids.map((id) => edge(id, 'a', 'b'))); return ids.map((id) => r.get(id)!.pts[0][1]) }
+    expect(ports(['m', '~wire'])).toEqual(ports(['m', '0abc']))
+    expect(ports(['m', '~wire'])).toEqual(ports(['m', 'zzzz']))
+  })
+})
