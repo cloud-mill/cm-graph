@@ -119,29 +119,32 @@ test.describe('carrying', () => {
   const linked = () => { const d = TRIO(); d.edges.push({ id: 'e', from: 'a', to: 'b', style: 'solid', arrow: 'end', width: 2 }); return d }
   const lineOf = (page: Page) => page.locator('.edge-hit[data-id="e"]').getAttribute('d')
 
-  test('a component follows the pointer between cells, its line follows it, and nothing is written until it is let go', async ({ page, app }) => {
+  test('a component follows the pointer exactly, its line follows it, nothing is written until it is let go, and it stays where it was let go', async ({ page, app }) => {
     await app.open(linked())
     const from = await app.world(1, 1), cell = await app.cells(1, 0)
     const home = await app.corner('a'), line = await lineOf(page)
     await page.mouse.move(from.x, from.y)
     await page.mouse.down()
-    // 1.4 cells along x: between the first cell and the second
+    // 1.4 cells along x: nowhere near a grid line
     await page.mouse.move(from.x + cell.x * 1.4, from.y + cell.y * 1.4, { steps: 10 })
     const held = await app.corner('a')
-    const along = ((held.x - home.x) * cell.x + (held.y - home.y) * cell.y) / (cell.x ** 2 + cell.y ** 2)
-    expect(along).toBeGreaterThan(1.05)
-    expect(along).toBeLessThan(1.45)
-    // where it will come to rest is marked, and the line already runs to where it is
-    await expect(page.locator('.landing')).toHaveCount(1)
+    // it has gone as far as the pointer has, to the pixel
+    expect(Math.hypot(held.x - home.x - cell.x * 1.4, held.y - home.y - cell.y * 1.4)).toBeLessThan(1)
+    await expect(page.locator('.landing')).toHaveCount(0)
     expect(await lineOf(page)).not.toBe(line)
+    const heldLine = await lineOf(page)
     // the blueprint has not changed: nothing to save, nothing to undo
     await expect(page.locator('.save-state')).toHaveText('Saved')
     expect((await app.saved())!.nodes[0]).toMatchObject({ x: 0, y: 0 })
     await page.mouse.up()
-    await expect(page.locator('.canvas-wrap.settle')).toHaveCount(0)
-    expect((await app.settled()).nodes[0]).toMatchObject({ x: 1, y: 0 })
-    const rest = await app.corner('a')
-    expect(Math.hypot(rest.x - home.x - cell.x, rest.y - home.y - cell.y)).toBeLessThan(0.6)
+    // let go, it is exactly where it was while held, and so is its line: nothing is rounded, eased or re-planned
+    expect(await app.corner('a')).toEqual(held)
+    expect(await lineOf(page)).toBe(heldLine)
+    await page.waitForTimeout(400)
+    expect(await app.corner('a')).toEqual(held)
+    const a = (await app.settled()).nodes[0]
+    expect(a.x).toBeCloseTo(1.4, 1)
+    expect(a.y).toBeCloseTo(0, 1)
     // and it was one step
     await app.mod('z')
     expect((await app.settled()).nodes[0]).toMatchObject({ x: 0, y: 0 })
@@ -153,23 +156,22 @@ test.describe('carrying', () => {
     await page.mouse.move(from.x, from.y)
     await page.mouse.down()
     await page.mouse.move(from.x + by.x, from.y + by.y, { steps: 8 })
-    await expect(page.locator('.landing')).toHaveCount(1)
+    expect(await app.corner('a')).not.toEqual(home)
     await page.keyboard.press('Escape')
-    await expect(page.locator('.landing')).toHaveCount(0)
     expect(await app.corner('a')).toEqual(home)
     await page.mouse.up()
     expect(await app.corner('a')).toEqual(home)
     await expect(page.getByRole('button', { name: 'Undo' })).toBeDisabled()
   })
 
-  test('a component cannot be put down on top of another: it lands in the nearest free cell', async ({ app }) => {
+  test('a component is put down exactly where it is dropped, even on top of another: nothing pushes it aside', async ({ app }) => {
     await app.open(TRIO())
     // straight onto `b`
     await app.drag(await app.world(1, 1), await app.world(7, 1))
-    const doc = await app.settled()
-    const [a, b] = doc.nodes
-    expect(a.x + 2 <= b.x || b.x + 2 <= a.x || a.y + 2 <= b.y || b.y + 2 <= a.y).toBe(true)
-    expect(Math.abs(a.x - b.x) + Math.abs(a.y - b.y)).toBeLessThanOrEqual(3)
+    const [a, b] = (await app.settled()).nodes
+    expect(a.x).toBeCloseTo(6, 1)
+    expect(a.y).toBeCloseTo(0, 1)
+    expect(b).toMatchObject({ x: 6, y: 0 })
   })
 
   test('shift keeps a move to one axis', async ({ page, app }) => {

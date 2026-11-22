@@ -3,8 +3,8 @@ import { fitView } from '../canvas/camera'
 import { keys } from './atoms'
 import { useBackLayer } from '../core/nav'
 import { useStore } from '../core/store'
-import { isManual, isShaped, straightness } from '../core/shape'
-import { fitAreaToContents, selectAll, straightenLinks, tidy, wrapSelectionInArea } from './actions'
+import { isManual, isShaped, straightness, tidyKinks } from '../core/shape'
+import { cleanLines, fitAreaToContents, selectAll, straightenLinks, tidy, wrapSelectionInArea } from './actions'
 
 export interface MenuState {
   x: number
@@ -48,6 +48,8 @@ export function ContextMenu({ menu, onClose }: { menu: MenuState; onClose: () =>
       items.push({ label: apart ? 'Line up and straighten' : 'Straighten', run: () => straightenLinks(sel) })
       // a right-angled line can have a step put in it where the menu was opened, and be handed to the user or back to the router
       if (picked.length === 1 && !picked[0].shape) items.push({ label: 'Add a bend here', run: () => s.addBend(picked[0].id, [menu.wx, menu.wy]) })
+      // offered only when there is one: a step in the line too small to have been meant
+      if (tidyKinks(s.doc, sel).tidied) items.push({ label: 'Clean up small kinks', run: () => cleanLines(sel) })
       if (picked.some((e) => !e.shape && !isManual(e))) items.push({ label: 'Keep this path', run: () => s.keepRoute(sel) })
       if (shaped) items.push({ label: 'Route automatically', run: () => s.resetRoute(sel) })
       items.push({ label: 'Follow the flow', run: () => s.set({ trace: sel[0] }) }, { label: 'Reverse direction', run: () => s.reverseEdge(sel) })

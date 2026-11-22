@@ -5,10 +5,11 @@ import { ModelIcon } from '../canvas/models'
 import { CATALOG_LIST, PROVIDERS, defOf, nodeName } from '../core/catalog'
 import { ISO } from '../core/iso'
 import { goHome, useBackLayer } from '../core/nav'
+import { setPref } from '../core/storage'
 import { useStore } from '../core/store'
 import { keys } from './atoms'
 import { isPhone } from './device'
-import { addAtCenter, saveVersion, selectAll, tidy, toggleFlat, translateTo } from './actions'
+import { addAtCenter, cleanLines, saveVersion, selectAll, tidy, toggleFlat, translateTo } from './actions'
 
 interface Cmd {
   id: string
@@ -37,6 +38,7 @@ export function CommandPalette({ onClose }: { onClose: () => void }) {
       { id: 'turnr', group: 'Actions', label: 'Turn view right', hint: 'camera rotate orbit', kbd: 'E', run: () => turn(-45) },
       { id: 'orbit', group: 'Actions', label: 'Orbit tool', hint: 'camera rotate 3d', kbd: 'O', run: () => st.set({ tool: 'orbit' }) },
       { id: 'tidy', group: 'Actions', label: 'Tidy layout automatically', run: tidy },
+      { id: 'kinks', group: 'Actions', label: 'Clean up small kinks in lines', hint: 'straighten align connections zigzag', run: () => cleanLines() },
       { id: 'heat', group: 'Actions', label: st.lens === 'cost' ? 'Turn off cost heatmap' : 'Show cost heatmap', kbd: 'H', run: () => st.set({ lens: st.lens === 'cost' ? 'none' : 'cost' }) },
       { id: 'budget', group: 'Actions', label: 'Open budget', run: () => st.set({ panel: 'budget' }) },
       { id: 'advisor', group: 'Actions', label: 'Open architecture advisor', run: () => st.set({ panel: 'advisor' }) },
@@ -47,6 +49,7 @@ export function CommandPalette({ onClose }: { onClose: () => void }) {
       { id: 'history', group: 'Actions', label: 'Version history…', run: () => st.set({ modal: 'history' }) },
       { id: 'flow', group: 'Actions', label: st.flow ? 'Stop traffic animation' : 'Animate traffic flow', run: () => st.set({ flow: !st.flow }) },
       { id: 'grid', group: 'Actions', label: st.showGrid ? 'Hide grid' : 'Show grid', kbd: 'G', run: () => st.set({ showGrid: !st.showGrid }) },
+      { id: 'snap', group: 'Actions', label: st.snap ? 'Turn snapping off' : 'Turn snapping on', kbd: 'S', run: () => { setPref('snap', !st.snap); st.set({ snap: !st.snap }) } },
       { id: 'labels', group: 'Actions', label: st.showLabels ? 'Hide component names' : 'Show component names', kbd: 'L', run: () => st.set({ showLabels: !st.showLabels }) },
       { id: 'theme', group: 'Actions', label: st.theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme', run: () => st.setTheme(st.theme === 'dark' ? 'light' : 'dark') },
       { id: 'all', group: 'Actions', label: 'Select all', kbd: '⌘A', run: selectAll },

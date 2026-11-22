@@ -92,3 +92,14 @@ export function straightenLinks(ids: string[]) {
   const r = s.straighten(ids)
   if (r.apart) s.toast(`${r.apart} could not be straight: the components are not in line`, 'warn')
 }
+
+/**
+ * Take the small kinks out of connections: the ones picked, or every one when none is. Only steps too small to have
+ * been meant go; the rest of each line is left exactly as it was.
+ */
+export function cleanLines(ids?: string[]) {
+  const s = useStore.getState()
+  const picked = ids ?? s.selection.filter((id) => s.doc.edges.some((e) => e.id === id))
+  const n = s.cleanLines(picked.length ? picked : s.doc.edges.map((e) => e.id))
+  s.toast(n ? `Straightened ${n} ${n === 1 ? 'line' : 'lines'}` : 'No small kinks to take out')
+}

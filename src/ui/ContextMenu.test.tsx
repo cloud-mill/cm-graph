@@ -85,6 +85,15 @@ describe('ContextMenu', () => {
     await click('Reverse direction')
     expect(S().doc.edges[0]).toMatchObject({ from: 'b', to: 'a' })
   })
+  it('offers to clean up a line only when it has a kink too small to have been meant, and then takes it out', async () => {
+    open('edge', ['e'])
+    expect(names()).not.toContain('Clean up small kinks')
+    act(() => S().patchEdge(['e'], { fromSide: 'e', toSide: 'w', fromAt: 0, toAt: 0, runs: [5, 3.04, 7, 5, 9] }))
+    document.body.innerHTML = ''
+    render(<ContextMenu menu={{ x: 100, y: 120, wx: 4, wy: 7, target: 'edge' }} onClose={vi.fn<(...args: any[]) => void>()} />)
+    await click('Clean up small kinks')
+    expect(S().doc.edges[0].runs).toEqual([7, 5, 9])
+  })
   it('straightens a connection, and hands a shaped one back to the router', async () => {
     const onClose = open('edge', ['e'])
     act(() => S().patchEdge(['e'], { fromSide: 'e', toSide: 'w', fromAt: 0, toAt: 0, runs: [4.5, 6, 9.5] }))

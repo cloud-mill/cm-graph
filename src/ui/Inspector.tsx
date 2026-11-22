@@ -9,6 +9,7 @@ import { coalesce, useStore } from '../core/store'
 import { type AreaT, type EdgeT, type LabelT, type LinkKind, type NodeT, centerOf } from '../core/types'
 import { NumberInput, Row, Segmented, Select, Swatches, TextInput, Toggle, keys } from './atoms'
 import { isManual, isShaped, straightness } from '../core/shape'
+import { setPref } from '../core/storage'
 import { fitAreaToContents, straightenLinks, translateTo } from './actions'
 
 /** what each kind of figure rests on, in a sentence */
@@ -168,6 +169,7 @@ function EdgeInspector({ edges }: { edges: EdgeT[] }) {
   const doc = useStore((st) => st.doc)
   const focusName = useStore((st) => st.focusName)
   const tracing = useStore((st) => st.trace)
+  const snap = useStore((st) => st.snap)
   const e = edges[0]
   const ids = edges.map((x) => x.id)
   const one = edges.length === 1
@@ -253,7 +255,7 @@ function EdgeInspector({ edges }: { edges: EdgeT[] }) {
             : shaped.length ? `${shaped.length} of these ${shaped.length === 1 ? 'has' : 'have'} been shaped by hand.` : 'All routed automatically.'}
           {one && !e.shape && ' Drag any run of the line sideways to move it, a turn to move both runs that meet there, or an end to move it to another component.'}
         </p>
-        {!e.shape && <Row label="Snap"><Toggle value={s.snapLines} onChange={(v) => s.set({ snapLines: v })} label="Snap lines into place while dragging" /></Row>}
+        {!e.shape && <Row label="Snap"><Toggle value={snap} onChange={(v) => { setPref('snap', v); s.set({ snap: v }) }} label="Snap into place while dragging" /></Row>}
         <div className="insp-actions inline">
           <button className="btn ghost" disabled={one && (e.shape === 'direct' || (straight?.state === 'straight' && !!e.runs))} onClick={() => straightenLinks(ids)}><Minus size={14} />{straight?.state === 'apart' ? 'Line up' : 'Straighten'}</button>
           <button className="btn ghost" disabled={!shaped.length} onClick={() => s.resetRoute(ids)}><RotateCcw size={14} />Route automatically</button>
@@ -335,11 +337,11 @@ function LabelInspector({ l }: { l: LabelT }) {
 }
 
 const SIZES = [0.5, 0.75, 1, 1.25, 1.5, 2, 2.5, 3]
-/** Change a component's size about its centre, keeping it on the half-cell grid. */
+/** Change a component's size about its centre: the middle of it stays exactly where it was put. */
 function resized(n: NodeT, scale: number): NodeT {
   const [cx, cy] = centerOf(n)
   const { scale: _, ...rest } = n
-  return { ...rest, x: Math.round((cx - scale) * 2) / 2, y: Math.round((cy - scale) * 2) / 2, ...(scale === 1 ? {} : { scale }) }
+  return { ...rest, x: Math.round((cx - scale) * 1000) / 1000, y: Math.round((cy - scale) * 1000) / 1000, ...(scale === 1 ? {} : { scale }) }
 }
 
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`

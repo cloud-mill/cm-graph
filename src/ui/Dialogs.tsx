@@ -199,15 +199,17 @@ export function ShareDialog({ onClose }: { onClose: () => void }) {
 const KEYS: [string, [string, string][]][] = [
   ['Tools', [['V', 'Select'], ['C', 'Connect components'], ['A', 'Draw an area'], ['T', 'Add a text label'], ['Esc', 'Cancel / deselect']]],
   ['Panels', [['[', 'Show / hide library'], [']', 'Show / hide inspector'], ['\\', 'Show / hide both'], ['/', 'Search the library'], ['↵', 'Rename the selection']]],
-  ['Canvas', [['Space + drag', 'Pan'], ['Scroll / pinch', 'Zoom'], ['F', 'Zoom to fit'], ['Right-drag', 'Orbit the camera'], ['⌥ + drag', 'Orbit (on empty canvas)'], ['Q / E', 'Turn the view 45°'], ['2 / 3', 'Top view / home view'], ['O', 'Orbit tool'], ['G', 'Toggle grid'], ['L', 'Toggle names'], ['H', 'Cost heatmap']]],
-  ['Editing', [['⌘Z / ⇧⌘Z', 'Undo / redo'], ['⌘C / ⌘V', 'Copy / paste'], ['⌘D', 'Duplicate'], ['Drag a door', 'Connect (to open ground: add and connect)'], ['Drag a line', 'Move that run of it sideways'], ['Drag a turn', 'Move both runs that meet there'], ['⌥ + drag a line', 'Move it without snapping'], ['Double-click a turn', 'Take that bend out'], ['⌥ + drag', 'Clone while dragging'], ['⇧ + drag', 'Box select on empty ground, one axis on a component'], ['Esc', 'Put back what is in the hand'], ['Arrows', 'Nudge selection'], ['⌫', 'Delete'], ['⌘A', 'Select all']]],
+  ['Canvas', [['Space + drag', 'Pan'], ['Scroll / pinch', 'Zoom'], ['F', 'Zoom to fit'], ['Right-drag', 'Orbit the camera'], ['⌥ + drag', 'Orbit (on empty canvas)'], ['Q / E', 'Turn the view 45°'], ['2 / 3', 'Top view / home view'], ['O', 'Orbit tool'], ['G', 'Toggle grid'], ['S', 'Snapping on / off'], ['L', 'Toggle names'], ['H', 'Cost heatmap']]],
+  ['Editing', [['⌘Z / ⇧⌘Z', 'Undo / redo'], ['⌘C / ⌘V', 'Copy / paste'], ['⌘D', 'Duplicate'], ['Drag a door', 'Connect (to open ground: add and connect)'], ['Drag a line', 'Move that run of it sideways'], ['Drag a turn', 'Move both runs that meet there'], ['Ctrl + drag', 'Flip snapping for that drag'], ['Alt + drag a line', 'No help lining it up'], ['Double-click a turn', 'Take that bend out'], ['⌥ + drag', 'Clone while dragging'], ['⇧ + drag', 'Box select on empty ground, one axis on a component'], ['Esc', 'Put back what is in the hand'], ['Arrows', 'Nudge selection a cell (Shift: four, Alt: a twentieth)'], ['⌫', 'Delete'], ['⌘A', 'Select all']]],
   ['App', [['⌘K', 'Command palette'], ['⌘S', 'Save a version'], ['⌘E', 'Export'], ['?', 'This cheat sheet']]],
 ]
 
 export function ShortcutsDialog({ onClose }: { onClose: () => void }) {
   return (
     <Modal title="Keyboard shortcuts" onClose={onClose} width={680}>
-      <div className="keys">
+      {/* the list can be longer than the window is tall: it takes focus so the keyboard can scroll it */}
+      {/* oxlint-disable-next-line jsx-a11y/no-noninteractive-tabindex */}
+      <div className="keys" tabIndex={0} role="group" aria-label="Shortcuts">
         {KEYS.map(([group, rows]) => (
           <section key={group}>
             <h5>{group}</h5>

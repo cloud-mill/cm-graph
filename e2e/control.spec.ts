@@ -43,7 +43,6 @@ test.describe('the line goes where the pointer goes', () => {
     await select(page)
     const m = await at(page)
     // caught five pixels to one side of the line, as a hand does
-    await page.keyboard.down('Alt')
     await page.mouse.move(m.x + 5, m.y); await page.mouse.down()
     let worst = 0
     for (let i = 1; i <= 90; i++) {
@@ -53,14 +52,15 @@ test.describe('the line goes where the pointer goes', () => {
     }
     expect(worst).toBeLessThanOrEqual(1)
     const held = await path(page)
-    await page.mouse.up(); await page.keyboard.up('Alt')
+    await page.mouse.up()
     // and what was on screen as it was let go is what stays
     expect(await path(page)).toBe(held)
     expect((await at(page)).x).toBeCloseTo(m.x + 90, 0)
   })
 
-  test('without Alt it settles on things only from a few pixels away, and never trails the pointer by more than that', async ({ page, app }) => {
+  test('with snapping on it settles on things only from a few pixels away, and never trails the pointer by more than that', async ({ page, app }) => {
     await open(page, app)
+    await page.getByRole('button', { name: /Snap to grid: off/ }).click()
     await select(page)
     const m = await at(page), cell = (await app.cells(1, 0)).x
     await page.mouse.move(m.x, m.y); await page.mouse.down()
@@ -92,14 +92,13 @@ test.describe('the line goes where the pointer goes', () => {
     await page.mouse.move(700, 450); await page.mouse.wheel(0, -300); await page.waitForTimeout(600)
     await select(page)
     const m = await at(page), to = { x: m.x + 63, y: m.y - 18 }
-    await page.keyboard.down('Alt')
     await page.mouse.move(m.x, m.y); await page.mouse.down(); await page.mouse.move(to.x, to.y, { steps: 15 })
     expect(await gap(page, to)).toBeLessThanOrEqual(1.5)
     // zooming with the wheel while it is held: at the next move it is under the pointer again
     await page.mouse.wheel(0, 200); await page.waitForTimeout(500)
     await page.mouse.move(to.x + 9, to.y + 4, { steps: 3 })
     expect(await gap(page, { x: to.x + 9, y: to.y + 4 })).toBeLessThanOrEqual(1.5)
-    await page.mouse.up(); await page.keyboard.up('Alt')
+    await page.mouse.up()
     expect((await saved(app)).runs).toHaveLength(1)
   })
 })
@@ -225,9 +224,7 @@ test.describe('bends', () => {
     // the turn where the step begins: both runs that meet at it follow it
     const before = (await saved(app)).runs
     const c = await centre(page, 'c2'), by = await app.cells(-1, -0.5)
-    await page.keyboard.down('Alt')
     await app.drag(c, { x: c.x + by.x, y: c.y + by.y }, { steps: 8 })
-    await page.keyboard.up('Alt')
     const after = (await saved(app)).runs
     expect(after[0]).toBeCloseTo(before[0] - 1, 1)
     expect(after[1]).toBeCloseTo(before[1] - 0.5, 1)
@@ -242,28 +239,37 @@ test.describe('bends', () => {
 })
 
 test.describe('snapping helps and gives way', () => {
-  test('a run let go a few pixels from where the line would be straight settles there; with Alt it stays where it was put', async ({ page, app }) => {
+  test('snapping is off until it is asked for: a run stays where it is put. Turned on, it settles where the line would be straight; Ctrl flips it for one drag, and Alt holds it off', async ({ page, app }) => {
     // `d` one cell below `a`'s row: the two ends can meet on y = 1.85
     await open(page, app, doc([edge('e', 'a', 'd', { fromSide: 'e', toSide: 'w', fromAt: 0, toAt: 0, runs: [4] })], { y: 1 }))
     expect(await turns(page)).toBe(2)
     await select(page, 0.1)
-    const s = await centre(page, 's0'), down = (await app.cells(0, 0.85)).y - 4
-    await app.drag(s, { x: s.x, y: s.y + down }, { steps: 8 })
+    const pull = async (key?: 'Alt' | 'Control') => {
+      const s = await centre(page, 's0'), down = (await app.cells(0, 0.85)).y - 4
+      if (key) await page.keyboard.down(key)
+      await app.drag(s, { x: s.x, y: s.y + down }, { steps: 8 })
+      if (key) await page.keyboard.up(key)
+    }
+    // off: four pixels short of where the two ends could meet is where it stays, since the far end would have to move for it
+    await pull()
+    expect(await turns(page)).toBe(2)
+    expect((await saved(app)).runs).toEqual([4])
+    await app.mod('z')
+    // Ctrl turns it on for the one drag
+    await pull('Control')
+    expect(await turns(page)).toBe(0)
+    await app.mod('z')
+    // turned on from the toolbar, it settles; and then Ctrl or Alt is what holds it off
+    await page.getByRole('button', { name: /Snap to grid: off/ }).click()
+    await expect(page.getByRole('button', { name: /Snap to grid: on/ })).toBeVisible()
+    await pull()
     expect(await turns(page)).toBe(0)
     expect((await saved(app)).runs).toEqual([])
     await app.mod('z')
+    await pull('Control')
     expect(await turns(page)).toBe(2)
-    const again = await centre(page, 's0')
-    await page.keyboard.down('Alt')
-    await app.drag(again, { x: again.x, y: again.y + down }, { steps: 8 })
-    await page.keyboard.up('Alt')
-    expect(await turns(page)).toBe(2)
-    expect((await saved(app)).runs).toEqual([4])
-    // and it can be switched off altogether, from the inspector
     await app.mod('z')
-    await page.getByRole('switch', { name: 'Snap lines into place while dragging' }).click()
-    const third = await centre(page, 's0')
-    await app.drag(third, { x: third.x, y: third.y + down }, { steps: 8 })
+    await pull('Alt')
     expect(await turns(page)).toBe(2)
   })
 
@@ -271,7 +277,6 @@ test.describe('snapping helps and gives way', () => {
     await open(page, app)
     await select(page, 0.1)
     const s = await centre(page, 's0'), cell = (await app.cells(0, 1)).y
-    await page.keyboard.down('Alt')
     await page.mouse.move(s.x, s.y); await page.mouse.down()
     // the side ends 0.85 of a cell below the middle: just past it the run is already going round, still under the pointer
     for (const dy of [0.5, 0.9, 1.0, 1.3, 2]) {
@@ -279,7 +284,7 @@ test.describe('snapping helps and gives way', () => {
       await page.mouse.move(p.x, p.y, { steps: 4 })
       expect(await gap(page, p), `under the pointer ${dy} cells down`).toBeLessThanOrEqual(1.5)
     }
-    await page.mouse.up(); await page.keyboard.up('Alt')
+    await page.mouse.up()
     expect((await saved(app)).runs).toHaveLength(3)
   })
 })

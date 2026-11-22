@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { docOf, edge, node } from '../test/helpers'
 import { routeAll } from './router'
-import { type Track, addBend, bendAt, dragRun, dragTurn, isManual, isShaped, keepPath, lineUpEnds, nearestRun, removeBend, shifted, simplify, snapRun, straighten, straightness, trackOf, unbend, unshaped, withTrack } from './shape'
+import { KINK, type Track, addBend, alignRun, bendAt, dragRun, dragTurn, isManual, isShaped, keepPath, lineUpEnds, nearestRun, removeBend, shifted, simplify, snapRun, straighten, straightness, tidyKinks, trackOf, unbend, unshaped, withTrack } from './shape'
 import type { EdgeT, NodeT } from './types'
 
 const N = (id: string, x: number, y: number, extra: Partial<NodeT> = {}) => node(id, 'ec2', x, y, extra)
@@ -390,5 +390,77 @@ describe('lining two components up', () => {
     expect(d.nodes).toEqual(level.nodes)
     expect(d.edges[0].runs).toEqual([])
     expect(lineUpEnds(level, 'nope')).toBe(level)
+  })
+})
+
+describe('a run brought all but level with its neighbour is level', () => {
+  const zig: Track = { ...z, runs: [3, 7, 6] } // runs stand at y 1, x 3, y 7, x 6, y 5
+  it('catches only the lines the neighbouring runs of the same connection stand on, and only from very close', () => {
+    expect(alignRun(zig, a, b, 2, 1.04, 0.1)).toBe(1)
+    expect(alignRun(zig, a, b, 2, 4.95, 0.1)).toBe(5)
+    expect(alignRun(zig, a, b, 1, 5.93, 0.1)).toBe(6)
+    // a deliberate small offset is outside it, and so is everything that is not a neighbour: a half cell, a component's middle
+    expect(alignRun(zig, a, b, 2, 1.2, 0.1)).toBeNull()
+    expect(alignRun(zig, a, b, 2, 3.5, 0.1)).toBeNull()
+    expect(alignRun({ ...z, fromAt: 0.5 }, a, b, 0, 1.01, 0.1)).toBeNull()
+    // the nearer of two wins
+    expect(alignRun({ ...z, runs: [3, 5.1, 6] }, a, b, 2, 5.06, 0.2)).toBe(5)
+  })
+  it('never to a line the run could not stand on: past the corner of its component, or inside one', () => {
+    // b's end is at y = 5, well past the corner of a, whose side only reaches y = 1.85
+    expect(alignRun(z, a, b, 0, 4.98, 0.1)).toBeNull()
+    expect(alignRun(z, a, N('b', 8, 0.5), 0, 1.48, 0.1)).toBe(1.5)
+    // the first turn stays outside a: a run level with something nearer than that is not on offer
+    expect(alignRun({ ...z, runs: [5, 3, 2.1, 4, 6] }, a, b, 1, 2.12, 0.1)).toBeNull()
+    expect(alignRun({ ...z, runs: [3, 3, 7.9, 4, 6] }, a, b, 5, 7.88, 0.1)).toBeNull()
+  })
+  it('with no tolerance there is no help at all', () => {
+    expect(alignRun(zig, a, b, 2, 1.001, 0)).toBeNull()
+  })
+  it('once caught it holds a little further than it catches, so it cannot flicker at the edge, and then lets go', () => {
+    expect(alignRun(zig, a, b, 2, 1.13, 0.1)).toBeNull()
+    expect(alignRun(zig, a, b, 2, 1.13, 0.1, 1)).toBe(1)
+    expect(alignRun(zig, a, b, 2, 1.16, 0.1, 1)).toBeNull()
+    // what it was on must still be one of its lines
+    expect(alignRun(zig, a, b, 2, 1.13, 0.1, 1.1)).toBeNull()
+  })
+  it('the value handed back is the neighbour itself, so the turn between them drops out exactly', () => {
+    const v = alignRun(zig, a, b, 2, 1.03, 0.1)!
+    expect(simplify(dragRun(zig, a, b, 2, v), a, b).runs).toEqual([6])
+  })
+})
+
+describe('cleaning the small kinks out of a line', () => {
+  const D = (e: Partial<EdgeT>, nodes: NodeT[] = [a, b]) => docOf(nodes, [edge('e', 'a', 'b', e)])
+  const cleaned = (e: Partial<EdgeT>, nodes?: NodeT[]) => tidyKinks(D(e, nodes), ['e'])
+  it('a hair of a step in the middle of a line goes, and the rest of the line stays exactly as it was', () => {
+    const r = cleaned({ fromSide: 'e', toSide: 'w', fromAt: 0, toAt: 0, runs: [3, 1.04, 5, 3, 6] })
+    expect(r.tidied).toBe(1)
+    expect(r.doc.edges[0]).toMatchObject({ fromAt: 0, toAt: 0, runs: [5, 3, 6] })
+  })
+  it('an end of the line stays where it is on its component: the run beside it is the one that moves', () => {
+    const r = cleaned({ fromSide: 'e', toSide: 'w', fromAt: 0, toAt: 0, runs: [3, 7, 6, 4.95, 7] })
+    expect(r.doc.edges[0]).toMatchObject({ toAt: 0, runs: [3, 7, 6] })
+  })
+  it('a line that is one small step between two facing sides becomes straight', () => {
+    const level = N('b', 8, 0.05)
+    const r = cleaned({ fromSide: 'e', toSide: 'w', fromAt: 0, toAt: 0, runs: [5] }, [a, level])
+    expect(r.doc.edges[0]).toMatchObject({ runs: [] })
+    expect(routeAll(r.doc.nodes, r.doc.edges).get('e')!.pts).toHaveLength(2)
+  })
+  it('a step somebody made is left alone, and so is a line with none', () => {
+    const made = D({ fromSide: 'e', toSide: 'w', fromAt: 0, toAt: 0, runs: [3, 1 + KINK * 2, 5, 3, 6] })
+    expect(tidyKinks(made, ['e'])).toEqual({ doc: made, tidied: 0 })
+    const plain = D({ fromSide: 'e', toSide: 'w', fromAt: 0, toAt: 0, runs: [5] })
+    expect(tidyKinks(plain, ['e']).doc).toBe(plain)
+  })
+  it('only the lines asked about are looked at, and lines that are not right-angled have nothing to clean', () => {
+    const kinked: Partial<EdgeT> = { fromSide: 'e', toSide: 'w', fromAt: 0, toAt: 0, runs: [3, 1.04, 5, 3, 6] }
+    expect(tidyKinks(D(kinked), ['other']).tidied).toBe(0)
+    expect(tidyKinks(D({ shape: 'curved' }), ['e']).tidied).toBe(0)
+  })
+  it('several kinks in one line all go in one pass', () => {
+    const r = cleaned({ fromSide: 'e', toSide: 'w', fromAt: 0, toAt: 0, runs: [3, 1.04, 4, 1.08, 5, 3, 6] })
+    expect(r.doc.edges[0].runs).toEqual([5, 3, 6])
   })
 })

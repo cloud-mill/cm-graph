@@ -2,35 +2,8 @@ import { describe, expect, it } from 'vitest'
 import { alignGuides, spacingGaps } from './guides'
 import { lineUp, spaceEvenly } from './layout'
 import { findPath, routeAll, routePair, routeToPoint } from './router'
-import { clearOf, doorNear, magnet, portsOf, reachTo, soft } from './snap'
+import { clearOf, doorNear, magnet, portsOf, reachTo } from './snap'
 import { docOf, edge, node } from '../test/helpers'
-
-describe('soft: magnetic rounding', () => {
-  it('is the grid line at a grid line and halfway at halfway', () => {
-    for (const v of [-3, 0, 1, 7]) expect(soft(v)).toBe(v)
-    expect(soft(0.5)).toBeCloseTo(0.5, 10)
-    expect(soft(2.5)).toBeCloseTo(2.5, 10)
-  })
-  it('lingers near each line: a quarter of the way out it has gone much less than a quarter', () => {
-    expect(soft(1.25) - 1).toBeLessThan(0.17)
-    expect(soft(1.25) - 1).toBeGreaterThan(0)
-    expect(2 - soft(1.75)).toBeLessThan(0.17)
-  })
-  it('never jumps and never goes backwards, across cells and through zero', () => {
-    let last = soft(-2)
-    for (let v = -2; v <= 2; v += 0.01) {
-      const s = soft(v)
-      expect(s).toBeGreaterThanOrEqual(last - 1e-9)
-      expect(s - last).toBeLessThan(0.02) // a hundredth of a cell of pointer never moves it more than two
-      last = s
-    }
-  })
-  it('works on a finer grid', () => {
-    expect(soft(0.75, 0.5)).toBeCloseTo(0.75, 10)
-    expect(soft(1, 0.5)).toBe(1)
-    expect(soft(0.6, 0.5) - 0.5).toBeLessThan(0.1)
-  })
-})
 
 describe('doors and reach', () => {
   const n = node('a', 'ec2', 2, 4)

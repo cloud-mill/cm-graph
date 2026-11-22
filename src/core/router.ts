@@ -1,4 +1,4 @@
-import { type EdgeT, type NodeT, type Side, footOf } from './types'
+import { type Doc, type EdgeT, type NodeT, type Side, footOf } from './types'
 
 /**
  * Connection routing on the ground plane.
@@ -184,8 +184,11 @@ export function findPath(s: W, sd: W, t: W, td: W, blocks: Rect[], lane = 0): W[
   }
   out = tidy(out)
   if (cache.size > 3000) { aged = cache; cache = new Map() }
-  cache.set(key, out.map((q) => [r3(q[0] - s[0]), r3(q[1] - s[1])] as W))
-  return out
+  // what is handed back is what the memory of it would hand back, so the same question always has the same answer,
+  // the first time it is asked and every time after: a line must not shift by a hair between a drag and its release
+  const rel = out.map((q) => [r3(q[0] - s[0]), r3(q[1] - s[1])] as W)
+  cache.set(key, rel)
+  return rel.map((q) => [r3(q[0] + s[0]), r3(q[1] + s[1])] as W)
 }
 
 // ---- whole diagram ---------------------------------------------------------------------
@@ -208,7 +211,8 @@ const opposite = (a: Side, b: Side) => DIR[a][0] + DIR[b][0] === 0 && DIR[a][1] 
 const beyond = (ra: Rect, s: Side, rb: Rect) => (s === 'e' ? rb.x0 > ra.x1 : s === 'w' ? rb.x1 < ra.x0 : s === 's' ? rb.y0 > ra.y1 : rb.y1 < ra.y0)
 /** how far the port at this end is out from its side, measured to `p` */
 const outBy = (r: Rect, s: Side, p: W) => (s === 'e' ? p[0] - r.x1 : s === 'w' ? r.x0 - p[0] : s === 's' ? p[1] - r.y1 : r.y0 - p[1])
-const put = (end: End, r: Rect, c: number) => { const off = r3(c - centreOn(r, end.side)); end.port = portAt(r, end.side, off); end.out = portAt(r, end.side, off, STUB) }
+const whole = (p: W): W => [r3(p[0]), r3(p[1])]
+const put = (end: End, r: Rect, c: number) => { const off = r3(c - centreOn(r, end.side)); end.port = whole(portAt(r, end.side, off)); end.out = whole(portAt(r, end.side, off, STUB)) }
 
 /** Nothing but the two components themselves stands on the straight run from `p` to `q`. */
 function clearRun(p: W, q: W, blocks: Rect[], skip: Rect[]): boolean {
@@ -245,6 +249,33 @@ function tracked(a: End, b: End, ra: Rect, rb: Rect, runs: number[]): W[] | null
   return pts
 }
 
+/** What a plan was made for. While this still describes the connection and its two components, the plan stands. */
+export function planKey(e: EdgeT, a: Box, b: Box): string {
+  return [e.from, a.x, a.y, footOf(a), e.to, b.x, b.y, footOf(b), e.fromSide ?? '', e.toSide ?? '', e.fromAt ?? '', e.toAt ?? ''].join(',')
+}
+/** The router owns this line's path: it is right-angled and the user has not given it a track of their own. */
+export const routerOwns = (e: EdgeT) => !e.shape && !e.runs && !e.via?.length
+
+/**
+ * The diagram with every line the router owns carrying the path planned for it. A line whose plan still stands is
+ * not touched, so a path once planned stays as it is until one of its own two components moves or changes size.
+ * This is what makes automatic routing something that happens once, when it is called for, and not a process that
+ * keeps running behind the user's back.
+ */
+export function withPlans(doc: Doc): Doc {
+  const byId = new Map(doc.nodes.map((n) => [n.id, n]))
+  const stale = (e: EdgeT) => { const a = byId.get(e.from), b = byId.get(e.to); return !!a && !!b && e.from !== e.to && routerOwns(e) && e.plan?.key !== planKey(e, a, b) }
+  if (!doc.edges.some(stale)) return doc
+  const routes = routeAll(doc.nodes, doc.edges)
+  return {
+    ...doc,
+    edges: doc.edges.map((e) => {
+      const r = stale(e) ? routes.get(e.id) : null
+      return r ? { ...e, plan: { pts: r.pts, fromSide: r.fromSide, toSide: r.toSide, key: planKey(e, byId.get(e.from)!, byId.get(e.to)!) } } : e
+    }),
+  }
+}
+
 /** Routes for every connection in the diagram, keyed by connection id. */
 export function routeAll(nodes: NodeT[], edges: EdgeT[]): Map<string, Routed> {
   const byId = new Map(nodes.map((n) => [n.id, n]))
@@ -252,19 +283,24 @@ export function routeAll(nodes: NodeT[], edges: EdgeT[]): Map<string, Routed> {
   const live = edges.filter((e) => byId.has(e.from) && byId.has(e.to) && e.from !== e.to)
   const sided = live.filter((e) => e.shape !== 'direct')
   const viaOf = (e: EdgeT) => (e.shape || e.runs ? [] : e.via ?? [])
+  // a plan that still stands is the line: it is drawn as it was planned, whatever has happened elsewhere since
+  const plans = new Map<string, NonNullable<EdgeT['plan']>>()
+  for (const e of sided) if (routerOwns(e) && e.plan && e.plan.pts.length >= 2 && e.plan.key === planKey(e, byId.get(e.from)!, byId.get(e.to)!)) plans.set(e.id, e.plan)
 
   // 1. which side each end uses
   const ends = new Map<string, { a: End; b: End }>()
   for (const e of sided) {
     const ra = rects.get(e.from)!, rb = rects.get(e.to)!
-    const via = viaOf(e)
+    const via = viaOf(e), plan = plans.get(e.id)
     const ta = via.length ? via[0] : mid(rb), tb = via.length ? via[via.length - 1] : mid(ra)
-    const sa = e.fromSide ?? facing(ra, ta, via.length ? undefined : rb), sb = e.toSide ?? facing(rb, tb, via.length ? undefined : ra)
+    const sa = plan?.fromSide ?? e.fromSide ?? facing(ra, ta, via.length ? undefined : rb), sb = plan?.toSide ?? e.toSide ?? facing(rb, tb, via.length ? undefined : ra)
     const along = (s: Side, t: W) => (horizontal(s) ? t[1] : t[0])
     const at = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : undefined)
+    // an end whose plan stands sits where the plan put it, just as one the user placed sits where they put it
+    const planned = (s: Side, r: Rect, p: W | undefined) => (p ? r3(across(s, p) - centreOn(r, s)) : undefined)
     ends.set(e.id, {
-      a: { edge: e.id, node: e.from, side: sa, toward: along(sa, ta), port: [0, 0], out: [0, 0], lane: 0, at: at(e.fromAt), mates: 1, list: [] },
-      b: { edge: e.id, node: e.to, side: sb, toward: along(sb, tb), port: [0, 0], out: [0, 0], lane: 0, at: at(e.toAt), mates: 1, list: [] },
+      a: { edge: e.id, node: e.from, side: sa, toward: along(sa, ta), port: [0, 0], out: [0, 0], lane: 0, at: planned(sa, ra, plan?.pts[0]) ?? at(e.fromAt), mates: 1, list: [] },
+      b: { edge: e.id, node: e.to, side: sb, toward: along(sb, tb), port: [0, 0], out: [0, 0], lane: 0, at: planned(sb, rb, plan?.pts[plan.pts.length - 1]) ?? at(e.toAt), mates: 1, list: [] },
     })
   }
 
@@ -280,9 +316,16 @@ export function routeAll(nodes: NodeT[], edges: EdgeT[]): Map<string, Routed> {
     const gap = Math.min(0.5, (size * 0.76) / list.length)
     const centre = centreOn(r, list[0].side)
     const reach = size / 2 - EDGE
+    // An end that is already somewhere (the user placed it, or its plan stands) stays there. The rest take the places along
+    // the side that are still free, each the one nearest its own turn in the order, so no line is moved to make room for another
+    const slot = (i: number) => centre + (i - (list.length - 1) / 2) * gap
+    const fixed = list.filter((end) => end.at !== undefined).map((end) => centre + Math.max(-reach, Math.min(reach, end.at!)))
+    const free = list.map((_, i) => slot(i)).filter((v) => !fixed.some((f) => Math.abs(f - v) < gap * 0.4))
     list.forEach((end, i) => {
-      // an end the user placed keeps its turn in the order, so the others do not shuffle along when a line is taken in hand
-      put(end, r, end.at !== undefined ? centre + Math.max(-reach, Math.min(reach, end.at)) : centre + (i - (list.length - 1) / 2) * gap)
+      let c = slot(i)
+      if (end.at !== undefined) c = centre + Math.max(-reach, Math.min(reach, end.at))
+      else if (fixed.length && free.length) { const k = free.reduce((best, v, j) => (Math.abs(v - c) < Math.abs(free[best] - c) ? j : best), 0); c = free[k]; free.splice(k, 1) }
+      put(end, r, c)
       end.mates = list.length; end.list = list
       // Siblings leaving one side each turn in a channel of their own. Those heading the same way are nested:
       // the one that has furthest to go along the side turns last, so none of them has to cross another.
@@ -298,7 +341,7 @@ export function routeAll(nodes: NodeT[], edges: EdgeT[]): Map<string, Routed> {
   //    a little way from the middle, and never past a neighbour, so lines sharing a side keep their order
   const straight = new Set<string>()
   for (const e of sided) {
-    if (e.shape === 'curved' || viaOf(e).length || (e.runs && e.runs.length)) continue
+    if (e.shape === 'curved' || viaOf(e).length || (e.runs && e.runs.length) || plans.has(e.id)) continue
     const { a, b } = ends.get(e.id)!, ra = rects.get(e.from)!, rb = rects.get(e.to)!
     if (!opposite(a.side, b.side) || !beyond(ra, a.side, rb)) continue
     const ca = across(a.side, a.port), cb = across(b.side, b.port)
@@ -339,6 +382,8 @@ export function routeAll(nodes: NodeT[], edges: EdgeT[]): Map<string, Routed> {
       continue
     }
     const { a, b } = ends.get(e.id)!
+    const plan = plans.get(e.id)
+    if (plan) { out.set(e.id, { pts: plan.pts.map((p) => [p[0], p[1]] as W), leg: plan.pts.slice(1).map(() => 0), fromSide: plan.fromSide, toSide: plan.toSide, manual: false, shape: 'ortho' }); continue }
     const via = viaOf(e)
     let pts: W[] | null = null, leg: number[] = [], manual = false
     if (e.shape === 'curved') {

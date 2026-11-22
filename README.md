@@ -99,20 +99,38 @@ non-US region are priced at US rates and marked as estimates.
 
 ## Editing by hand
 
-The canvas is built around one idea: what is in your hand is drawn, not
-written. While something is being carried, resized or pulled, the blueprint
-itself does not change. The panels, the autosave and the undo history see one
-change, when it is let go; Escape before then puts everything back exactly.
+The canvas is built around two rules.
 
-- **Carrying.** A component follows the pointer the whole way, between grid
-  cells, leaning towards the cell it will land in. That cell is outlined, its
-  connections re-route under it as it goes, and it eases into place on release.
-  Two components never share ground: let go over another one and it lands in
-  the nearest free cell, which is the one the outline was already showing.
+**What is in your hand is drawn, not written.** While something is being
+carried, resized or pulled, the blueprint itself does not change. The panels,
+the autosave and the undo history see one change, when it is let go; Escape
+before then puts everything back exactly.
+
+**What is on screen when you let go is what stays.** The change that is written
+is the very thing that was being drawn at that moment. Nothing is rounded to a
+grid, pushed off a neighbour, eased into place or re-planned afterwards, and
+nothing that was not in your hand moves at all. There is one source of truth
+for where things are (the blueprint) and one moment at which it changes (the
+release); nothing else in the app writes positions. `e2e/free.spec.ts` holds
+the app to this by photographing the whole scene at the last frame of a drag
+and comparing it with the scene after release, and after zooming, panning,
+turning, selecting, unrelated edits, a reload, undo and redo.
+
+- **Carrying.** A component goes exactly as far as the pointer goes, and stays
+  where it is let go: five pixels is five pixels. It can stand anywhere,
+  including right against another component or on top of one. Its own
+  connections follow it as it goes; no other line changes.
+- **Snapping is a tool, and it starts off.** The magnet in the toolbar (or `S`)
+  turns it on: then components keep to whole cells as they are carried, sizes to
+  half cells, and a line being shaped settles on what it would line up with.
+  Holding Ctrl flips it for one drag. Even when it is on, it acts while you are
+  dragging, so letting go still changes nothing. Alt with the arrow keys moves
+  the selection a twentieth of a cell.
 - **Help while carrying.** A dashed line appears when it comes level with
-  another component, a capped measure marks gaps that have become equal, and a
-  group lights up when it is about to be joined. Shift keeps the move to one
-  axis, Alt carries a copy, and at the edge of the canvas the view moves on.
+  another component (it only says so; it does not move anything), a capped
+  measure marks gaps that have become equal, and a group lights up when it is
+  about to be joined. Shift keeps the move to one axis, Alt carries a copy, and
+  at the edge of the canvas the view moves on.
 - **Connecting.** Every component has four doors, one per side. They show when
   the pointer is over it (or, with a finger, when it is selected). Pull from a
   door and let go on or near another component: near is enough. The line in
@@ -130,8 +148,8 @@ change, when it is let go; Escape before then puts everything back exactly.
   touching), wraps it in a group, or duplicates it.
 
 `src/canvas/Canvas.tsx` holds the interaction; the geometry it leans on is pure
-and tested on its own in `src/core/snap.ts` (magnetic rounding, reach, doors,
-free cells), `src/core/guides.ts` (alignment and spacing) and
+and tested on its own in `src/core/snap.ts` (reach, doors),
+`src/core/guides.ts` (alignment and spacing) and
 `src/core/router.ts` (routes, which are remembered relative to where they
 start, so carrying a whole group re-plans nothing).
 
@@ -193,19 +211,46 @@ tests, not aspirations:
 
 - A run moves exactly as far as the pointer moves, from wherever across its
   width it was caught. Nothing is rounded to the grid.
-- Snapping is a few pixels wide (6 with a mouse, 10 with a finger), measured on
-  screen, so it is the same at every zoom. It draws a run onto the next run's
-  line, the middle of a component, or, more weakly, a half cell. Hold Alt to
-  drag without it, or switch it off in the inspector ("Snap").
+- One courtesy, always on: a run brought within a few pixels (4 with a mouse,
+  7 with a finger, measured on screen so it is the same at every zoom) of level
+  with the next run along *of the same connection* is level, exactly, and the
+  turn between them is gone. A hand that stops a pixel short does not leave a
+  hair of a kink. Once level it stays so until it is pulled half as far again,
+  so it cannot flicker. It knows no other lines: not the grid, not other
+  connections, not the middle of a component. It never moves the far end of the
+  line, and it happens in the hand, so letting go still changes nothing. Hold
+  Alt and it is off: the run goes exactly where it is put (`alignRun` in
+  `src/core/shape.ts`).
+- Snapping is a separate thing and starts off. With it on, a run within a few
+  pixels (6 with a mouse, 10 with a finger) of the middle of a component, the
+  line on which a single step could be straight, or, more weakly, a half cell,
+  settles there. Ctrl flips snapping for one drag.
+- A kink already in a diagram comes out the same way, by pulling the run a few
+  pixels towards level, or with "Clean up small kinks" (in a line's menu when
+  it has one, and in the command list for every line at once). That brings any
+  two runs within a tenth of a cell of each other onto one line, moving the run
+  that is not an end of the connection, and plans nothing afresh. A bigger step
+  is a step somebody made and is left alone (`tidyKinks`).
 - What is on screen when the pointer is let go is what is kept. Letting go,
   deselecting, reselecting and reloading never change the line.
 - Only the run in the hand moves. The one exception is asked for by the user: a
   single step between two facing sides, dropped on the line where its two ends
   can meet, becomes straight.
 
-**Whose line it is.** Every right-angled connection is either Automatic (the
-router plans it, and plans it again whenever things move) or Manual (it follows
-the track you left, stored as the position of each run in `src/core/shape.ts`).
+**Whose line it is.** Every right-angled connection is either Automatic or
+Manual, and neither kind is re-planned behind your back.
+
+An automatic line is planned once, when it is made, and the path is kept with
+it (`plan` on the connection, written by `withPlans` in `src/core/router.ts` as
+part of the edit that called for it). It is planned again only when one of its
+own two components moves or changes size, when you re-pin one of its ends, or
+when you ask ("Route automatically"). A component dropped across it, another
+line joining the same side, anything moving elsewhere: none of these touch it.
+A new line on a side takes a place that is free there; it does not shuffle the
+lines already on it. There is no routing running in the background.
+
+A manual line follows the track you left, stored as the position of each run
+(`src/core/shape.ts`).
 Dragging any part of an automatic line makes it manual in the same gesture,
 with the line exactly where it was. "Keep this path" does the same without
 moving anything, and "Route automatically" hands it back. The bar above a

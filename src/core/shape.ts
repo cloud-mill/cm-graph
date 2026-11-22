@@ -95,6 +95,69 @@ export function snapRun(t: Track, a: NodeT, b: NodeT, run: number, v: number, pu
 }
 
 /**
+ * The line a run in the hand is all but on already, or null. This is not snapping to a grid and not routing: the only
+ * lines it knows are the ones the neighbouring runs of this same connection stand on, because a run brought level with
+ * the next one along is a turn the user is taking out, and a hair short of level is a kink nobody meant. `tol` is in
+ * cells and is a few pixels' worth. Once caught (`held` is the line it was on a moment ago) it stays until it has been
+ * pulled half as far again, so it cannot flicker at the edge. Nothing else about the connection is touched.
+ */
+export function alignRun(t: Track, a: NodeT, b: NodeT, run: number, v: number, tol: number, held?: number): number | null {
+  if (!(tol > 0)) return null
+  const L = coordsOf(t, a, b)
+  const last = L.length - 1
+  // only a line the run can actually stand on: an end has to stay on its side, and the first and last turn outside their components
+  const can = (m: number) => {
+    if (run === 0 || run === last) { const n = run === 0 ? a : b; return Math.abs(m - centreOn(n, run === 0 ? t.fromSide : t.toSide)) <= reach(n) + 1e-9 }
+    return (run !== 1 || same(outward(a, t.fromSide, m), m)) && (run !== last - 1 || same(outward(b, t.toSide, m), m))
+  }
+  const marks = [L[run - 2], L[run + 2]].filter((m): m is number => m !== undefined && can(m))
+  if (held !== undefined && marks.some((m) => same(m, held)) && Math.abs(held - v) <= tol * 1.5) return held
+  let best: number | null = null
+  for (const m of marks) if (Math.abs(m - v) <= tol && (best === null || Math.abs(m - v) < Math.abs(best - v))) best = m
+  return best
+}
+
+/** How small a step in a line has to be for cleaning up to take it for a slip of the hand: a tenth of a cell. */
+export const KINK = 0.1
+
+/**
+ * Take the small kinks out of these connections: wherever two runs going the same way stand within `tol` of each
+ * other, with a short step between them, one is brought onto the other's line and the step is gone. An end of the
+ * line stays where it is on its component when the run beside it can move instead; nothing is planned afresh, and a
+ * step bigger than `tol` is a step somebody made and is left alone.
+ */
+export function tidyKinks(doc: Doc, ids: string[], tol = KINK): { doc: Doc; tidied: number } {
+  const routes = routeAll(doc.nodes, doc.edges), byId = new Map(doc.nodes.map((n) => [n.id, n]))
+  let tidied = 0
+  const edges = doc.edges.map((e) => {
+    const r = routes.get(e.id), a = byId.get(e.from), b = byId.get(e.to)
+    const from = ids.includes(e.id) && r && a && b ? trackOf(r, a, b) : null
+    if (!from || !a || !b) return e
+    let t = from.track, changed = false
+    for (let guard = 0; guard < 32; guard++) {
+      const L = coordsOf(t, a, b), last = L.length - 1
+      // the smallest first, and for each the run that is not an end of the line is the one to move
+      const kinks = L.map((v, i) => ({ i, d: i + 2 <= last ? Math.abs(L[i + 2] - v) : Infinity })).filter((k) => k.d <= tol && !same(k.d, 0)).sort((p, q) => p.d - q.d)
+      let next: Track | null = null
+      for (const { i } of kinks) {
+        const tries = i + 2 === last ? [[i, i + 2], [i + 2, i]] : [[i + 2, i], [i, i + 2]]
+        for (const [move, to] of tries) {
+          const made = simplify(dragRun(t, a, b, move, L[to]), a, b)
+          if (made.runs.length < t.runs.length) { next = made; break }
+        }
+        if (next) break
+      }
+      if (!next) break
+      t = next; changed = true
+    }
+    if (!changed) return e
+    tidied++
+    return withTrack(e, t)
+  })
+  return tidied ? { doc: { ...doc, edges }, tidied } : { doc, tidied: 0 }
+}
+
+/**
  * The track with run `run` moved sideways to `v`. Run 0 is the one that leaves the first component.
  * Only that run moves, and it moves to exactly `v` wherever a line can be there at all:
  *  - an end run slides its end along the side, and past the corner steps out and round to stay under the hand;
@@ -214,13 +277,13 @@ export function simplify(t: Track, a: NodeT, b: NodeT): Track {
 
 /** A connection carrying the given track. Anything that described its path another way is dropped. */
 export const withTrack = (e: EdgeT, t: Track): EdgeT => {
-  const { via: _v, shape: _s, ...rest } = e
+  const { via: _v, shape: _s, plan: _p, ...rest } = e
   return { ...rest, fromSide: t.fromSide, toSide: t.toSide, fromAt: t.fromAt, toAt: t.toAt, runs: t.runs }
 }
 
 /** A connection with no path of its own: the router decides. Its drawing style (`shape`) is kept unless asked otherwise. */
 export const unshaped = (e: EdgeT, keepShape = true): EdgeT => {
-  const { via: _v, runs: _r, fromAt: _a, toAt: _b, fromSide: _f, toSide: _t, shape, ...rest } = e
+  const { via: _v, runs: _r, fromAt: _a, toAt: _b, fromSide: _f, toSide: _t, plan: _p, shape, ...rest } = e
   return keepShape && shape ? { ...rest, shape } : rest
 }
 

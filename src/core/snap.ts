@@ -1,27 +1,14 @@
 import { type NodeT, type Side, footOf } from './types'
 
 /**
- * The small pieces of judgement that make direct manipulation feel right:
- * where a dragged thing wants to settle, what a connection being drawn is
- * reaching for, and where a component's doors are.
+ * The small pieces of judgement around direct manipulation: what a connection
+ * being drawn is reaching for, and where a component's doors are.
  *
  * All of it is pure geometry on the ground plane, so it behaves the same at
  * any zoom or camera angle and can be tested without a screen.
  */
 
 export type W = [number, number]
-
-/**
- * Magnetic rounding. What is being dragged follows the pointer the whole way,
- * but lingers near each grid line and hurries across the gap between two, so
- * it feels drawn to where it will land without ever jumping there.
- * Continuous everywhere: at a grid line it is the grid line, halfway it is halfway.
- */
-export function soft(v: number, step = 1, pull = 1.7): number {
-  const s = Math.round(v / step) * step
-  const t = (v - s) / step // -0.5 … 0.5
-  return s + Math.sign(t) * 0.5 * Math.pow(Math.abs(t) * 2, pull) * step
-}
 
 /** how far outside its footprint a component's doors sit */
 export const PORT_OUT = 0.42
@@ -69,10 +56,10 @@ const overlaps = (a: Box, ax: number, ay: number, b: Box) => {
 }
 
 /**
- * Where a set of components can actually be put down. Two components never
- * share ground, so if the spot asked for is taken the nearest free one is
- * offered instead: the answer is an offset to add to every one of them.
- * Searched outwards ring by ring, so it is always the closest that fits.
+ * The nearest place to the one asked for where a set of components stands clear of the rest:
+ * the answer is an offset to add to every one of them. Searched outwards ring by ring, so it is
+ * always the closest that fits. Only ever used when the app is choosing a place itself (lining
+ * two components up, for one): a component the user puts down goes exactly where they put it.
  */
 export function clearOf(moving: Box[], still: Box[], dx: number, dy: number, step = 1, rings = 8): [number, number] {
   const fits = (ox: number, oy: number) => !moving.some((m) => still.some((s) => overlaps(m, m.x + ox, m.y + oy, s)))

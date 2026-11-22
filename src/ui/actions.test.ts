@@ -4,8 +4,9 @@ import { cam } from '../canvas/camera'
 import { CATALOG_LIST, equivalent, providerOf } from '../core/catalog'
 import { decodeShare, listSnapshots } from '../core/storage'
 import { useStore } from '../core/store'
-import { docOf, node, resetStore } from '../test/helpers'
-import { addAtCenter, fitAreaToContents, saveVersion, selectAll, shareUrl, tidy, translateTo, wrapSelectionInArea } from './actions'
+import type { EdgeT } from '../core/types'
+import { docOf, edge, node, resetStore } from '../test/helpers'
+import { addAtCenter, cleanLines, fitAreaToContents, saveVersion, selectAll, shareUrl, tidy, translateTo, wrapSelectionInArea } from './actions'
 
 const S = () => useStore.getState()
 beforeEach(() => { resetStore(); Object.assign(cam, { w: 1200, h: 800, left: 0, top: 0 }) })
@@ -84,5 +85,32 @@ describe('versions and sharing', () => {
     const back = await decodeShare(url.split('#/s/')[1])
     expect(back).toMatchObject({ name: 'Linked' })
     expect(back!.nodes[0]).toMatchObject({ name: 'web', x: 3, y: 4 })
+  })
+})
+
+describe('cleanLines', () => {
+  const kinked: Partial<EdgeT> = { fromSide: 'e', toSide: 'w', fromAt: 0, toAt: 0, runs: [3, 1.04, 5, 3, 6] }
+  const made: Partial<EdgeT> = { fromSide: 'e', toSide: 'w', fromAt: 0, toAt: 0, runs: [3, 1.5, 5, 3, 6] }
+  const two = () => docOf([node('a', 'ec2', 0, 0), node('b', 'rds', 8, 4), node('c', 'ec2', 0, 10), node('d', 'rds', 8, 14)], [edge('e', 'a', 'b', kinked), edge('f', 'c', 'd', { ...kinked, runs: [3, 11.04, 5, 13, 6] })])
+
+  it('takes the small kinks out of the lines picked, as one undo step, and says how many', () => {
+    resetStore({ doc: two(), selection: ['e', 'a'] })
+    cleanLines()
+    expect(S().doc.edges.map((e) => e.runs)).toEqual([[5, 3, 6], [3, 11.04, 5, 13, 6]])
+    expect(S().toasts.at(-1)!.text).toBe('Straightened 1 line')
+    expect(S().past).toHaveLength(1)
+  })
+  it('with no line picked it goes through all of them', () => {
+    resetStore({ doc: two(), selection: [] })
+    cleanLines()
+    expect(S().doc.edges.map((e) => e.runs)).toEqual([[5, 3, 6], [5, 13, 6]])
+    expect(S().toasts.at(-1)!.text).toBe('Straightened 2 lines')
+  })
+  it('leaves a step somebody made alone, says so, and makes no undo step', () => {
+    resetStore({ doc: docOf([node('a', 'ec2', 0, 0), node('b', 'rds', 8, 4)], [edge('e', 'a', 'b', made)]) })
+    cleanLines(['e'])
+    expect(S().doc.edges[0].runs).toEqual([3, 1.5, 5, 3, 6])
+    expect(S().toasts.at(-1)!.text).toBe('No small kinks to take out')
+    expect(S().past).toHaveLength(0)
   })
 })

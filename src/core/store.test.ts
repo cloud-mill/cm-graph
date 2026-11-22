@@ -167,7 +167,7 @@ describe('adding things', () => {
     resetStore({ doc: docOf([node('a'), node('b'), node('c')]) })
     const id = S().addEdge('a', 'b')!
     // a new line says what it most likely is and that it was drawn by hand
-    expect(S().doc.edges).toEqual([{ id, from: 'a', to: 'b', style: 'solid', arrow: 'end', width: 2, kind: 'request', origin: 'drawn' }])
+    expect(S().doc.edges).toEqual([{ id, from: 'a', to: 'b', style: 'solid', arrow: 'end', width: 2, kind: 'request', origin: 'drawn', plan: expect.objectContaining({ fromSide: expect.any(String) }) }])
     expect(S().addEdge('a', 'b')).toBeNull()
     expect(S().addEdge('b', 'a')).toBeNull()
     expect(S().addEdge('a', 'a')).toBeNull()
@@ -732,4 +732,42 @@ describe('adding something already connected', () => {
     expect(S().doc.nodes.map((n) => n.id)).toEqual(['a', 'b', one, two])
     expect(S().doc.edges).toHaveLength(1)
   })
+})
+
+describe('paths are planned as part of the edit that calls for them', () => {
+  it('a new connection is planned when it is made, an old blueprint when it is opened, and neither again after', () => {
+    resetStore({ doc: docOf([node('a'), node('b', 'ec2', 8, 4), node('c', 'ec2', 0, 8)]) })
+    S().addEdge('a', 'b')
+    const first = S().doc.edges[0]
+    expect(first.plan!.pts.length).toBeGreaterThan(1)
+    // unrelated edits leave the very same connection object in place
+    S().addNode('rds', 4, 2)
+    S().patchNode('c', { name: 'renamed' })
+    S().nudge(0, 0)
+    expect(S().doc.edges[0]).toBe(first)
+    // moving one of its own ends plans it again, in that same step
+    S().select(['b'])
+    S().nudge(1, 0)
+    expect(S().doc.edges[0].plan!.key).not.toBe(first.plan!.key)
+    expect(S().past.at(-1)!.edges[0]).toBe(first)
+    // undo brings back the plan it had, not a fresh one
+    S().undo()
+    expect(S().doc.edges[0]).toBe(first)
+    // opening a blueprint from before plans existed gives every line the path it is drawn with
+    S().load(docOf([node('a'), node('b', 'ec2', 8, 0)], [edge('e', 'a', 'b')]))
+    expect(S().doc.edges[0].plan).toMatchObject({ fromSide: 'e', toSide: 'w', pts: [[2, 1], [8, 1]] })
+    expect(S()).toMatchObject({ saved: true, past: [] })
+  })
+  it('handing a line back to the router plans it now, and keeps nothing of what it carried', () => {
+    resetStore({ doc: docOf([node('a'), node('b', 'ec2', 8, 4)], [edge('e', 'a', 'b')]) })
+    S().load(S().doc)
+    const planned = S().doc.edges[0].plan!
+    // something is dropped in its way: it stays as it was, until it is asked for again
+    S().addNode('rds', 4, 2)
+    expect(S().doc.edges[0].plan).toBe(planned)
+    S().resetRoute(['e'])
+    expect(S().doc.edges[0].plan!.pts).not.toEqual(planned.pts)
+    expect(S().doc.edges[0].runs).toBeUndefined()
+  })
+
 })

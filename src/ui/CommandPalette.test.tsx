@@ -147,6 +147,10 @@ describe('CommandPalette', () => {
     await run('back to all')
     expect(location.hash).toBe('#/')
   })
+  it('cleans the small kinks out of lines', async () => {
+    await run('kinks')
+    expect(S().toasts.at(-1)!.text).toBe('No small kinks to take out')
+  })
   it('tidies the layout as an undoable step', async () => {
     await run('tidy')
     expect(S().past).toHaveLength(1)

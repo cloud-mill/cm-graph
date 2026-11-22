@@ -43,7 +43,7 @@ test.describe('connections: routing', () => {
     expect(touches(pts.at(-1)!, b)).toBe(true)
   })
 
-  test('moving a component re-routes its automatic lines and leaves a hand-shaped one alone', async ({ page, app }) => {
+  test('a line is planned once: a component dropped in its way does not re-route it, and moving one of its own ends does', async ({ page, app }) => {
     const doc = PAIR({ via: [[5, 4]] }, [{ id: 'd', type: 's3', x: 0, y: 6, name: 'files' }])
     doc.edges.push({ id: 'auto', from: 'a', to: 'c', style: 'solid', arrow: 'end', width: 2 } as any)
     await app.open(doc)
@@ -53,10 +53,16 @@ test.describe('connections: routing', () => {
     const d = await box(app, 'd'), by = await cells(app, 4, -3)
     await page.mouse.click(d.x + d.width / 2, d.y + d.height / 2)
     await app.drag({ x: d.x + d.width / 2, y: d.y + d.height / 2 }, { x: d.x + d.width / 2 + by.x, y: d.y + d.height / 2 + by.y })
-    expect((await app.settled()).nodes.find((n: any) => n.id === 'd')).toMatchObject({ x: 4, y: 3 })
-    expect(await page.locator('.edge-hit[data-id="auto"]').getAttribute('d')).not.toBe(auto0)
-    // the shaped line still runs through its waypoint: only what the user did not fix may move
+    const moved = (await app.settled()).nodes.find((n: any) => n.id === 'd')!
+    expect(moved.x).toBeCloseTo(4, 1); expect(moved.y).toBeCloseTo(3, 1)
+    // neither line has anything to do with what moved, so neither changes: not the one the router planned, nor the one shaped by hand
+    expect(await page.locator('.edge-hit[data-id="auto"]').getAttribute('d')).toBe(auto0)
     expect((await E(app)).via).toEqual([[5, 4]])
+    expect(await page.locator('.edge-hit[data-id="e"]').getAttribute('d')).toBe(shaped0)
+    // moving one of the planned line's own ends is what re-plans it
+    const c = await box(app, 'c'), up = await cells(app, 0, -2)
+    await app.drag({ x: c.x + c.width / 2, y: c.y + c.height / 2 }, { x: c.x + c.width / 2 + up.x, y: c.y + c.height / 2 + up.y })
+    expect(await page.locator('.edge-hit[data-id="auto"]').getAttribute('d')).not.toBe(auto0)
     expect(await page.locator('.edge-hit[data-id="e"]').getAttribute('d')).toBe(shaped0)
   })
 
@@ -109,7 +115,8 @@ test.describe('connections: shaping by hand', () => {
     expect(((await app.saved())!.edges[0] as any).runs).toEqual(runs)
   })
 
-  test('one run moves on its own, and pulled back level with the ends the line is straight again', async ({ page, app }) => {
+  test('one run moves on its own, and with snapping on, pulled back level with the ends the line is straight again', async ({ page, app }) => {
+    await page.keyboard.press('s') // snapping is off until it is asked for
     await select(page)
     await pull(page, app, 's0', 0, 4)
     await pull(page, app, 's2', 0, -2)
@@ -198,6 +205,9 @@ test.describe('connections: meaning and flow', () => {
   test('an older blueprint with plain connections opens and routes without complaint', async ({ page, app }) => {
     await app.open(PAIR())
     await expect(page.locator('.edge-hit')).toHaveCount(1)
-    expect((await app.saved())!.edges[0]).toEqual({ id: 'e', from: 'a', to: 'b', style: 'solid', arrow: 'end', width: 2 })
+    // nothing about the connection is changed by opening it; it only gains the path that was planned for it, so that it is planned once
+    const { plan, ...rest } = (await app.saved())!.edges[0] as any
+    expect(rest).toEqual({ id: 'e', from: 'a', to: 'b', style: 'solid', arrow: 'end', width: 2 })
+    expect(plan.pts.length).toBeGreaterThanOrEqual(2)
   })
 })

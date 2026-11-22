@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { docOf, edge, node } from '../test/helpers'
-import { type W, along, facing, findPath, nearestSide, routeAll, routePair, straightBetween, tidy } from './router'
-import type { EdgeT, NodeT } from './types'
+import { along, facing, findPath, nearestSide, planKey, routeAll, routePair, routerOwns, straightBetween, tidy, type W, withPlans } from './router'
+import type { Doc, EdgeT, NodeT } from './types'
 
 const rect = (n: NodeT) => ({ x0: n.x, y0: n.y, x1: n.x + 2 * (n.scale ?? 1), y1: n.y + 2 * (n.scale ?? 1) })
 /** every run is horizontal or vertical */
@@ -371,4 +371,92 @@ describe('at scale', () => {
     expect(warm).toBeLessThan(cold)
     void docOf
   })
+})
+
+describe('a path is planned once', () => {
+  const a = node('a', 'ec2', 0, 0), b = node('b', 'ec2', 8, 4), c = node('c', 'ec2', 8, 0)
+  const pts = (d: Doc, id: string) => routeAll(d.nodes, d.edges).get(id)!.pts
+  it('every line the router owns is given the path planned for it, and following the plan draws the very same line', () => {
+    const d = docOf([a, b, c], [edge('e', 'a', 'b'), edge('f', 'a', 'c'), edge('m', 'a', 'b', { runs: [3], fromSide: 'e', toSide: 'w', fromAt: 0, toAt: 0 }), edge('k', 'a', 'c', { shape: 'curved' })])
+    const before = routeAll(d.nodes, d.edges)
+    const planned = withPlans(d)
+    expect(planned.edges[0].plan).toMatchObject({ fromSide: 'e', toSide: 'w', pts: before.get('e')!.pts })
+    expect(planned.edges[1].plan!.pts).toEqual(before.get('f')!.pts)
+    // a line with a track of its own, or one that is not right-angled, has no plan: it is not the router's
+    expect(planned.edges[2].plan).toBeUndefined()
+    expect(planned.edges[3].plan).toBeUndefined()
+    const after = routeAll(planned.nodes, planned.edges)
+    for (const id of ['e', 'f', 'm', 'k']) expect(after.get(id)!.pts).toEqual(before.get(id)!.pts)
+    expect(after.get('e')!.manual).toBe(false)
+    // and once everything is planned there is nothing more to do
+    expect(withPlans(planned)).toBe(planned)
+    expect(routerOwns(planned.edges[0])).toBe(true)
+    expect(routerOwns(planned.edges[2])).toBe(false)
+    expect(routerOwns(edge('v', 'a', 'b', { via: [[3, 3]] }))).toBe(false)
+  })
+  it('nothing else that happens re-plans it: a component dropped on it, a line added beside it, another component moved', () => {
+    const d = withPlans(docOf([a, b], [edge('e', 'a', 'b')]))
+    const was = pts(d, 'e')
+    // unplanned, the line would go round what now stands on it
+    const blocked = { ...d, nodes: [...d.nodes, node('x', 'ec2', 4, 2)] }
+    expect(pts({ ...blocked, edges: [edge('e', 'a', 'b')] }, 'e')).not.toEqual(was)
+    expect(pts(blocked, 'e')).toEqual(was)
+    expect(withPlans(blocked)).toBe(blocked)
+    // another line joining the same side takes a free place there and leaves this one where it is
+    const more = withPlans({ ...d, nodes: [...d.nodes, c], edges: [...d.edges, edge('f', 'a', 'c')] })
+    expect(pts(more, 'e')).toEqual(was)
+    expect(more.edges[0]).toBe(d.edges[0])
+    const pf = pts(more, 'f'), pe = pts(more, 'e')
+    expect(pf[0]).not.toEqual(pe[0])
+    // and a third: still nothing already there moves, and no two ends share a place
+    const third = withPlans({ ...more, nodes: [...more.nodes, node('g', 'ec2', 8, 9)], edges: [...more.edges, edge('h', 'a', 'g', { fromSide: 'e' })] })
+    expect(pts(third, 'e')).toEqual(pe)
+    expect(pts(third, 'f')).toEqual(pf)
+    const starts = ['e', 'f', 'h'].map((id) => pts(third, id)[0][1])
+    expect(new Set(starts).size).toBe(3)
+  })
+  it('is planned again only when one of its own two components moves or changes size, or its pinned side changes', () => {
+    const d = withPlans(docOf([a, b, c], [edge('e', 'a', 'b'), edge('f', 'a', 'c')]))
+    const moved = withPlans({ ...d, nodes: d.nodes.map((n) => (n.id === 'b' ? { ...n, y: 6.3 } : n)) })
+    expect(moved.edges[0].plan!.key).not.toBe(d.edges[0].plan!.key)
+    expect(pts(moved, 'e').at(-1)![1]).toBe(7.3)
+    // the other line, between two components that did not move, is the same object
+    expect(moved.edges[1]).toBe(d.edges[1])
+    const bigger = withPlans({ ...d, nodes: d.nodes.map((n) => (n.id === 'a' ? { ...n, scale: 1.5 } : n)) })
+    expect(bigger.edges[0].plan!.key).not.toBe(d.edges[0].plan!.key)
+    expect(bigger.edges[1].plan!.key).not.toBe(d.edges[1].plan!.key)
+    const pinned = withPlans({ ...d, edges: d.edges.map((e) => (e.id === 'e' ? { ...e, fromSide: 's' as const } : e)) })
+    expect(pinned.edges[0].plan!.fromSide).toBe('s')
+    expect(pinned.edges[1]).toBe(d.edges[1])
+  })
+  it('a plan made for a different arrangement is never followed, wherever it came from', () => {
+    const d = withPlans(docOf([a, b], [edge('e', 'a', 'b')]))
+    // the component moved, but the stale plan was left on the line (as a drag in progress does): it is drawn where it belongs now
+    const dragged = { ...d, nodes: d.nodes.map((n) => (n.id === 'b' ? { ...n, x: 9.37 } : n)) }
+    expect(pts(dragged, 'e').at(-1)).toEqual([9.37, 5])
+    expect(pts(dragged, 'e')).toEqual(pts(withPlans(dragged), 'e'))
+    // a plan with too few points, or for a line to a component that is gone, is ignored
+    const broken = { ...d, edges: [{ ...d.edges[0], plan: { ...d.edges[0].plan!, pts: [[0, 0]] as [number, number][] } }] }
+    expect(pts(broken, 'e')).toEqual(pts(d, 'e'))
+    const gone = { ...d, nodes: [a] }
+    expect(withPlans(gone)).toBe(gone)
+    expect(planKey(d.edges[0], a, b)).toBe(d.edges[0].plan!.key)
+  })
+
+  it('the same arrangement has the same route the first time it is worked out and every time after, off the grid as well as on it', () => {
+    // sizes and places with awkward fractions, as things have once they are put down freely
+    const nodes = [node('c', 'ec2', 0.137, 6.291, { scale: 1.218 }), node('g', 'ec2', 12.474, 3.278), node('x', 'ec2', 5.613, 4.907)]
+    const edges = [edge('e', 'c', 'g'), edge('f', 'x', 'g'), edge('h', 'c', 'x')]
+    const first = routeAll(nodes, edges)
+    for (let i = 0; i < 3; i++) {
+      const again = routeAll(nodes, edges)
+      for (const e of edges) expect(again.get(e.id)!.pts, e.id).toEqual(first.get(e.id)!.pts)
+    }
+    // every run is still exactly along or across: no hairline step where a remembered route meets its end
+    for (const r of first.values()) expect(square(r.pts)).toBe(true)
+    // and planning it changes nothing
+    const d = withPlans(docOf(nodes, edges))
+    for (const e of edges) expect(routeAll(d.nodes, d.edges).get(e.id)!.pts).toEqual(first.get(e.id)!.pts)
+  })
+
 })

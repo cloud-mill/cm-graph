@@ -3,6 +3,7 @@ import { act, fireEvent, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { CATALOG, costOf, docCost, money, providerOf } from '../core/catalog'
+import { getPref } from '../core/storage'
 import { useStore } from '../core/store'
 import { TEMPLATES } from '../core/templates'
 import { docOf, edge, node, resetStore } from '../test/helpers'
@@ -452,12 +453,16 @@ describe('connection: what it is and how it runs', () => {
     expect(manual()).toBeDisabled()
     expect(screen.queryByRole('switch', { name: /Snap lines/ })).toBeNull()
   })
-  it('snapping while a line is dragged can be turned off', async () => {
+  it('snapping starts off and can be turned on, and the choice is remembered', async () => {
     show(doc(), ['e'])
-    const snap = screen.getByRole('switch', { name: 'Snap lines into place while dragging' })
-    expect(snap).toBeChecked()
+    const snap = screen.getByRole('switch', { name: 'Snap into place while dragging' })
+    expect(snap).not.toBeChecked()
     await userEvent.click(snap)
-    expect(S().snapLines).toBe(false)
+    expect(S().snap).toBe(true)
+    expect(getPref('snap', false)).toBe(true)
+    await userEvent.click(snap)
+    expect(S().snap).toBe(false)
+    expect(getPref('snap', false)).toBe(false)
   })
   it('a line that was shaped by hand says so, and one click makes it straight again', async () => {
     show(doc({ fromSide: 'e', toSide: 'w', fromAt: 0, toAt: 0, runs: [2.5, 4, 7.5] }), ['e'])

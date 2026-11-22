@@ -34,7 +34,11 @@ test.describe('phone: connections', () => {
     await fingers.tap(await middle(page))
     const before = await app.corner('a'), run = await centre(page, 's0'), d = await app.cells(0, 4)
     await fingers.drag(run, { x: run.x + d.x, y: run.y + d.y }, { steps: 12 })
-    expect((await E(app)).runs).toEqual([2.5, 5, 5.5]) // out of web-1, along four cells from where it was, in to orders-db
+    // out of web-1, along four cells from where it was (as near as a finger in whole pixels comes), in to orders-db
+    const runs = (await E(app)).runs
+    expect(runs).toHaveLength(3)
+    expect([runs[0], runs[2]]).toEqual([2.5, 5.5])
+    expect(Math.abs(runs[1] - 5)).toBeLessThan(0.15)
     expect(await app.corner('a')).toEqual(before) // the canvas did not pan under the finger
     await dock(page).getByRole('button', { name: 'Straighten' }).tap()
     expect((await E(app)).runs).toEqual([])

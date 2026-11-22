@@ -1,8 +1,7 @@
 import { useEffect, useMemo, useRef } from 'react'
 import {
   Activity, Box, ChevronLeft, Home, PanelLeft, PanelRight, Rotate3d, RotateCcw, RotateCw, CircleHelp, Command, Download, Grid3x3, History, Layers, LayoutGrid, Minus, Moon, MousePointer2,
-  Plus, Redo2, Scan, Share2, SquareDashed, Sun, Tag, Type, Undo2, Upload, Waypoints, X,
-} from 'lucide-react'
+  Plus, Redo2, Scan, Share2, SquareDashed, Sun, Tag, Type, Undo2, Upload, Waypoints, X, Magnet } from 'lucide-react'
 import { Canvas } from '../canvas/Canvas'
 import { animateView, beginOrbit, cam, fitView, hud, orbitTo, setFlat, turn, viewHome, viewTop, zoomBy } from '../canvas/camera'
 import { sceneBounds } from '../canvas/Scene'
@@ -115,6 +114,7 @@ const TOOLS: { id: Tool; label: string; kbd: string; icon: any }[] = [
 function Toolbar() {
   const tool = useStore((s) => s.tool)
   const showGrid = useStore((s) => s.showGrid)
+  const snap = useStore((s) => s.snap)
   const showLabels = useStore((s) => s.showLabels)
   const flow = useStore((s) => s.flow)
   const s = useStore.getState()
@@ -126,6 +126,8 @@ function Toolbar() {
       <hr />
       <IconBtn title="Traffic animation" active={flow} onClick={() => s.set({ flow: !flow })}><Activity size={16} /></IconBtn>
       <IconBtn title="Grid" kbd="G" active={showGrid} onClick={() => s.set({ showGrid: !showGrid })}><Grid3x3 size={16} /></IconBtn>
+      {/* off, everything stays exactly where it is put. On, components keep to the grid and lines settle on what they line up with */}
+      <IconBtn title={snap ? 'Snap to grid: on' : 'Snap to grid: off'} kbd="S" active={snap} onClick={() => { setPref('snap', !snap); s.set({ snap: !snap }) }}><Magnet size={16} /></IconBtn>
       <IconBtn title="Component names" kbd="L" active={showLabels} onClick={() => s.set({ showLabels: !showLabels })}><Tag size={16} /></IconBtn>
       <hr />
       <IconBtn title="Tidy layout" onClick={tidy}><LayoutGrid size={16} /></IconBtn>
@@ -376,7 +378,8 @@ function useShortcuts() {
         else if (key === 'a') { e.preventDefault(); selectAll() }
         return
       }
-      const step = e.shiftKey ? 4 : 1
+      // a cell at a time, four with Shift, and a twentieth of one with Alt, for placing something finely
+      const step = e.altKey ? 0.05 : e.shiftKey ? 4 : 1
       switch (e.key) {
         case 'Escape':
           if (s.placing) s.set({ placing: null })
@@ -410,6 +413,7 @@ function useShortcuts() {
           else if (key === 'e') turn(-45)
           else if (key === 'f') fitView(s.selection.length ? s.doc.nodes.filter((n) => s.selection.includes(n.id)).map((n) => n.id) : undefined)
           else if (key === 'g') s.set({ showGrid: !s.showGrid })
+          else if (key === 's') { setPref('snap', !s.snap); s.set({ snap: !s.snap }) }
           else if (key === 'l') s.set({ showLabels: !s.showLabels })
           else if (key === 'h') s.set({ lens: s.lens === 'cost' ? 'none' : 'cost' })
           else if (key === '2') setFlat(true)

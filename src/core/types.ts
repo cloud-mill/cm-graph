@@ -57,6 +57,13 @@ export interface EdgeT {
   /** where along its side each end sits, in cells from the middle of it; set once the user has placed it */
   fromAt?: number
   toAt?: number
+  /**
+   * The path the router planned for this line, kept so that it is planned once and then left alone: nothing else
+   * that happens in the diagram re-plans it. `key` records what it was planned for (the two components, where they
+   * stood and how big they were, and any side the user pinned); when that no longer matches, the plan is stale and
+   * the line is planned afresh. Only lines the router owns have one: a line with a track of its own never does.
+   */
+  plan?: { pts: [number, number][]; fromSide: Side; toSide: Side; key: string }
   /** points an older file asked the line to pass through. Still drawn; shaping the line turns them into a track */
   via?: [number, number][]
   /** sides the user pinned the ends to; otherwise each end uses the side facing where the line goes */

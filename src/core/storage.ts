@@ -140,6 +140,9 @@ export function coerceDoc(raw: any): Doc | null {
         ...(Array.isArray(e.runs) && e.runs.length <= 64 && e.runs.every((v: any) => Number.isFinite(v)) ? { runs: e.runs.map(Number) } : {}),
         ...(Number.isFinite(e.fromAt) ? { fromAt: e.fromAt } : {}),
         ...(Number.isFinite(e.toAt) ? { toAt: e.toAt } : {}),
+        // a planned path is only ever followed while its key still matches the diagram, so a damaged one is simply planned again
+        ...(e.plan && typeof e.plan.key === 'string' && ['n', 'e', 's', 'w'].includes(e.plan.fromSide) && ['n', 'e', 's', 'w'].includes(e.plan.toSide) && Array.isArray(e.plan.pts) && e.plan.pts.length >= 2 && e.plan.pts.length <= 130 && e.plan.pts.every((p: any) => Array.isArray(p) && Number.isFinite(p[0]) && Number.isFinite(p[1]))
+          ? { plan: { key: e.plan.key, fromSide: e.plan.fromSide, toSide: e.plan.toSide, pts: e.plan.pts.map((p: any) => [Number(p[0]), Number(p[1])]) } } : {}),
       })),
     areas: list(raw.areas).map((a) => ({
       id: idOf(a.id), x: n(a.x), y: n(a.y), w: Math.max(1, n(a.w, 4)), d: Math.max(1, n(a.d, 4)), name: s(a.name, 'Area'),

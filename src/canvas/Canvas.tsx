@@ -3,13 +3,13 @@ import { AlignCenterVertical, AlignHorizontalSpaceAround, Copy, CornerDownRight,
 import { MAX_PITCH, MIN_PITCH, type Proj, U, f, makeCam, mix, normYaw, planeMatrix, poly, pt, unproject, upright } from '../core/iso'
 import { costOf, defOf, defaultProps, docCost, money, nodeName } from '../core/catalog'
 import { traceFlow } from '../core/links'
-import { routePair, routeToPoint } from '../core/router'
+import { routeAll, routeToPoint } from '../core/router'
 import { arrowAt, lineOf, pathOf } from '../core/routing'
-import { type Track, coordsOf, dragRun, isManual, nearestRun, simplify, snapRun, straightness, trackOf, withTrack } from '../core/shape'
-import { SIDES, clearOf, doorNear, magnet, portsOf, reachTo, soft } from '../core/snap'
+import { type Track, alignRun, coordsOf, dragRun, isManual, nearestRun, simplify, snapRun, straightness, trackOf, withTrack } from '../core/shape'
+import { SIDES, doorNear, magnet, portsOf, reachTo } from '../core/snap'
 import { inArea, lineUp, spaceEvenly } from '../core/layout'
-import { type View, kindOf, moveItems, useStore } from '../core/store'
-import { type AreaT, type Doc, type NodeT, type Side, MAX_SCALE, MIN_SCALE, centerOf, footOf } from '../core/types'
+import { type View, kindOf, moveItems, useStore, reended } from '../core/store'
+import { type AreaT, type Doc, type NodeT, type Side, MAX_SCALE, MIN_SCALE, centerOf, footOf, type EdgeT } from '../core/types'
 import { Scene, THEMES, brackets, useRoutes } from './Scene'
 import { Model } from './models'
 import { animateView, beginOrbit, cam, center, fitView, flushFrame, glide, holdStill, hud, insets, onFrame, projNow, smoothZoom, zoomBy } from './camera'
@@ -27,16 +27,18 @@ type Drag =
   | { mode: 'dtap'; sx: number; sy: number; view: View; moved: boolean }
   // a finger has landed and has not yet said what it wants: a tap, a pan, or a press-and-hold
   | { mode: 'touch'; id: string | null; kind: string | null; sx: number; sy: number; vx: number; vy: number; wx: number; wy: number }
-  // `lx`, `ly`: the whole-cell move it would settle on if let go now; `cloned`: this drag made the copies it is moving
-  | { mode: 'move'; wx: number; wy: number; sx: number; sy: number; base: Doc; active: boolean; step: number; lx: number; ly: number; rx?: number; ry?: number; vx?: number; vy?: number; cloned?: boolean; home: string | null }
-  | { mode: 'resize'; id: string; corner: number; base: AreaT; active: boolean }
-  | { mode: 'nresize'; id: string; corner: number; base: NodeT; active: boolean }
+  // `lx`, `ly`: how far it has been moved, which is what is on screen and what is kept; `ax`, `ay`: where the thing under the pointer stood,
+  // which is what goes from grid position to grid position when snapping is on; `cloned`: this drag made the copies it is moving
+  | { mode: 'move'; wx: number; wy: number; sx: number; sy: number; base: Doc; active: boolean; step: number; lx: number; ly: number; ax?: number; ay?: number; cloned?: boolean; home: string | null }
+  // `wx`, `wy`: where on the ground the corner was taken hold of, so it moves as far as the pointer does from wherever on the handle it was caught
+  | { mode: 'resize'; id: string; corner: number; base: AreaT; active: boolean; wx: number; wy: number }
+  | { mode: 'nresize'; id: string; corner: number; base: NodeT; active: boolean; wx: number; wy: number }
   | { mode: 'connect'; from: string; sx: number; sy: number }
   // a connection being reshaped: one run moved sideways, or a turn (the two runs that meet at it) moved about. `track` is the line
   // as it was picked up and `last` as it would be left if let go now. Each run in the hand remembers where it stood (`from`) and
   // which ground coordinate moves it; `wx`, `wy` is where on the ground it was taken hold of, so it goes as far as the pointer does
   // and no further, wherever on its width it was caught
-  | { mode: 'seg'; id: string; held: { run: number; axis: 'x' | 'y'; from: number }[]; track: Track; last: Track; turns: number; active: boolean; base: Doc; sx: number; sy: number; wx: number; wy: number; rested?: number }
+  | { mode: 'seg'; id: string; held: { run: number; axis: 'x' | 'y'; from: number; on?: number }[]; track: Track; last: Track; turns: number; active: boolean; base: Doc; sx: number; sy: number; wx: number; wy: number; rested?: number }
   // one end of a connection being dragged to another component, or to another side of the same one
   | { mode: 'relink'; id: string; end: 'from' | 'to'; active: boolean; sx: number; sy: number }
   | { mode: 'marquee'; sx: number; sy: number }
@@ -58,7 +60,12 @@ export const HOLD_MS = 420
 const TOUCH_SLOP = 9
 
 /** Where the pointer is and what is held down with it: everything a drag needs to take its next step. */
-interface Ptr { x: number; y: number; shift: boolean; alt: boolean; touch: boolean }
+interface Ptr { x: number; y: number; shift: boolean; alt: boolean; ctrl: boolean; touch: boolean }
+const r3 = (v: number) => Math.round(v * 1000) / 1000 + 0
+/** A coordinate as it is kept: where it was put, or the nearest grid position when snapping is on. */
+const put = (v: number, step: number, snap: boolean) => (snap ? Math.round(v / step) * step + 0 : r3(v))
+/** Snapping is off unless the user turned it on; Ctrl (or Cmd) held during a drag flips it for that drag. */
+const snapping = (p: { ctrl?: boolean; ctrlKey?: boolean; metaKey?: boolean }) => useStore.getState().snap !== !!(p.ctrl || p.ctrlKey || p.metaKey)
 /** A connection in the hand: the end that is fixed, where the loose end is, and what it has caught. */
 interface Wire { from: string; to: [number, number]; target: string | null; side?: Side; bad?: boolean; relink?: { id: string; end: 'from' | 'to' } }
 /** drags that carry something across the ground, which the view follows when the pointer reaches its edge */
@@ -96,14 +103,8 @@ export function Canvas() {
   const [liveDoc, setLiveDoc] = useState<Doc | null>(null)
   const liveRef = useRef<Doc | null>(null)
   const setLive = (d: Doc | null) => { liveRef.current = d; setLiveDoc(d) }
-  // where what is being moved would settle if it were let go now
-  const [land, setLandState] = useState<Doc | null>(null)
-  const landRef = useRef<Doc | null>(null)
-  const setLand = (d: Doc | null) => { landRef.current = d; setLandState(d) }
   const [gaps, setGaps] = useState<Gap[]>([])
   const [dropArea, setDropArea] = useState<string | null>(null)
-  const [settling, setSettling] = useState(false)
-  const settleTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const [hover, setHoverState] = useState<string | null>(null)
   const hoverRef = useRef<string | null>(null)
   const setHover = (id: string | null) => { if (hoverRef.current !== id) { hoverRef.current = id; setHoverState(id) } }
@@ -112,7 +113,7 @@ export function Canvas() {
   const [quick, setQuick] = useState<{ x: number; y: number; wx: number; wy: number; from: string } | null>(null)
   const lastPtr = useRef<Ptr | null>(null)
   const scrollRaf = useRef(0)
-  const [ghost, setGhost] = useState<{ at: [number, number]; snap: [number, number] } | null>(null)
+  const [ghost, setGhost] = useState<{ at: [number, number] } | null>(null)
   const [wire, setWireState] = useState<Wire | null>(null)
   const wireRef = useRef<Wire | null>(null)
   const setWire = (w: Wire | null) => { wireRef.current = w; setWireState(w) }
@@ -140,7 +141,7 @@ export function Canvas() {
   const linkFrom = useStore((s) => s.linkFrom)
   // fingers need bigger handles than a mouse does
   const coarse = useMemo(() => typeof matchMedia !== 'undefined' && matchMedia('(pointer: coarse)').matches, [])
-  useEffect(() => () => { clearTimeout(press.current); clearTimeout(settleTimer.current); cancelAnimationFrame(scrollRaf.current) }, [])
+  useEffect(() => () => { clearTimeout(press.current); cancelAnimationFrame(scrollRaf.current) }, [])
   // a connection waiting for its other end only makes sense while the connect tool is up
   useEffect(() => { if (tool !== 'connect' && useStore.getState().linkFrom) useStore.setState({ linkFrom: null }) }, [tool])
 
@@ -247,8 +248,8 @@ export function Canvas() {
       const [wx, wy] = toWorld(e.clientX, e.clientY, projNow())
       return [wx - 1, wy - 1]
     }
-    // never on top of what is already there: the nearest free cell instead
-    const spot = (x: number, y: number): [number, number] => { const [ox, oy] = clearOf([{ id: '~new', x, y }], useStore.getState().doc.nodes, 0, 0); return [x + ox, y + oy] }
+    // it goes exactly where it is pointed, and where it is shown is where it is put. With snapping on that is the nearest whole cell
+    const spot = (e: PointerEvent): [number, number] => { const [x, y] = at(e), on = snapping(e); return [put(x, 1, on), put(y, 1, on)] }
     // a connection under the pointer: letting go there puts the new component in the middle of it
     const lineAt = (e: PointerEvent) => {
       const el = document.elementFromPoint(e.clientX, e.clientY)
@@ -256,17 +257,16 @@ export function Canvas() {
     }
     const move = (e: PointerEvent) => {
       if (!over(e)) { setGhost(null); setSplice(null); showGuides([]); return }
-      const [x, y] = at(e), snap = spot(Math.round(x), Math.round(y))
-      // it follows the pointer and leans towards the cell it will land in
-      setGhost({ at: [soft(x), soft(y)], snap })
+      const [x, y] = spot(e)
+      setGhost({ at: [x, y] })
       setSplice(lineAt(e))
       const nodes = useStore.getState().doc.nodes
-      showGuides(alignGuides([...nodes, { id: '~new', type: 'block', x: snap[0], y: snap[1], props: {} }], new Set(['~new'])))
+      showGuides(alignGuides([...nodes, { id: '~new', type: 'block', x, y, props: {} }], new Set(['~new']), level()))
     }
     const up = (e: PointerEvent) => {
       showGuides([]); setSplice(null)
       if (!over(e)) return
-      const [x, y] = spot(...(at(e).map(Math.round) as [number, number]))
+      const [x, y] = spot(e)
       const st = useStore.getState(), into = lineAt(e)
       if (into) { st.addLinked(st.placing!, x, y, { into }); haptic(10) } else st.addNode(st.placing!, x, y)
       if (!e.shiftKey) st.set({ placing: null })
@@ -297,7 +297,7 @@ export function Canvas() {
         const idle = !d || d.mode === 'touch' || d.mode === 'dtap' || (d.mode === 'pan' && !d.moved)
         clearTimeout(press.current)
         // a move in progress ends where it is: a second finger should not throw away a long carry
-        if (d?.mode === 'move' && d.active && landRef.current && (d.lx || d.ly)) st.apply(() => landRef.current!, d.cloned)
+        if (d?.mode === 'move' && d.active && liveRef.current && (d.lx || d.ly)) st.apply(() => liveRef.current!, d.cloned)
         drag.current = null
         lastTap.current = null
         dropHand()
@@ -323,8 +323,15 @@ export function Canvas() {
       return
     }
     const [wx, wy] = toWorld(e.clientX, e.clientY)
-    const handle = (target.closest('[data-handle]') as HTMLElement | null)?.dataset.handle
-    const hit = target.closest('[data-kind]') as HTMLElement | null
+    const grip = target.closest('[data-handle]') as HTMLElement | null
+    let handle = grip?.dataset.handle
+    let hit = target.closest('[data-kind]') as HTMLElement | null
+    // A door's finger-sized target is invisible and, when the view is small, reaches over the body of its own component.
+    // What the finger is on is what it can see: where the two overlap, the press is on the component, not the door
+    if (handle === 'connect' && target.getAttribute('fill') === 'transparent') {
+      const body = (document.elementsFromPoint?.(e.clientX, e.clientY) ?? []).map((el) => el.closest('.nd-body')?.closest('[data-kind="node"]') as HTMLElement | null).find((el) => !!el)
+      if (body && body.dataset.id === (grip!.dataset.id ?? st.selection[0])) { handle = undefined; hit = body }
+    }
     const kind = hit?.dataset.kind
     const id = hit?.dataset.id
 
@@ -351,21 +358,21 @@ export function Canvas() {
     }
     if (handle && handle.startsWith('n')) {
       const n = st.doc.nodes.find((x) => x.id === st.selection[0])
-      if (n) drag.current = { mode: 'nresize', id: n.id, corner: Number(handle[1]), base: n, active: false }
+      if (n) drag.current = { mode: 'nresize', id: n.id, corner: Number(handle[1]), base: n, active: false, wx, wy }
       return
     }
     if (handle && handle.startsWith('r')) {
       const a = st.doc.areas.find((x) => x.id === st.selection[0])
-      if (a) drag.current = { mode: 'resize', id: a.id, corner: Number(handle[1]), base: a, active: false }
+      if (a) drag.current = { mode: 'resize', id: a.id, corner: Number(handle[1]), base: a, active: false, wx, wy }
       return
     }
     if (st.tool === 'text' && !hit) {
-      st.addLabel(Math.round(wx * 2) / 2, Math.round(wy * 2) / 2)
+      st.addLabel(put(wx, 0.5, snapping(e)), put(wy, 0.5, snapping(e)))
       st.set({ tool: 'select', panel: 'inspect' })
       return
     }
     if (st.tool === 'area') {
-      drag.current = { mode: 'area', wx: Math.round(wx), wy: Math.round(wy) }
+      drag.current = { mode: 'area', wx: put(wx, 1, snapping(e)), wy: put(wy, 1, snapping(e)) }
       return
     }
     if (st.tool === 'connect') {
@@ -437,7 +444,7 @@ export function Canvas() {
   /** Put down whatever is in the hand without keeping it. */
   const dropHand = () => {
     cancelAnimationFrame(scrollRaf.current); scrollRaf.current = 0
-    setLive(null); setLand(null); setMoving(false); setWire(null); setDraft(null); setMarquee(null); showGuides([]); setGaps([]); setDropArea(null); setPicking([])
+    setLive(null); setMoving(false); setWire(null); setDraft(null); setMarquee(null); showGuides([]); setGaps([]); setDropArea(null); setPicking([])
   }
   const closeQuick = () => { setQuick(null); setWire(null) }
   /** The group a component would belong to where it stands: the smallest area around it. */
@@ -454,12 +461,8 @@ export function Canvas() {
     ports[side] = portsOf(n, 1.05)[side]
     return ports
   }
-  const settle = () => {
-    // the last short step from where the hand let go to the cell it lands in is eased, not jumped
-    setSettling(true)
-    clearTimeout(settleTimer.current)
-    settleTimer.current = setTimeout(() => setSettling(false), 180)
-  }
+  /** How nearly level two things must be for the line that says so to show: about a pixel on screen. It is a remark, not a correction. */
+  const level = () => Math.max(0.01, 1 / (U * useStore.getState().view.k))
 
   /** One step of a drag that carries something across the ground. Also run by the view when it follows the pointer at the edge. */
   const carry = (d: Drag, p: Ptr) => {
@@ -472,53 +475,48 @@ export function Canvas() {
         // alt-drag clones the selection and moves the copies
         if (p.alt) { st.duplicate(st.selection, 0, 0); d.base = useStore.getState().doc; d.cloned = true }
         d.home = areaOf(d.base, new Set(useStore.getState().selection))
-        d.rx = d.ry = NaN
+        const held = useStore.getState().selection.map((id) => d.base.nodes.find((n) => n.id === id) ?? d.base.areas.find((a) => a.id === id) ?? d.base.labels.find((l) => l.id === id)).find((x) => !!x)
+        d.ax = held?.x; d.ay = held?.y
       }
       const [wx, wy] = toWorld(p.x, p.y)
-      let dx = wx - d.wx, dy = wy - d.wy
+      // exactly as far as the pointer has gone, and no further
+      let dx = r3(wx - d.wx), dy = r3(wy - d.wy)
       // shift keeps the move to one axis: whichever it has gone furthest along
       if (p.shift) { if (Math.abs(dx) >= Math.abs(dy)) dy = 0; else dx = 0 }
+      // with snapping on, the thing in the hand goes from one grid position to the next as it is carried, so what is shown is still what is kept
+      if (snapping(p) && d.ax !== undefined && d.ay !== undefined) { dx = put(d.ax + dx, d.step, true) - d.ax; dy = put(d.ay + dy, d.step, true) - d.ay }
+      if (dx === d.lx && dy === d.ly && liveRef.current) return
+      d.lx = dx; d.ly = dy
       const ids = new Set(useStore.getState().selection)
-      const rx = Math.round(dx / d.step) * d.step, ry = Math.round(dy / d.step) * d.step
-      if (rx !== d.rx || ry !== d.ry) {
-        d.rx = rx; d.ry = ry
-        // two components never share ground: over one that is standing still, it lands in the nearest free cell beside it
-        const carried = new Set(moveItems(d.base, d.base, ids, 1, 1).nodes.filter((n, i) => n !== d.base.nodes[i]).map((n) => n.id))
-        const [lx, ly] = clearOf(d.base.nodes.filter((n) => carried.has(n.id)), d.base.nodes.filter((n) => !carried.has(n.id)), rx, ry, d.step)
-        d.lx = lx; d.ly = ly
-        const next = moveItems(d.base, d.base, ids, lx, ly)
-        setLand(next)
-        // a line appears whenever what is being moved comes level with something else, with a tick under the finger
-        if (showGuides(alignGuides(next.nodes, ids)) && p.touch) haptic(5)
-        setGaps(spacingGaps(next.nodes, ids))
-        const into = areaOf(next, ids)
-        setDropArea(into !== d.home ? into : null)
-      }
-      // the body follows the hand the whole way, leaning towards the cell it will settle in.
-      // A very large group is redrawn every quarter cell instead of every pixel: repainting most of a big diagram on every frame costs more than it gives
-      const q = d.base.nodes.length > 40 && ids.size > 40 ? 0.25 : 0
-      const vx = q ? Math.round(soft(dx, d.step) / q) * q : soft(dx, d.step), vy = q ? Math.round(soft(dy, d.step) / q) * q : soft(dy, d.step)
-      if (vx === d.vx && vy === d.vy) return
-      d.vx = vx; d.vy = vy
-      setLive(moveItems(d.base, d.base, ids, vx, vy))
+      const next = moveItems(d.base, d.base, ids, dx, dy)
+      // a line appears whenever what is being moved comes level with something else, with a tick under the finger. It only says so: nothing is moved to make it true
+      if (showGuides(alignGuides(next.nodes, ids, level())) && p.touch) haptic(5)
+      setGaps(spacingGaps(next.nodes, ids))
+      const into = areaOf(next, ids)
+      setDropArea(into !== d.home ? into : null)
+      setLive(next)
     } else if (d.mode === 'resize') {
       d.active = true
-      const [wx, wy] = toWorld(p.x, p.y).map((v) => Math.round(v * 2) / 2)
+      const on = snapping(p), [px, py] = toWorld(p.x, p.y)
       const b = d.base
       let x0 = b.x, y0 = b.y, x1 = b.x + b.w, y1 = b.y + b.d
+      // the corner goes as far as the pointer has gone
+      const left = d.corner === 0 || d.corner === 3, top = d.corner === 0 || d.corner === 1
+      const wx = put((left ? x0 : x1) + px - d.wx, 0.5, on), wy = put((top ? y0 : y1) + py - d.wy, 0.5, on)
       if (d.corner === 0 || d.corner === 3) x0 = Math.min(wx, x1 - 1); else x1 = Math.max(wx, x0 + 1)
       if (d.corner === 0 || d.corner === 1) y0 = Math.min(wy, y1 - 1); else y1 = Math.max(wy, y0 + 1)
-      setLive({ ...st.doc, areas: st.doc.areas.map((a) => (a.id === d.id ? { ...a, x: x0, y: y0, w: x1 - x0, d: y1 - y0 } : a)) })
+      setLive({ ...st.doc, areas: st.doc.areas.map((a) => (a.id === d.id ? { ...a, x: x0, y: y0, w: r3(x1 - x0), d: r3(y1 - y0) } : a)) })
     } else if (d.mode === 'nresize') {
-      // components stay square: the corner opposite the one being dragged is pinned, and the size snaps to half cells
+      // components stay square: the corner opposite the one being dragged is pinned. The size is whatever the pointer makes it, or half cells with snapping on
       d.active = true
       const [wx, wy] = toWorld(p.x, p.y)
       const b = d.base, fs = footOf(b)
       const left = d.corner === 0 || d.corner === 3, top = d.corner === 0 || d.corner === 1
       const ax = left ? b.x + fs : b.x, ay = top ? b.y + fs : b.y
-      const want = Math.max(left ? ax - wx : wx - ax, top ? ay - wy : wy - ay)
-      const size = Math.max(2 * MIN_SCALE, Math.min(2 * MAX_SCALE, Math.round(want * 2) / 2))
-      const x = left ? ax - size : ax, y = top ? ay - size : ay
+      // it grows by as much as the pointer has moved outwards, along whichever axis that is more
+      const want = fs + Math.max(left ? d.wx - wx : wx - d.wx, top ? d.wy - wy : wy - d.wy)
+      const size = Math.max(2 * MIN_SCALE, Math.min(2 * MAX_SCALE, put(want, 0.5, snapping(p))))
+      const x = left ? r3(ax - size) : ax, y = top ? r3(ay - size) : ay
       setLive({ ...st.doc, nodes: st.doc.nodes.map((n) => (n.id === d.id ? { ...n, x, y, scale: size / 2 } : n)) })
     } else if (d.mode === 'seg') {
       if (!d.active) {
@@ -529,10 +527,16 @@ export function Canvas() {
       const edge = d.base.edges.find((x) => x.id === d.id), a = edge && d.base.nodes.find((n) => n.id === edge.from), b = edge && d.base.nodes.find((n) => n.id === edge.to)
       if (!edge || !a || !b) return
       const [wx, wy] = toWorld(p.x, p.y)
-      // It goes exactly as far as the pointer has gone. Within a few pixels of something it would line up with (the next run along,
-      // which takes the turn out; the middle of a component; a half cell) it settles there, unless Alt is held or snapping is off
-      const pull = st.snapLines !== p.alt ? (p.touch ? 10 : 6) / (U * st.view.k) : 0
-      const to = d.held.map((h) => snapRun(d.track, a, b, h.run, h.from + (h.axis === 'y' ? wy - d.wy : wx - d.wx), pull))
+      // It goes exactly as far as the pointer has gone, with one courtesy: brought within a few pixels of level with the next run
+      // along, it is level, so a turn can be taken out without a pixel-perfect hand and no hair of a kink is left behind. Alt holds
+      // that off. Everything else that might draw it (the middle of a component, a half cell) only does with snapping on (Ctrl flips it)
+      const cell = U * st.view.k
+      const tol = p.alt ? 0 : (p.touch ? 7 : 4) / cell, pull = !p.alt && st.snap !== p.ctrl ? (p.touch ? 10 : 6) / cell : 0
+      const to = d.held.map((h) => {
+        const v = h.from + (h.axis === 'y' ? wy - d.wy : wx - d.wx)
+        h.on = alignRun(d.track, a, b, h.run, v, tol, h.on) ?? undefined
+        return h.on ?? snapRun(d.track, a, b, h.run, v, pull)
+      })
       // the later run first: if it steps round a corner it adds runs after itself, which leaves the earlier one where it was in the row
       let next = d.track
       for (let i = d.held.length - 1; i >= 0; i--) next = dragRun(next, a, b, d.held[i].run, to[i])
@@ -628,7 +632,7 @@ export function Canvas() {
     if (!d) { if (e.pointerType !== 'touch') trackHover(e); return }
     const st = useStore.getState()
     if (CARRIES.has(d.mode)) {
-      const p: Ptr = { x: e.clientX, y: e.clientY, shift: e.shiftKey, alt: e.altKey, touch: e.pointerType === 'touch' }
+      const p: Ptr = { x: e.clientX, y: e.clientY, shift: e.shiftKey, alt: e.altKey, ctrl: e.ctrlKey || e.metaKey, touch: e.pointerType === 'touch' }
       lastPtr.current = p
       carry(d, p)
       if (!scrollRaf.current && edgePush(p).some(Boolean)) scrollRaf.current = requestAnimationFrame(follow)
@@ -675,8 +679,8 @@ export function Canvas() {
       const ids = inMarquee(m)
       setPicking((was) => (was.length === ids.length && was.every((x, i) => x === ids[i]) ? was : ids))
     } else if (d.mode === 'area') {
-      const [wx, wy] = toWorld(e.clientX, e.clientY).map(Math.round)
-      setDraft({ x: Math.min(d.wx, wx), y: Math.min(d.wy, wy), w: Math.abs(wx - d.wx), d: Math.abs(wy - d.wy) })
+      const [wx, wy] = toWorld(e.clientX, e.clientY).map((v) => put(v, 1, snapping(e)))
+      setDraft({ x: Math.min(d.wx, wx), y: Math.min(d.wy, wy), w: r3(Math.abs(wx - d.wx)), d: r3(Math.abs(wy - d.wy)) })
     }
   }
 
@@ -751,10 +755,10 @@ export function Canvas() {
     if (!d) return
     const st = useStore.getState()
     if (d.mode === 'move') {
-      // written once, as one step: the cell it was heading for, not the fraction of one the hand stopped at
-      const to = landRef.current
-      setLive(null); setLand(null)
-      if (d.active && to && (d.lx || d.ly)) { st.apply(() => to, d.cloned); settle() }
+      // written once, as one step, and it is the very thing that was on screen: nothing is rounded, pushed aside or eased afterwards
+      const to = liveRef.current
+      setLive(null)
+      if (d.active && to && (d.lx || d.ly)) st.apply(() => to, d.cloned)
       return
     }
     if (d.mode === 'resize' || d.mode === 'nresize') {
@@ -819,7 +823,7 @@ export function Canvas() {
     if (d.mode === 'pan' && !d.moved) { st.select([]); if (st.linkFrom) st.set({ linkFrom: null }) }
     else if (d.mode === 'connect') {
       // where it was let go is what counts, even if the pointer never reported moving there
-      if (e.type !== 'pointercancel') carry(d, { x: e.clientX, y: e.clientY, shift: e.shiftKey, alt: e.altKey, touch: e.pointerType === 'touch' })
+      if (e.type !== 'pointercancel') carry(d, { x: e.clientX, y: e.clientY, shift: e.shiftKey, alt: e.altKey, ctrl: e.ctrlKey || e.metaKey, touch: e.pointerType === 'touch' })
       const w = wireRef.current
       const link = (from: string, to: string, side?: Side) => {
         const id = st.addEdge(from, to)
@@ -910,7 +914,6 @@ export function Canvas() {
   // doors show on what the pointer is over and on the one thing selected; while a connection is in the hand, on what it has caught
   const hoverNode = hover && !busy && tool === 'select' ? byId.get(hover) : null
   const doorNodes = wire ? (wireTarget && !wire.bad ? [wireTarget] : []) : busy || tool !== 'select' ? [] : [...new Set([single, hoverNode].filter((n): n is NodeT => !!n))]
-  const landing = land && moving ? land.nodes.filter((n) => { const m = byId.get(n.id); return m && sel.has(n.id) && (Math.abs(m.x - n.x) > 0.06 || Math.abs(m.y - n.y) > 0.06) }) : []
   const into = dropArea ? shown.areas.find((a) => a.id === dropArea) : null
   const fp = (x: number, y: number, o: number, s = 2) => brackets(proj, x - o, y - o, x + s + o, y + s + o, 0.55)
   // screen position of a point in the scene
@@ -932,7 +935,7 @@ export function Canvas() {
   const straight = oneEdge && oneRoute ? straightness(shown, oneEdge, oneRoute) : null
 
   return (
-    <div className={'canvas-wrap' + (intro ? ' intro' : '') + (busy ? ' busy' : '') + (settling ? ' settle' : '')} data-tool={tool}>
+    <div className={'canvas-wrap' + (intro ? ' intro' : '') + (busy ? ' busy' : '')} data-tool={tool}>
       <svg ref={ref} className="canvas-svg" style={{ cursor }} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp}
         onPointerCancel={onPointerUp} onPointerLeave={() => setHover(null)} onContextMenu={onContextMenu} onDoubleClick={onDoubleClick}>
         <defs>
@@ -966,7 +969,6 @@ export function Canvas() {
               </g>
             ))}
             {/* where what is in the hand will come to rest */}
-            {landing.map((n) => <polygon key={'l' + n.id} className="landing" points={foot(n.x, n.y, 0.02, footOf(n))} fill={ACCENT} fillOpacity={0.05} stroke={ACCENT} strokeOpacity={0.5} strokeWidth={1 / view.k} strokeDasharray={`${3 / view.k} ${3 / view.k}`} strokeLinejoin="round" />)}
             {/* the group it is about to join */}
             {into && <polygon className="drop-area" points={poly([pt(proj, into.x, into.y), pt(proj, into.x + into.w, into.y), pt(proj, into.x + into.w, into.y + into.d), pt(proj, into.x, into.y + into.d)])} fill={ACCENT} fillOpacity={0.06} stroke={ACCENT} strokeOpacity={0.8} strokeWidth={1.5 / view.k} strokeLinejoin="round" />}
             {/* what a selection box has caught so far */}
@@ -1096,8 +1098,11 @@ export function Canvas() {
               // the line as it will be drawn if it is let go now: routed round what is in the way, to what it has caught or to the pointer
               const caught = wireTarget && !wire.bad && wireTarget.id !== wireFrom.id ? wireTarget : null
               const back = wire.relink?.end === 'from'
-              const pts = caught
-                ? (back ? routePair(caught, wireFrom, shown.nodes, { fromSide: wire.side }) : routePair(wireFrom, caught, shown.nodes, { toSide: wire.side }))
+              // caught, it is routed exactly as it will be once it is let go: as part of the whole diagram, beside the lines already on those sides
+              const moving = wire.relink ? shown.edges.find((x) => x.id === wire.relink!.id) : null
+              const made: EdgeT | null = !caught ? null : moving ? reended(moving, wire.relink!.end, caught.id, wire.side) : { id: '~wire', from: wireFrom.id, to: caught.id, style: 'solid', arrow: 'end', width: 2, toSide: wire.side }
+              const pts = made
+                ? routeAll(shown.nodes, moving ? shown.edges.map((x) => (x.id === made.id ? made : x)) : [...shown.edges, made]).get(made.id)?.pts ?? []
                 : routeToPoint(wireFrom, wire.to, shown.nodes)
               if (pts.length < 2) return null
               const n = pts.length, tip = back ? null : pts[n - 1]
@@ -1112,8 +1117,8 @@ export function Canvas() {
             {ghost && placing && (
               <g pointerEvents="none" className="ghost">
                 {/* the cell it will land in, then the component itself, following the pointer */}
-                <polygon points={foot(ghost.snap[0], ghost.snap[1], 0.1)} fill={ACCENT} fillOpacity={0.1} />
-                <path d={fp(ghost.snap[0], ghost.snap[1], 0.1)} fill="none" stroke={ACCENT} strokeWidth={2} strokeLinecap="round" />
+                <polygon points={foot(ghost.at[0], ghost.at[1], 0.1)} fill={ACCENT} fillOpacity={0.1} />
+                <path d={fp(ghost.at[0], ghost.at[1], 0.1)} fill="none" stroke={ACCENT} strokeWidth={2} strokeLinecap="round" />
                 <g transform={`translate(${pt(proj, ghost.at[0], ghost.at[1]).map(f).join(' ')})`} opacity={0.82}><Model type={placing} proj={proj} /></g>
               </g>
             )}
@@ -1205,9 +1210,9 @@ export function Canvas() {
         // kept inside the part of the canvas the panels leave clear, and above the pointer when there is no room below it
         <QuickAdd x={Math.max(insets().l, Math.min(quick.x - 14, cam.w - insets().r - 252))} y={quick.y + 12 > cam.h - insets().b - 290 ? Math.max(insets().t, quick.y - 296) : quick.y + 12} onClose={closeQuick}
           onPick={(type) => {
-            const q = quick, st = useStore.getState(), x = Math.round(q.wx - 1), y = Math.round(q.wy - 1)
-            const [ox, oy] = clearOf([{ id: '~new', x, y }], st.doc.nodes, 0, 0)
-            closeQuick(); st.addLinked(type, x + ox, y + oy, { from: q.from }); haptic(10)
+            // where the connection was let go is where the new component stands
+            const q = quick, st = useStore.getState(), x = put(q.wx - 1, 1, st.snap), y = put(q.wy - 1, 1, st.snap)
+            closeQuick(); st.addLinked(type, x, y, { from: q.from }); haptic(10)
           }} />
       )}
     </div>

@@ -291,9 +291,9 @@ select.input {
 .canvas-svg { display: block; touch-action: none; user-select: none; -webkit-user-select: none; }
 .canvas-svg text { user-select: none; }
 
-.nd-body { transition: transform 0.22s var(--ease), filter 0.22s; }
-.canvas-wrap:not(.busy) .nd:hover .nd-body { transform: translateY(-3px); filter: brightness(1.1) saturate(1.04); }
-.canvas-wrap:not(.busy) .nd:active .nd-body { transform: translateY(-1px); transition-duration: 0.08s; }
+/* a component under the pointer brightens. It never shifts: where it is drawn is where it is, before, during and after a drag */
+.nd-body { transition: filter 0.22s; }
+.canvas-wrap:not(.busy) .nd:hover .nd-body { filter: brightness(1.1) saturate(1.04); }
 .nd-ao, .nd-glow { transition: opacity 0.22s; }
 .canvas-wrap:not(.busy) .nd:hover .nd-glow { opacity: 1.6; }
 .intro .nd-glow { animation: fade 0.9s both; animation-delay: calc(min(var(--i), 30) * 34ms + 400ms); }
@@ -305,9 +305,10 @@ select.input {
 .intro .nd-ao, .intro .nd-label { animation: fade 0.5s both; animation-delay: calc(min(var(--i), 30) * 34ms + 260ms); }
 .intro .edge { animation: fade 0.7s 0.55s both; }
 @keyframes nd-rise { from { opacity: 0; transform: translateY(-22px); } }
-.nd-new .nd-body { animation: nd-drop 0.5s var(--spring) both; }
+.nd-new .nd-body { animation: nd-drop 0.25s both; }
 .nd-new .nd-ao { animation: fade 0.4s both; }
-@keyframes nd-drop { from { opacity: 0; transform: translateY(-26px); } 60% { opacity: 1; } }
+/* a new component fades in exactly where it was put down */
+@keyframes nd-drop { from { opacity: 0; } }
 
 .edge-line { transition: stroke 0.16s, stroke-width 0.16s; }
 /* following a flow: what is on its paths stays, the rest steps back without disappearing */
@@ -327,11 +328,9 @@ select.input {
 .canvas-wrap.busy .edge-flow { animation-play-state: paused; }
 @keyframes flow { to { stroke-dashoffset: -47.5; } }
 .wire:not(.caught) path { animation: wire 0.5s linear infinite; }
-/* in the hand: lifted while it is carried, eased into its cell when it is let go */
-.nd.up .nd-body { transform: translateY(-5px); transition-duration: 0.12s; }
+/* in the hand. It is drawn exactly where it is and where it will stay: not lifted, and not eased anywhere when it is let go */
 .nd.up { cursor: grabbing !important; }
-.canvas-wrap.settle .nd { transition: transform 0.16s var(--ease), opacity 0.22s var(--ease); }
-.landing, .drop-area, .picking, .hover-mark, .gap, .splice { animation: fade 0.12s both; }
+.drop-area, .picking, .hover-mark, .gap, .splice { animation: fade 0.12s both; }
 .splice { opacity: 0.9; }
 /* doors: quiet until the pointer is near, then plainly something to pull on */
 .door { animation: fade 0.16s 0.04s both; }
@@ -913,7 +912,7 @@ button, a, [role='button'] { touch-action: manipulation; }
 /* nothing depends on hovering where there is no hover */
 @media (hover: none) {
   .tip, [data-tip]::after { display: none !important; }
-  .canvas-wrap .nd:hover .nd-body { transform: none !important; filter: none !important; }
+  .canvas-wrap .nd:hover .nd-body { filter: none !important; }
   .card-actions { opacity: 1; transform: none; }
   .card h3 svg { opacity: 1; transform: none; }
 }

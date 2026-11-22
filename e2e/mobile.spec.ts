@@ -10,6 +10,9 @@ const HOLD = 560
 const dock = (page: import('@playwright/test').Page) => page.locator('.dock')
 const landscape = () => test.info().project.name === 'landscape'
 
+/** a finger is reported in whole pixels, so what it carries ends within a fraction of a cell of where it was aimed, not on it */
+const near = (n: { x: number; y: number } | undefined, x: number, y: number, within = 0.15) => { expect(Math.abs(n!.x - x), `x ${n!.x} near ${x}`).toBeLessThan(within); expect(Math.abs(n!.y - y), `y ${n!.y} near ${y}`).toBeLessThan(within) }
+
 test.describe('phone: layout', () => {
   test('the editor is a phone app, not a shrunken desktop', async ({ page, app }) => {
     await app.open(TRIO())
@@ -86,25 +89,29 @@ test.describe('phone: canvas gestures', () => {
     expect((await app.saved())!.nodes[0]).toMatchObject({ x: 0, y: 0 })
   })
 
-  test('a selected component is dragged by whole cells, with one undo', async ({ page, app, fingers }) => {
+  test('a selected component is dragged as far as the finger goes, with one undo', async ({ page, app, fingers }) => {
     await fingers.tap(await app.world(1, 1))
     const from = await app.world(1, 1), d = await app.cells(2, -1)
     await fingers.drag(from, { x: from.x + d.x, y: from.y + d.y })
-    expect((await app.settled()).nodes[0]).toMatchObject({ x: 2, y: -1 })
+    const put = (await app.settled()).nodes[0]
+    near(put, 2, -1)
     await page.getByRole('button', { name: 'Undo' }).tap()
     expect((await app.settled()).nodes[0]).toMatchObject({ x: 0, y: 0 })
     await page.getByRole('button', { name: 'Redo' }).tap()
-    expect((await app.settled()).nodes[0]).toMatchObject({ x: 2, y: -1 })
+    // back exactly where it was put, not merely near it
+    expect((await app.settled()).nodes[0]).toMatchObject({ x: put.x, y: put.y })
   })
 
   test('press and hold picks a component up and carries it in one motion', async ({ page, app, fingers }) => {
     const from = await app.world(7, 1), d = await app.cells(0, 3)
     await fingers.drag(from, { x: from.x + d.x, y: from.y + d.y }, { hold: HOLD })
-    expect((await app.settled()).nodes[1]).toMatchObject({ x: 6, y: 3 })
+    near((await app.settled()).nodes[1], 6, 3)
     await expect(dock(page).locator('.dock-name b')).toHaveText('orders-db')
   })
 
-  test('alignment guides appear while a component lines up with another', async ({ page, app, fingers }) => {
+  test('with snapping on, alignment guides appear while a component lines up with another', async ({ page, app, fingers }) => {
+    // on whole cells a finger can bring two components exactly level; without snapping it would have to be right to the pixel
+    await page.keyboard.press('s')
     await fingers.tap(await app.world(1, 7))
     const from = await app.world(1, 7), d = await app.cells(6, 0)
     // carry c six cells along, to sit in line with b, and look before letting go
@@ -206,7 +213,7 @@ test.describe('phone: canvas gestures', () => {
     await fingers.tap(await app.world(1, 1))
     const from = await app.world(1, 1), d = await app.cells(1, 2)
     await fingers.drag(from, { x: from.x + d.x, y: from.y + d.y })
-    expect((await app.settled()).nodes[0]).toMatchObject({ x: 1, y: 2 })
+    near((await app.settled()).nodes[0], 1, 2)
   })
 
   test('an ordinary pinch never turns the view, however the fingers wobble', async ({ app, fingers }) => {
@@ -314,7 +321,9 @@ test.describe('phone: canvas gestures', () => {
     await fingers.lift()
     const doc = await app.settled()
     expect(doc.nodes).toHaveLength(3)
-    expect(Number.isInteger(doc.nodes[0].x) && Number.isInteger(doc.nodes[0].y)).toBe(true)
+    // it was left where the first finger had carried it when the second came down
+    expect(doc.nodes[0].x !== 0 || doc.nodes[0].y !== 0).toBe(true)
+    expect(Number.isFinite(doc.nodes[0].x) && Number.isFinite(doc.nodes[0].y)).toBe(true)
   })
 })
 
@@ -455,7 +464,10 @@ test.describe('phone: building a diagram', () => {
     await app.open(TRIO())
     await dock(page).getByRole('button', { name: 'Area' }).tap()
     await fingers.drag(await app.world(-1, -1), await app.world(3, 3))
-    expect((await app.settled()).areas).toMatchObject([{ x: -1, y: -1, w: 4, d: 4, kind: 'vpc' }])
+    const [area] = (await app.settled()).areas
+    expect(area.kind).toBe('vpc')
+    near(area, -1, -1)
+    near({ x: area.w, y: area.d }, 4, 4, 0.3)
     await expect(dock(page).locator('.dock-name b')).toHaveText('VPC')
     await page.getByRole('button', { name: 'Deselect' }).tap()
     await dock(page).getByRole('button', { name: 'Text' }).tap()

@@ -154,29 +154,60 @@ describe('selecting', () => {
 })
 
 describe('moving', () => {
-  it('drags a component on the grid as one undo step', () => {
+  it('a component goes exactly where it is dragged, and what is on screen as it is let go is what is kept, as one undo step', () => {
     mount()
     down(hit('node', 'a'), 1, 1)
     move(1.02, 1.02)
     expect(S().past).toHaveLength(0) // a twitch is not a drag
     move(4.4, 1)
-    // in the hand: it follows the pointer between cells, the cell it will land in is marked, and the blueprint is not touched yet
-    expect(drawnAt('a')[0]).toBeGreaterThan(3)
-    expect(drawnAt('a')[0]).toBeLessThan(3.4)
-    expect(drawnAt('a')[1]).toBe(0)
-    expect(document.querySelectorAll('.landing')).toHaveLength(1)
+    // in the hand: it is drawn where the pointer has taken it, and the blueprint is not touched yet
+    expect(drawnAt('a')).toEqual([3.4, 0])
+    expect(document.querySelectorAll('.landing')).toHaveLength(0)
     expect(hit('node', 'a')).toHaveClass('up')
     expect(S().doc.nodes[0]).toMatchObject({ x: 0, y: 0 })
     expect(S()).toMatchObject({ past: [], saved: true })
     expect(document.querySelector('.canvas-wrap')).toHaveClass('busy')
-    move(6.6, 3.4)
-    up(6.6, 3.4)
-    expect(S().doc.nodes[0]).toMatchObject({ x: 6, y: 2 })
+    move(6.63, 3.41)
+    const shown = hit('node', 'a').getAttribute('transform')
+    up(6.63, 3.41)
+    // not rounded to a cell, not eased anywhere: the same place, to the pixel
+    expect(S().doc.nodes[0]).toMatchObject({ x: 5.63, y: 2.41 })
+    expect(hit('node', 'a').getAttribute('transform')).toBe(shown)
+    expect(document.querySelector('.canvas-wrap')).not.toHaveClass('settle')
     expect(S().doc.nodes[1]).toMatchObject({ x: 8, y: 0 })
     expect(S().past).toHaveLength(1)
     expect(document.querySelector('.canvas-wrap')).not.toHaveClass('busy')
     act(() => S().undo())
     expect(S().doc.nodes[0]).toMatchObject({ x: 0, y: 0 })
+  })
+  it('moved again and again by tiny amounts, it goes just that far each time', () => {
+    mount()
+    drag(hit('node', 'a'), [1, 1], [1.13, 1.07])
+    expect(S().doc.nodes[0]).toMatchObject({ x: 0.13, y: 0.07 })
+    drag(hit('node', 'a'), [1.13, 1.07], [1.2, 1])
+    expect(S().doc.nodes[0]).toMatchObject({ x: 0.2, y: 0 })
+    expect(S().past).toHaveLength(2)
+  })
+  it('with snapping on it keeps to whole cells as it is carried, so what is shown is still what is kept; Ctrl flips snapping for one drag', () => {
+    mount(undefined, { snap: true })
+    down(hit('node', 'a'), 1, 1)
+    move(4.4, 1.3)
+    expect(drawnAt('a')).toEqual([3, 0])
+    const shown = hit('node', 'a').getAttribute('transform')
+    up(4.4, 1.3)
+    expect(S().doc.nodes[0]).toMatchObject({ x: 3, y: 0 })
+    expect(hit('node', 'a').getAttribute('transform')).toBe(shown)
+    // Ctrl held: free for this drag
+    drag(hit('node', 'a'), [4, 1], [4.3, 1.2], { ctrlKey: true })
+    expect(S().doc.nodes[0]).toMatchObject({ x: 3.3, y: 0.2 })
+    // one that was put down off the grid comes back onto it when carried with snapping on
+    drag(hit('node', 'a'), [4.3, 1.2], [5.2, 1.2])
+    expect(S().doc.nodes[0]).toMatchObject({ x: 4, y: 0 })
+    cleanup()
+    // and with snapping off, Ctrl turns it on for the one drag
+    mount()
+    drag(hit('node', 'a'), [1, 1], [4.4, 1.3], { ctrlKey: true })
+    expect(S().doc.nodes[0]).toMatchObject({ x: 3, y: 0 })
   })
   it('moves the whole selection together', () => {
     mount(undefined, { selection: ['a', 'b'] })
@@ -194,8 +225,12 @@ describe('moving', () => {
     act(() => S().undo())
     expect(S().doc.nodes).toHaveLength(2)
   })
-  it('moves labels in half cells', () => {
+  it('a label goes exactly where it is dragged, and keeps to half cells with snapping on', () => {
     mount(docOf([], [], { labels: [label('l', 0, 0)] }))
+    drag(hit('label', 'l'), [0, 0], [1.6, 0.3])
+    expect(S().doc.labels[0]).toMatchObject({ x: 1.6, y: 0.3 })
+    cleanup()
+    mount(docOf([], [], { labels: [label('l', 0, 0)] }), { snap: true })
     drag(hit('label', 'l'), [0, 0], [1.6, 0.3])
     expect(S().doc.labels[0]).toMatchObject({ x: 1.5, y: 0.5 })
   })
@@ -235,17 +270,27 @@ describe('resizing', () => {
     act(() => { useStore.setState({ yaw: 0, pitch: 90 }) })
     expect([cur(0), cur(1), cur(2), cur(3)]).toEqual(['nwse-resize', 'nesw-resize', 'nwse-resize', 'nesw-resize'])
   })
-  it('grows from the far corner in half cells, as one undo step', () => {
+  it('grows from the far corner by as much as the corner is pulled, as one undo step', () => {
     mount(undefined, { selection: ['a'] })
     down(document.querySelector('[data-handle="n2"]')!, 2, 2)
     move(3.1, 2.6)
     // shown at its new size while the corner is held; written when it is let go
-    expect(hit('node', 'a').querySelector('.nd-body g')!.getAttribute('transform')).toBe('scale(1.5)')
+    expect(hit('node', 'a').querySelector('.nd-body g')!.getAttribute('transform')).toBe('scale(1.55)')
     expect(S().doc.nodes[0].scale).toBeUndefined()
     move(4.2, 4.2)
     up(4.2, 4.2)
-    expect(S().doc.nodes[0]).toMatchObject({ x: 0, y: 0, scale: 2 })
+    expect(S().doc.nodes[0]).toMatchObject({ x: 0, y: 0, scale: 2.1 })
     expect(S().past).toHaveLength(1)
+  })
+  it('caught off the middle of its handle, a corner does not jump: the size changes only by how far it is pulled', () => {
+    mount(undefined, { selection: ['a'] })
+    drag(document.querySelector('[data-handle="n2"]')!, [2.12, 2.09], [3.12, 3.09])
+    expect(S().doc.nodes[0]).toMatchObject({ x: 0, y: 0, scale: 1.5 })
+  })
+  it('with snapping on a component is sized in half cells', () => {
+    mount(undefined, { selection: ['a'], snap: true })
+    drag(document.querySelector('[data-handle="n2"]')!, [2, 2], [3.1, 2.6])
+    expect(S().doc.nodes[0]).toMatchObject({ x: 0, y: 0, scale: 1.5 })
   })
   it('pins the opposite corner when dragging the near one', () => {
     mount(undefined, { selection: ['a'] })
@@ -263,8 +308,15 @@ describe('resizing', () => {
     drag(document.querySelector('[data-handle="n2"]')!, [6, 6], [-30, -30])
     expect(S().doc.nodes[0]).toMatchObject({ x: 0, y: 0, scale: MIN_SCALE })
   })
-  it('resizes an area from any corner, never below one cell', () => {
+  it('an area corner goes exactly as far as it is pulled, from wherever on its handle it was caught', () => {
     mount(docOf([], [], { areas: [area('r', 0, 0, 6, 4)] }), { selection: ['r'] })
+    drag(document.querySelector('[data-handle="r2"]')!, [6.1, 4.05], [9.3, 7.35])
+    expect(S().doc.areas[0]).toMatchObject({ x: 0, y: 0, w: 9.2, d: 7.3 })
+    drag(document.querySelector('[data-handle="r0"]')!, [0, 0], [-2.13, -1.4])
+    expect(S().doc.areas[0]).toMatchObject({ x: -2.13, y: -1.4, w: 11.33, d: 8.7 })
+  })
+  it('with snapping on, resizes an area from any corner in half cells, never below one cell', () => {
+    mount(docOf([], [], { areas: [area('r', 0, 0, 6, 4)] }), { selection: ['r'], snap: true })
     const h = (i: number) => document.querySelector(`[data-handle="r${i}"]`)!
     drag(h(2), [6, 4], [9.2, 7.3])
     expect(S().doc.areas[0]).toMatchObject({ x: 0, y: 0, w: 9, d: 7.5 })
@@ -291,7 +343,8 @@ describe('tools', () => {
     expect(document.querySelector('.overlay polygon')).not.toBeNull()
     up(5.3, 3.8)
     expect(S().doc.areas).toHaveLength(1)
-    expect(S().doc.areas[0]).toMatchObject({ x: -2, y: -2, w: 7, d: 6, kind: 'vpc', name: 'VPC' })
+    // from where the pointer went down to where it came up, exactly
+    expect(S().doc.areas[0]).toMatchObject({ x: -2.2, y: -2.1, w: 7.5, d: 5.9, kind: 'vpc', name: 'VPC' })
     expect(S()).toMatchObject({ tool: 'select', panel: 'inspect', selection: [S().doc.areas[0].id] })
     act(() => S().set({ tool: 'area' }))
     drag(svg(), [3, 3], [0, 0]) // drawn backwards
@@ -316,7 +369,7 @@ describe('tools', () => {
     const before = S().focusName
     drag(svg(), [3.2, -1.3], [3.2, -1.3])
     expect(S().doc.labels).toHaveLength(1)
-    expect(S().doc.labels[0]).toMatchObject({ x: 3, y: -1.5, text: 'Label' })
+    expect(S().doc.labels[0]).toMatchObject({ x: 3.2, y: -1.3, text: 'Label' })
     expect(S()).toMatchObject({ tool: 'select', panel: 'inspect', focusName: before + 1 })
     expect(S().selection).toEqual([S().doc.labels[0].id])
   })
@@ -501,7 +554,8 @@ describe('placing from the library', () => {
     expect(document.querySelector('.ghost')).not.toBeNull()
     fireEvent.pointerUp(window, at(4.2, 6.8))
     expect(S().doc.nodes).toHaveLength(1)
-    expect(S().doc.nodes[0]).toMatchObject({ type: 'rds', x: 3, y: 6, name: 'rds-1' })
+    // its middle where the pointer was
+    expect(S().doc.nodes[0]).toMatchObject({ type: 'rds', x: 3.2, y: 5.8, name: 'rds-1' })
     expect(S().placing).toBeNull()
     expect(document.querySelector('.ghost')).toBeNull()
     expect(S().selection).toEqual([S().doc.nodes[0].id])
@@ -699,13 +753,13 @@ describe('touch: one finger', () => {
     expect(S().view).toEqual({ x: 550, y: 340, k: 1 })
     expect(S().selection).toEqual(['a']) // a pan is not a tap: the selection stays
   })
-  it('dragging a selected component moves it, snapped to the grid, as one undo step', () => {
+  it('dragging a selected component moves it exactly as far as the finger goes, as one undo step', () => {
     mount(undefined, { selection: ['a'] })
     f1.down(hit('node', 'a'), 1, 1)
     f1.move(3.2, 2.1)
     expect(busy()).toBe(true)
     f1.up(3.2, 2.1)
-    expect(S().doc.nodes[0]).toMatchObject({ x: 2, y: 1 })
+    expect(S().doc.nodes[0]).toMatchObject({ x: 2.2, y: 1.1 })
     expect(S().view).toEqual({ x: 600, y: 300, k: 1 })
     expect(S().past).toHaveLength(1)
     act(() => S().undo())
@@ -1281,6 +1335,27 @@ describe('touch targets and the phone layout', () => {
     mount(undefined, { selection: ['a'] })
     expect(targets()).toHaveLength(0)
   })
+  it('where a door\'s invisible finger target reaches over the body of its own component, a press there takes the component, not the door', () => {
+    stubMedia(COARSE)
+    mount(undefined, { selection: ['a'] })
+    const door = document.querySelector('[data-handle="connect"] circle[fill="transparent"]')!
+    // the finger is on the door's target and on the body at once, as it is when the view is small
+    // jsdom has no layout, so it has no elementsFromPoint of its own
+    const under = vi.fn<() => Element[]>(() => [door, hit('node', 'a').querySelector('.nd-body')!])
+    Object.defineProperty(document, 'elementsFromPoint', { value: under, configurable: true })
+    drag(door, [1, 1], [2.3, 1.4])
+    expect(S().doc.nodes[0]).toMatchObject({ x: 1.3, y: 0.4 })
+    expect(S().doc.edges).toHaveLength(0)
+    expect(document.querySelector('.wire')).toBeNull()
+    // clear of the body, the same target still pulls a connection out
+    const again = document.querySelector('[data-handle="connect"] circle[fill="transparent"]')!
+    under.mockImplementation(() => [again])
+    down(again, 3, 1)
+    move(5, 1)
+    expect(document.querySelector('.wire')).not.toBeNull()
+    fireEvent.keyDown(window, { key: 'Escape' })
+    delete (document as any).elementsFromPoint
+  })
   it('fingers get a generous invisible target around every handle', () => {
     stubMedia(COARSE)
     mount(undefined, { selection: ['a'] })
@@ -1452,23 +1527,56 @@ describe('shaping a connection', () => {
     expect(E().runs).toEqual(fast)
     expect(S().past).toHaveLength(1)
   })
-  it('near something it would line up with it settles there; with Alt held, or with snapping off, it goes only where it is put', () => {
+  it('goes only where it is put. With snapping on it settles on what it would line up with from a few pixels away; Ctrl flips that for one drag, and Alt holds all of it off', () => {
     // a Z between a (middle y = 1) and b (middle y = 2) whose last run is at y = 2: the first run can come as far as y = 1.85
-    const near = () => mount(docOf([node('a'), node('b', 'rds', 8, 1)], [edge('e', 'a', 'b', { ...track, fromAt: -0.5, runs: [5] })]), { selection: ['e'] })
+    const near = (state: object = {}) => mount(docOf([node('a'), node('b', 'rds', 8, 1)], [edge('e', 'a', 'b', { ...track, fromAt: -0.5, runs: [5] })]), { selection: ['e'], ...state })
     near()
     drag(handle('s0'), [3, 0.5], [3, 1.84])
+    expect(E()).toMatchObject({ fromAt: 0.84, runs: [5] })
+    // with snapping off, Ctrl turns it on for the one drag; Alt does not
+    act(() => S().undo())
+    drag(handle('s0'), [3, 0.5], [3, 1.84], { ctrlKey: true })
     expect(E().runs).toEqual([])
-    cleanup(); near()
-    drag(handle('s0'), [3, 0.5], [3, 1.84], { altKey: true })
-    expect(E()).toMatchObject({ fromAt: 0.84, runs: [5] })
-    cleanup(); near()
-    act(() => S().set({ snapLines: false }))
-    drag(handle('s0'), [3, 0.5], [3, 1.84])
-    expect(E()).toMatchObject({ fromAt: 0.84, runs: [5] })
-    // and with snapping off, Alt turns it on for the one drag
     act(() => S().undo())
     drag(handle('s0'), [3, 0.5], [3, 1.84], { altKey: true })
+    expect(E()).toMatchObject({ fromAt: 0.84, runs: [5] })
+    cleanup(); near({ snap: true })
+    drag(handle('s0'), [3, 0.5], [3, 1.84])
     expect(E().runs).toEqual([])
+    cleanup(); near({ snap: true })
+    drag(handle('s0'), [3, 0.5], [3, 1.84], { ctrlKey: true })
+    expect(E()).toMatchObject({ fromAt: 0.84, runs: [5] })
+    cleanup(); near({ snap: true })
+    drag(handle('s0'), [3, 0.5], [3, 1.84], { altKey: true })
+    expect(E()).toMatchObject({ fromAt: 0.84, runs: [5] })
+  })
+  it('a run let go a few pixels short of level with the next one along is level, with snapping off: the kink is never made', () => {
+    // runs at y 1, x 3, y 7, x 6, y 5: the middle one is brought up to within three pixels of the first
+    const zig = () => mount(docOf([node('a'), node('b', 'rds', 8, 4)], [edge('e', 'a', 'b', { ...track, runs: [3, 7, 6] })]), { selection: ['e'] })
+    zig()
+    expect(S().snap).toBe(false)
+    drag(handle('s2'), [4.5, 7], [4.5, 1.07])
+    expect(E()).toMatchObject({ fromAt: 0, toAt: 0, runs: [6] })
+    // what was on screen as it was let go is what was kept
+    expect(S().past).toHaveLength(1)
+    // a deliberate offset, a quarter of a cell, is kept as made
+    cleanup(); zig()
+    drag(handle('s2'), [4.5, 7], [4.5, 1.25])
+    expect(E().runs).toEqual([3, 1.25, 6])
+    // and Alt keeps even a hair of one
+    cleanup(); zig()
+    drag(handle('s2'), [4.5, 7], [4.5, 1.07], { altKey: true })
+    expect(E().runs).toEqual([3, 1.07, 6])
+  })
+  it('once level it stays level until it is pulled clear, so it cannot flicker at the edge', () => {
+    mount(docOf([node('a'), node('b', 'rds', 8, 4)], [edge('e', 'a', 'b', { ...track, runs: [3, 7, 6] })]), { selection: ['e'] })
+    down(handle('s2'), 4.5, 7); move(4.5, 4); move(4.5, 1.05)
+    move(4.5, 1.13) // past where it would have been caught, but not yet clear
+    up(4.5, 1.13)
+    expect(E().runs).toEqual([6])
+    act(() => S().undo())
+    down(handle('s2'), 4.5, 7); move(4.5, 4); move(4.5, 1.13); up(4.5, 1.13)
+    expect(E().runs).toEqual([3, 1.13, 6])
   })
   it('a turn taken in the hand moves both runs that meet at it', () => {
     bent()
@@ -1502,7 +1610,7 @@ describe('shaping a connection', () => {
   })
   it('the first run pulled level with the last makes the line straight: the turn between them is taken out', () => {
     // a is at y 0 to 2 and b at y 1 to 3, with a Z laid between them
-    mount(docOf([node('a'), node('b', 'rds', 8, 1)], [edge('e', 'a', 'b', { ...track, runs: [5] })]), { selection: ['e'] })
+    mount(docOf([node('a'), node('b', 'rds', 8, 1)], [edge('e', 'a', 'b', { ...track, runs: [5] })]), { selection: ['e'], snap: true })
     expect(names()).toEqual(['c1', 'c2', 'ea', 'eb', 's0', 's1', 's2'])
     down(handle('s0'), 3, 1)
     move(3, 1.84) // near enough to where the two ends can meet (y = 1.85) to be drawn onto that line
@@ -1514,7 +1622,7 @@ describe('shaping a connection', () => {
     expect(S().past).toHaveLength(1)
   })
   it('a straight line pulled sideways slides along both components, and past their corners steps out and round', () => {
-    linked()
+    linked({}, { snap: true })
     drag(handle('s0'), [5, 1], [5, 1.5])
     expect(E()).toMatchObject({ fromAt: 0.5, toAt: 0.5, runs: [] })
     drag(handle('s0'), [5, 1.5], [5, 4])
@@ -1690,7 +1798,7 @@ describe('shaping a connection', () => {
     stubMedia(COARSE)
     const buzz = vi.fn<(n: number) => boolean>(() => true)
     vi.stubGlobal('navigator', { ...navigator, vibrate: buzz })
-    mount(docOf([node('a'), node('b', 'rds', 8, 1)], [edge('e', 'a', 'b', { ...track, runs: [5] })]), { selection: ['e'] })
+    mount(docOf([node('a'), node('b', 'rds', 8, 1)], [edge('e', 'a', 'b', { ...track, runs: [5] })]), { selection: ['e'], snap: true })
     const view = S().view
     const o = { pointerType: 'touch', pointerId: 31 }
     down(handle('s0'), 3, 1, o); move(3, 1.5, o); move(3, 1.86, o); up(3, 1.86, o) // let go just by the line where the two ends can meet
@@ -1989,10 +2097,9 @@ describe('carrying', () => {
     mount()
     down(hit('node', 'a'), 1, 1)
     move(4.4, 2.3)
-    expect(document.querySelector('.landing')).not.toBeNull()
+    expect(drawnAt('a')).toEqual([3.4, 1.3])
     fireEvent.keyDown(window, { key: 'Escape' })
     expect(drawnAt('a')).toEqual([0, 0])
-    expect(document.querySelector('.landing')).toBeNull()
     expect(document.querySelector('.canvas-wrap')).not.toHaveClass('busy')
     move(6, 3); up(6, 3) // the rest of the gesture is ignored
     expect(S().doc.nodes[0]).toMatchObject({ x: 0, y: 0 })
@@ -2018,15 +2125,17 @@ describe('carrying', () => {
     window.removeEventListener('keydown', seen)
     up(1, 1)
   })
-  it('never lands on another component: the nearest free cell is marked and taken', () => {
+  it('is put exactly where it is dropped, even on another component: nothing pushes it aside', () => {
     mount()
     down(hit('node', 'a'), 1, 1)
     move(9, 1) // straight onto `b`
     up(9, 1)
-    const [a, b] = S().doc.nodes
-    expect(a.x + 2 <= b.x || b.x + 2 <= a.x || a.y + 2 <= b.y || b.y + 2 <= a.y).toBe(true)
-    expect(Math.abs(a.x - 8) + Math.abs(a.y)).toBe(2)
-    expect(S().past).toHaveLength(1)
+    expect(S().doc.nodes[0]).toMatchObject({ x: 8, y: 0 })
+    expect(S().doc.nodes[1]).toMatchObject({ x: 8, y: 0 })
+    // and right up against one, a hair's breadth away
+    drag(hit('node', 'a'), [9, 1], [7.03, 1.02])
+    expect(S().doc.nodes[0]).toMatchObject({ x: 6.03, y: 0.02 })
+    expect(S().past).toHaveLength(2)
   })
   it('shift keeps the move to the axis it has gone furthest along', () => {
     mount()
@@ -2065,16 +2174,17 @@ describe('carrying', () => {
     expect(document.querySelector('.drop-area')).toBeNull()
     up(14, 5.2)
   })
-  it('eases the last step into its cell, briefly', () => {
+  it('nothing is eased or adjusted after it is let go: no timers are left running that could move it', () => {
     vi.useFakeTimers()
     mount()
     drag(hit('node', 'a'), [1, 1], [3.3, 1])
-    expect(document.querySelector('.canvas-wrap')).toHaveClass('settle')
-    act(() => { vi.advanceTimersByTime(200) })
+    const shown = hit('node', 'a').getAttribute('transform')
     expect(document.querySelector('.canvas-wrap')).not.toHaveClass('settle')
-    // a press that never became a carry settles nothing
-    drag(hit('node', 'a'), [3, 1], [3.01, 1])
-    expect(document.querySelector('.canvas-wrap')).not.toHaveClass('settle')
+    act(() => { vi.advanceTimersByTime(2000) })
+    expect(hit('node', 'a').getAttribute('transform')).toBe(shown)
+    expect(S().doc.nodes[0]).toMatchObject({ x: 2.3, y: 0 })
+    expect(S().past).toHaveLength(1)
+    vi.useRealTimers()
   })
   it('carried to the edge of the clear ground, the view moves on and the component with it', () => {
     vi.useFakeTimers()
@@ -2096,16 +2206,15 @@ describe('carrying', () => {
     expect(S().view.x).toBe(rest)
     fireEvent.pointerUp(svg(), { pointerId: 1, clientX: 600, clientY: 400 })
   })
-  it('a very large group is redrawn every quarter cell instead of every pixel', () => {
+  it('a very large group follows the pointer just as exactly', () => {
     const many = Array.from({ length: 48 }, (_, i) => node('n' + i, 'ec2', (i % 8) * 4, Math.floor(i / 8) * 4))
     mount(docOf(many), { selection: many.map((n) => n.id) })
     down(hit('node', 'n0'), 1, 1)
     move(1.37, 1)
-    const x = drawnAt('n0')[0]
-    expect(Math.abs(x * 4 - Math.round(x * 4))).toBeLessThan(1e-6)
+    expect(drawnAt('n0')[0]).toBe(0.37)
     move(3.2, 1); up(3.2, 1)
-    expect(S().doc.nodes[0].x).toBe(2)
-    expect(S().doc.nodes[47].x).toBe(30)
+    expect(S().doc.nodes[0].x).toBe(2.2)
+    expect(S().doc.nodes[47].x).toBe(30.2)
   })
   it('an area corner is shown where it is dragged and written when it is let go', () => {
     mount(docOf([], [], { areas: [area('r', 0, 0, 6, 4)] }), { selection: ['r'] })
@@ -2146,13 +2255,23 @@ describe('selecting with a box', () => {
 })
 
 describe('placing from the library, continued', () => {
-  it('the ghost follows the pointer between cells while the cell it will land in is marked', () => {
+  it('the ghost is drawn exactly where the component will be put, and that is where it is put', () => {
     mount(docOf(), { placing: 'rds' })
     fireEvent.pointerMove(window, at(4.3, 6.8))
     const body = document.querySelector('.ghost g[transform]')!.getAttribute('transform')!.match(/translate\((-?[\d.]+) (-?[\d.]+)\)/)!
-    const [wx] = unproject(projNow(), Number(body[1]), Number(body[2]))
-    expect(wx).toBeGreaterThan(3.05)
-    expect(wx).toBeLessThan(3.3)
+    const [wx, wy] = unproject(projNow(), Number(body[1]), Number(body[2]))
+    expect(wx).toBeCloseTo(3.3, 2)
+    expect(wy).toBeCloseTo(5.8, 2)
+    fireEvent.pointerUp(window, at(4.3, 6.8))
+    expect(S().doc.nodes[0]).toMatchObject({ x: 3.3, y: 5.8 })
+  })
+  it('with snapping on a new component is put on the nearest whole cell, and the ghost shows that cell', () => {
+    mount(docOf(), { placing: 'rds', snap: true })
+    fireEvent.pointerMove(window, at(4.3, 6.8))
+    const body = document.querySelector('.ghost g[transform]')!.getAttribute('transform')!.match(/translate\((-?[\d.]+) (-?[\d.]+)\)/)!
+    expect(unproject(projNow(), Number(body[1]), Number(body[2])).map((v) => Math.round(v * 100) / 100)).toEqual([3, 6])
+    fireEvent.pointerUp(window, at(4.3, 6.8))
+    expect(S().doc.nodes[0]).toMatchObject({ x: 3, y: 6 })
   })
   it('lines up with what is already there show while it is carried in', () => {
     mount(undefined, { placing: 'rds' })
@@ -2161,11 +2280,10 @@ describe('placing from the library, continued', () => {
     fireEvent.pointerUp(window, at(1, 9))
     expect(document.querySelectorAll('.guide')).toHaveLength(0)
   })
-  it('never lands on a component that is already there', () => {
+  it('is put where it is dropped even when something is already there', () => {
     mount(undefined, { placing: 'rds' })
     fireEvent.pointerUp(window, at(1.2, 1.1)) // right on top of `a`
-    const [a, , made] = S().doc.nodes
-    expect(made.x + 2 <= a.x || a.x + 2 <= made.x || made.y + 2 <= a.y || a.y + 2 <= made.y).toBe(true)
+    expect(S().doc.nodes[2]).toMatchObject({ x: 0.2, y: 0.1 })
   })
   it('dropped on a connection, it goes into the middle of it: the line lights up first, and it is one step', () => {
     mount(docOf([node('a'), node('b', 'rds', 8, 0)], [edge('e', 'a', 'b', { label: 'orders', kind: 'data', via: [[5, 3]], toSide: 's' })]), { placing: 'lambda' })

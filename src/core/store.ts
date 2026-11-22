@@ -3,7 +3,8 @@ import { defOf, defaultProps } from './catalog'
 import { ISO_PITCH, ISO_YAW } from './iso'
 import { inArea } from './layout'
 import { guessKind, kindInfo } from './links'
-import { bendAt, isShaped, keepPath, lineUpEnds, shifted, straighten, unbend, unshaped } from './shape'
+import { bendAt, isShaped, keepPath, lineUpEnds, shifted, straighten, tidyKinks, unbend, unshaped } from './shape'
+import { withPlans } from './router'
 import { getPref, saveDoc, setPref } from './storage'
 import { type AreaT, type Doc, type EdgeT, type LabelT, type LinkKind, type NodeT, type PricingModel, type Side, emptyDoc, uid } from './types'
 
@@ -36,8 +37,8 @@ interface State {
   panel: Panel
   lens: Lens
   showGrid: boolean
-  /** a line being reshaped is drawn to what it would line up with; off, it goes only where it is put */
-  snapLines: boolean
+  /** off (as it starts): everything goes exactly where it is put. On: components keep to the grid and lines are drawn to what they would line up with */
+  snap: boolean
   showLabels: boolean
   flow: boolean
   /** which cloud the library is showing */
@@ -88,6 +89,8 @@ interface State {
   removeBend: (id: string, corner: number) => void
   /** make connections one straight line where they can be; says how many could not, and why */
   straighten: (ids: string[]) => { straight: number; apart: number }
+  /** take the small kinks out of these connections; says how many it changed */
+  cleanLines: (ids: string[]) => number
   /** move one end's component level with the other, so the connection between them is straight */
   lineUp: (id: string) => void
   /** draw connections as right-angled runs (no shape), one direct line, or a curve */
@@ -143,7 +146,7 @@ export const useStore = create<State>((set, get) => ({
   panel: 'inspect',
   lens: 'none',
   showGrid: true,
-  snapLines: true,
+  snap: getPref('snap', false),
   showLabels: true,
   flow: getPref('flow', true),
   provider: getPref<'aws' | 'gcp' | 'azure'>('provider', 'aws'),
@@ -158,12 +161,14 @@ export const useStore = create<State>((set, get) => ({
   fresh: null,
   modal: null,
 
-  load: (doc) => set({ doc, past: [], future: [], selection: [], tool: 'select', placing: null, linkFrom: null, trace: null, multi: false, saved: true, saveFailed: false, lens: 'none', modal: null, panel: 'inspect' }),
+  load: (doc) => set({ doc: withPlans(doc), past: [], future: [], selection: [], tool: 'select', placing: null, linkFrom: null, trace: null, multi: false, saved: true, saveFailed: false, lens: 'none', modal: null, panel: 'inspect' }),
 
   apply: (fn, transient) => {
     const { doc, past } = get()
-    const next = fn(doc)
-    if (next === doc) return
+    const made = fn(doc)
+    if (made === doc) return
+    // every line the router owns has its path planned here, once, as part of the edit that called for it
+    const next = withPlans(made)
     set(transient
       ? { doc: touch(next), saved: false }
       : { doc: touch(next), past: [...past.slice(-(HISTORY - 1)), doc], future: [], saved: false })
@@ -253,11 +258,7 @@ export const useStore = create<State>((set, get) => ({
     if (!e || !doc.nodes.some((n) => n.id === node)) return false
     const from = end === 'from' ? node : e.from, to = end === 'to' ? node : e.to
     if (from === to) return false
-    const key = end === 'from' ? 'fromSide' : 'toSide'
-    // a side is pinned only when they aimed for one. The track the line was following was laid between the old ends,
-    // so it is let go and the line is planned afresh from where it now stands; the other end keeps the side it was given
-    const { via: _v, runs: _r, fromAt: _a, toAt: _b, ...rest } = e
-    get().apply((d) => ({ ...d, edges: d.edges.map((x) => (x.id === id ? { ...rest, from, to, [key]: side } : x)) }))
+    get().apply((d) => ({ ...d, edges: d.edges.map((x) => (x.id === id ? reended(e, end, node, side) : x)) }))
     return true
   },
   setKind: (ids, kind) => {
@@ -269,7 +270,8 @@ export const useStore = create<State>((set, get) => ({
     // the same line the other way round: its ends swap, and so do the sides and the order of its runs
     edges: d.edges.map((e) => (ids.includes(e.id) ? { ...e, from: e.to, to: e.from, fromSide: e.toSide, toSide: e.fromSide, fromAt: e.toAt, toAt: e.fromAt, ...(e.via ? { via: [...e.via].reverse() } : {}), ...(e.runs ? { runs: [...e.runs].reverse() } : {}) } : e)),
   })),
-  resetRoute: (ids) => get().apply((d) => ({ ...d, edges: d.edges.map((e) => (ids.includes(e.id) && isShaped(e) ? unshaped(e) : e)) })),
+  // handing a line to the router is asking for it to be planned now: whatever it carried, and any plan it had, goes
+  resetRoute: (ids) => get().apply((d) => ({ ...d, edges: d.edges.map((e) => (ids.includes(e.id) && (isShaped(e) || e.plan) ? unshaped(e) : e)) })),
   keepRoute: (ids) => get().apply((d) => keepPath(d, ids)),
   addBend: (id, at) => get().apply((d) => bendAt(d, id, at)),
   removeBend: (id, corner) => get().apply((d) => unbend(d, id, corner)),
@@ -277,6 +279,11 @@ export const useStore = create<State>((set, get) => ({
     const { doc, ...count } = straighten(get().doc, ids)
     get().apply(() => doc)
     return count
+  },
+  cleanLines: (ids) => {
+    const { doc, tidied } = tidyKinks(get().doc, ids)
+    if (tidied) get().apply(() => doc)
+    return tidied
   },
   lineUp: (id) => get().apply((d) => lineUpEnds(d, id)),
   setShape: (ids, shape) => get().apply((d) => ({
@@ -376,6 +383,16 @@ function stillThere(doc: Doc, selection: string[]): string[] {
   if (!selection.length) return selection
   const ids = new Set([...doc.nodes, ...doc.edges, ...doc.areas, ...doc.labels].map((x) => x.id))
   return selection.filter((id) => ids.has(id))
+}
+
+/**
+ * A connection with one end moved to another component. The track it was following was laid between the old ends, so it is
+ * let go and the line is planned afresh; a side is pinned only when one was aimed for, and the other end keeps what it had.
+ * The same function draws the line while the end is still in the hand, so what is shown is what is made.
+ */
+export function reended(e: EdgeT, end: 'from' | 'to', node: string, side?: Side): EdgeT {
+  const { via: _v, runs: _r, fromAt: _a, toAt: _b, plan: _p, ...rest } = e
+  return { ...rest, from: end === 'from' ? node : e.from, to: end === 'to' ? node : e.to, [end === 'from' ? 'fromSide' : 'toSide']: side }
 }
 
 export function moveItems(doc: Doc, base: Doc, sel: Set<string>, dx: number, dy: number): Doc {

@@ -359,6 +359,12 @@ describe('coerceDoc: connections', () => {
     const e = coerceDoc(raw({ fromAt: 'x', toAt: Infinity, shape: 'wiggly' }))!.edges[0]
     for (const k of ['fromAt', 'toAt', 'shape']) expect(k in e, k).toBe(false)
   })
+  it('keeps a planned path as it was saved, and drops one that is not a path', () => {
+    const plan = { key: 'a,0,0,2,b,8,0,2,,,,', fromSide: 'e', toSide: 'w', pts: [[2, 1], [8, 1]] }
+    expect(coerceDoc(raw({ plan }))!.edges[0].plan).toEqual(plan)
+    for (const bad of [{ ...plan, key: 7 }, { ...plan, fromSide: 'up' }, { ...plan, toSide: 0 }, { ...plan, pts: [[2, 1]] }, { ...plan, pts: 'x' }, { ...plan, pts: [[2, 1], [NaN, 1]] }, { ...plan, pts: [[2, 1], 5] }, { ...plan, pts: Array.from({ length: 131 }, () => [1, 1]) }, 'x', null])
+      expect('plan' in coerceDoc(raw({ plan: bad }))!.edges[0], JSON.stringify(bad).slice(0, 40)).toBe(false)
+  })
   it('refuses waypoints that are not finite pairs, or absurdly many', () => {
     for (const via of [[[1, 2, 3]], [[NaN, 1]], [[Infinity, 0]], 'x', [], Array.from({ length: 65 }, () => [1, 1])]) expect('via' in coerceDoc(raw({ via }))!.edges[0], JSON.stringify(via).slice(0, 30)).toBe(false)
   })
