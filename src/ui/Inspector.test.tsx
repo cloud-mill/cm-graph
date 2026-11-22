@@ -437,6 +437,28 @@ describe('connection: what it is and how it runs', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Route automatically' }))
     expect(E().runs).toBeUndefined()
   })
+  it('says whose line it is, and hands it over either way without moving it', async () => {
+    show(doc(), ['e'])
+    const auto = () => screen.getByRole('radio', { name: 'Automatic' }), manual = () => screen.getByRole('radio', { name: 'Manual' })
+    expect(auto()).toBeChecked()
+    await userEvent.click(manual())
+    expect(E()).toMatchObject({ runs: [], fromSide: 'e', toSide: 'w' })
+    expect(manual()).toBeChecked()
+    await userEvent.click(auto())
+    expect(E().runs).toBeUndefined()
+    expect(auto()).toBeChecked()
+    // a curve is always the router's
+    await userEvent.click(screen.getByRole('radio', { name: 'Curved' }))
+    expect(manual()).toBeDisabled()
+    expect(screen.queryByRole('switch', { name: /Snap lines/ })).toBeNull()
+  })
+  it('snapping while a line is dragged can be turned off', async () => {
+    show(doc(), ['e'])
+    const snap = screen.getByRole('switch', { name: 'Snap lines into place while dragging' })
+    expect(snap).toBeChecked()
+    await userEvent.click(snap)
+    expect(S().snapLines).toBe(false)
+  })
   it('a line that was shaped by hand says so, and one click makes it straight again', async () => {
     show(doc({ fromSide: 'e', toSide: 'w', fromAt: 0, toAt: 0, runs: [2.5, 4, 7.5] }), ['e'])
     expect(screen.getByText(/Shaped by hand\. It keeps this shape when things move/)).toBeInTheDocument()

@@ -28,7 +28,7 @@ describe('ContextMenu', () => {
     expect(names()).toEqual(['Duplicate', 'Copy', 'Wrap in group', 'Zoom to selection', 'Follow the flow', 'Edit properties', 'Delete'])
     document.body.innerHTML = ''
     open('edge', ['e'])
-    expect(names()).toEqual(['Straighten', 'Follow the flow', 'Reverse direction', 'Edit properties', 'Delete'])
+    expect(names()).toEqual(['Straighten', 'Add a bend here', 'Keep this path', 'Follow the flow', 'Reverse direction', 'Edit properties', 'Delete'])
     document.body.innerHTML = ''
     open('area', ['r'])
     expect(names()).toEqual(['Duplicate', 'Copy', 'Fit to contents', 'Edit properties', 'Delete'])
@@ -96,6 +96,29 @@ describe('ContextMenu', () => {
     expect(names()).toContain('Route automatically')
     await click('Route automatically')
     expect(S().doc.edges[0].runs).toBeUndefined()
+  })
+  it('puts a bend in a line where the menu was opened, and keeps a path the router planned', async () => {
+    const onClose = open('edge', ['e'])
+    await click('Add a bend here')
+    // the line ran straight along y = 3; it now steps down half a cell where it was pointed at
+    expect(S().doc.edges[0]).toMatchObject({ fromSide: 'e', toSide: 'w', toAt: 0.5, runs: [4.5] })
+    expect(S().past).toHaveLength(1)
+    expect(onClose).toHaveBeenCalled()
+    document.body.innerHTML = ''
+    render(<ContextMenu menu={{ x: 100, y: 120, wx: 4, wy: 7, target: 'edge' }} onClose={onClose} />)
+    // it is the user's line now, so there is nothing to keep, only to hand back
+    expect(names()).not.toContain('Keep this path')
+    await click('Route automatically')
+    document.body.innerHTML = ''
+    render(<ContextMenu menu={{ x: 100, y: 120, wx: 4, wy: 7, target: 'edge' }} onClose={onClose} />)
+    await click('Keep this path')
+    expect(S().doc.edges[0].runs).toEqual([])
+    // a curve has neither
+    act(() => S().setShape(['e'], 'curved'))
+    document.body.innerHTML = ''
+    render(<ContextMenu menu={{ x: 100, y: 120, wx: 4, wy: 7, target: 'edge' }} onClose={onClose} />)
+    expect(names()).not.toContain('Add a bend here')
+    expect(names()).not.toContain('Keep this path')
   })
   it('says when straightening will move a component, and does it', async () => {
     resetStore({ doc: docOf([node('a', 'ec2', 0, 0), node('b', 'rds', 10, 6, { name: 'db' })], [edge('e', 'a', 'b')]), selection: ['e'] })

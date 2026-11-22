@@ -6,14 +6,14 @@ import { useStore } from '../core/store'
 
 export function Segmented<T extends string>({ value, options, onChange, size }: {
   value: T
-  options: { value: T; label: ReactNode; title?: string }[]
+  options: { value: T; label: ReactNode; title?: string; disabled?: boolean }[]
   onChange: (v: T) => void
   size?: 'sm'
 }) {
   return (
     <div className={'seg' + (size === 'sm' ? ' seg-sm' : '')} role="radiogroup">
       {options.map((o) => (
-        <button key={o.value} role="radio" aria-checked={o.value === value} className={o.value === value ? 'on' : ''} title={o.title} onClick={() => onChange(o.value)}>
+        <button key={o.value} role="radio" aria-checked={o.value === value} className={o.value === value ? 'on' : ''} title={o.title} disabled={o.disabled} onClick={() => onChange(o.value)}>
           {o.label}
         </button>
       ))}

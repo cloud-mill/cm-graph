@@ -114,8 +114,8 @@ test.describe('connections: shaping by hand', () => {
     await pull(page, app, 's0', 0, 4)
     await pull(page, app, 's2', 0, -2)
     expect((await E(app)).runs).toEqual([2.5, 3, 7.5])
-    // near enough is enough: it is drawn onto the line the ends are on
-    await pull(page, app, 's2', 0, -1.8)
+    // within a few pixels is enough: it is drawn onto the line the ends are on (they stopped at the corners of their sides, y = 1.85)
+    await pull(page, app, 's2', 0, -1.13)
     expect((await E(app)).runs).toEqual([])
     await expect(page.locator('.run-hit')).toHaveCount(1)
     expect((await page.locator('.edge-hit[data-id="e"]').getAttribute('d'))!.includes('Q')).toBe(false)

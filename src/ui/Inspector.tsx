@@ -8,7 +8,7 @@ import { KINDS, ORIGINS, captionOf, describe, kindInfo, linkProblems, traceFlow 
 import { coalesce, useStore } from '../core/store'
 import { type AreaT, type EdgeT, type LabelT, type LinkKind, type NodeT, centerOf } from '../core/types'
 import { NumberInput, Row, Segmented, Select, Swatches, TextInput, Toggle, keys } from './atoms'
-import { isShaped, straightness } from '../core/shape'
+import { isManual, isShaped, straightness } from '../core/shape'
 import { fitAreaToContents, straightenLinks, translateTo } from './actions'
 
 /** what each kind of figure rests on, in a sentence */
@@ -175,6 +175,7 @@ function EdgeInspector({ edges }: { edges: EdgeT[] }) {
   const kind = kindInfo(e.kind)
   const problems = one ? linkProblems(doc, e) : []
   const shaped = edges.filter(isShaped)
+  const manual = edges.some(isManual)
   const straight = one ? straightness(doc, e) : null
   const mover = straight?.state === 'apart' ? doc.nodes.find((n) => n.id === straight.move) : null
   return (
@@ -233,6 +234,11 @@ function EdgeInspector({ edges }: { edges: EdgeT[] }) {
           <Segmented size="sm" value={e.shape ?? 'ortho'} onChange={(v) => s.setShape(ids, v === 'ortho' ? undefined : v)}
             options={[{ value: 'ortho', label: 'Right-angled' }, { value: 'direct', label: 'Direct' }, { value: 'curved', label: 'Curved' }]} />
         </Row>
+        {/* whose line it is: the router's, to plan afresh as things move, or the user's, to stay exactly as it was left */}
+        <Row label="Routing">
+          <Segmented size="sm" value={e.shape ? 'auto' : manual ? 'manual' : 'auto'} onChange={(v) => (v === 'manual' ? s.keepRoute(ids) : s.resetRoute(ids))}
+            options={[{ value: 'auto', label: 'Automatic' }, { value: 'manual', label: 'Manual', disabled: !!e.shape }]} />
+        </Row>
         <p className="insp-note">
           {one
             ? e.shape === 'direct' ? 'One straight line from one to the other, at whatever angle that is.'
@@ -245,8 +251,9 @@ function EdgeInspector({ edges }: { edges: EdgeT[] }) {
               : e.fromSide || e.toSide ? 'Routed automatically, from the side you chose.'
               : 'Routed automatically around other components.'
             : shaped.length ? `${shaped.length} of these ${shaped.length === 1 ? 'has' : 'have'} been shaped by hand.` : 'All routed automatically.'}
-          {one && !e.shape && ' Drag any run of the line sideways to move it, or an end to move it to another component.'}
+          {one && !e.shape && ' Drag any run of the line sideways to move it, a turn to move both runs that meet there, or an end to move it to another component.'}
         </p>
+        {!e.shape && <Row label="Snap"><Toggle value={s.snapLines} onChange={(v) => s.set({ snapLines: v })} label="Snap lines into place while dragging" /></Row>}
         <div className="insp-actions inline">
           <button className="btn ghost" disabled={one && (e.shape === 'direct' || (straight?.state === 'straight' && !!e.runs))} onClick={() => straightenLinks(ids)}><Minus size={14} />{straight?.state === 'apart' ? 'Line up' : 'Straighten'}</button>
           <button className="btn ghost" disabled={!shaped.length} onClick={() => s.resetRoute(ids)}><RotateCcw size={14} />Route automatically</button>

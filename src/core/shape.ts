@@ -29,9 +29,6 @@ const reach = (n: NodeT) => footOf(n) / 2 - EDGE
 const beside = (n: NodeT, s: Side, out: number) => (s === 'e' ? n.x + footOf(n) + out : s === 'w' ? n.x - out : s === 's' ? n.y + footOf(n) + out : n.y - out)
 const outward = (n: NodeT, s: Side, v: number) => (s === 'e' || s === 's' ? Math.max(v, beside(n, s, MIN_OUT)) : Math.min(v, beside(n, s, MIN_OUT)))
 const facingEachOther = (t: Track) => ({ e: 'w', w: 'e', n: 's', s: 'n' } as const)[t.fromSide] === t.toSide
-/** how far past the corner an end run is pulled before it lets go of the side and steps round */
-const PULL = 0.7
-
 /**
  * The track a drawn line is following, read off the line itself, and which run each of its
  * stretches belongs to. Works for any right-angled line: one the router planned, one already
@@ -54,7 +51,7 @@ export function trackOf(r: Routed, a: NodeT, b: NodeT): { track: Track; seg: num
 }
 
 /** Every run's coordinate, the two end runs included. */
-const all = (t: Track, a: NodeT, b: NodeT) => [centreOn(a, t.fromSide) + t.fromAt, ...t.runs, centreOn(b, t.toSide) + t.toAt]
+export const coordsOf = (t: Track, a: NodeT, b: NodeT) => [centreOn(a, t.fromSide) + t.fromAt, ...t.runs, centreOn(b, t.toSide) + t.toAt]
 
 /** The band a single straight run between two facing sides can lie in, or null when they do not overlap. */
 function band(t: Track, a: NodeT, b: NodeT): [number, number] | null {
@@ -64,51 +61,77 @@ function band(t: Track, a: NodeT, b: NodeT): [number, number] | null {
 }
 
 /**
- * Where a run being dragged should come to rest. It is drawn to anything it would line up with:
- * the next run along on the same axis (which is what straightens a line), and the middle of the
- * component at its end. Otherwise it keeps to the grid.
+ * For a single step between two facing sides: the line nearest `other` (where the far end is now) on which both
+ * ends could sit, making the connection straight. Null when the two sides share no such line.
  */
-export function snapRun(t: Track, a: NodeT, b: NodeT, run: number, v: number, pull = 0.3): number {
-  const L = all(t, a, b), last = L.length - 1
+function meeting(t: Track, a: NodeT, b: NodeT, other: number): number | null {
+  const I = t.runs.length === 1 && facingEachOther(t) ? band(t, a, b) : null
+  return I ? Math.max(I[0], Math.min(I[1], other)) : null
+}
+
+/**
+ * Where a run being moved should come to rest when it is let go at `v`. It goes exactly where it is put,
+ * unless that is within `pull` of something it would line up with: the next run along on the same axis
+ * (which takes the turn between them out), the middle of the component at its end, or, more weakly, a
+ * half cell of the grid. `pull` is in cells and is small: a few pixels' worth. With none, nothing draws it.
+ */
+export function snapRun(t: Track, a: NodeT, b: NodeT, run: number, v: number, pull = 0.1): number {
+  if (!(pull > 0)) return r3(v)
+  const L = coordsOf(t, a, b), last = L.length - 1
   const marks: number[] = []
   if (run - 2 >= 0) marks.push(L[run - 2])
   if (run + 2 <= last) marks.push(L[run + 2])
   if (run === 0) marks.push(centreOn(a, t.fromSide))
   if (run === last) marks.push(centreOn(b, t.toSide))
   if (last === 1 && facingEachOther(t)) marks.push(centreOn(a, t.fromSide), centreOn(b, t.toSide))
+  // an end of a single step between two facing sides: the line on which the two ends could meet and be straight
+  const meet = last === 2 && (run === 0 || run === last) ? meeting(t, a, b, run === 0 ? L[2] : L[0]) : null
+  if (meet !== null) marks.push(meet)
   let best = NaN
   for (const m of marks) if (Math.abs(m - v) <= pull && !(Math.abs(best - v) <= Math.abs(m - v))) best = m
   if (!Number.isNaN(best)) return best
-  const step = run === 0 || run === last ? 0.25 : 0.5
-  return Math.round(v / step) * step
+  const g = Math.round(v * 2) / 2
+  return Math.abs(g - v) <= Math.min(pull * 0.5, 0.1) ? g : r3(v)
 }
 
-/** The track with run `run` moved sideways to `v`. Run 0 is the one that leaves the first component. */
+/**
+ * The track with run `run` moved sideways to `v`. Run 0 is the one that leaves the first component.
+ * Only that run moves, and it moves to exactly `v` wherever a line can be there at all:
+ *  - an end run slides its end along the side, and past the corner steps out and round to stay under the hand;
+ *  - a run in the middle is moved as it is, and its neighbours stretch;
+ *  - the first and last turn stay outside the components they belong to.
+ */
 export function dragRun(t: Track, a: NodeT, b: NodeT, run: number, v: number): Track {
   const m = t.runs.length, ca = centreOn(a, t.fromSide), cb = centreOn(b, t.toSide)
   const clamp = (x: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, x))
-  if (m === 0 && facingEachOther(t)) {
-    // one straight run: it slides along both sides at once, and past the end of either it becomes a way round
-    const I = band(t, a, b)
-    if (I && v >= I[0] - PULL && v <= I[1] + PULL) { const c = clamp(v, I[0], I[1]); return { ...t, fromAt: r3(c - ca), toAt: r3(c - cb) } }
-    return { ...t, runs: [beside(a, t.fromSide, STUB), v, beside(b, t.toSide, STUB)] }
+  // how far out of a side a new step round the corner is taken: half a cell, or less when the line already turns nearer than that
+  const step = (n: NodeT, s: Side, turn: number | undefined) => {
+    const far = beside(n, s, STUB)
+    if (turn === undefined) return far
+    const room = Math.abs(turn - beside(n, s, 0))
+    return room > STUB + MIN_OUT ? far : beside(n, s, Math.max(MIN_OUT, room / 2))
   }
-  // An end run heading for the next run along (to take the turn between them out) may find its side ends first.
-  // Then that run comes the rest of the way to meet it: what was wanted was the two on one line, not either in a particular place
-  const L = all(t, a, b)
+  if (m === 0 && facingEachOther(t)) {
+    // one straight run: it slides along both sides at once. Past the end of either, the ends stay at the corner and the run goes on round
+    const I = band(t, a, b)
+    const c = I ? clamp(v, I[0], I[1]) : null
+    const ends = c === null ? t : { ...t, fromAt: r3(c - ca), toAt: r3(c - cb) }
+    if (c !== null && same(c, v)) return ends
+    return { ...ends, runs: [beside(a, t.fromSide, STUB), v, beside(b, t.toSide, STUB)] }
+  }
+  // An end of a single step, put on the line where the two ends can meet: the far end comes the rest of the way and the line is
+  // straight. That line is only ever landed on by being drawn to it, which is the user asking for exactly this
+  if (m === 1 && (run <= 0 || run >= 2)) {
+    const meet = meeting(t, a, b, run <= 0 ? cb + t.toAt : ca + t.fromAt)
+    if (meet !== null && same(meet, v)) return { ...t, fromAt: r3(v - ca), toAt: r3(v - cb) }
+  }
   if (run <= 0) {
-    if (v < ca - reach(a) - PULL || v > ca + reach(a) + PULL) return { ...t, runs: [beside(a, t.fromSide, STUB), v, ...t.runs] }
     const c = clamp(v, ca - reach(a), ca + reach(a)), next = { ...t, fromAt: r3(c - ca) }
-    if (same(c, v) || !m || !same(v, L[2])) return next
-    if (m > 1) return { ...next, runs: t.runs.map((x, i) => (i === 1 ? c : x)) }
-    return Math.abs(c - cb) <= reach(b) + 1e-9 ? { ...next, toAt: r3(c - cb) } : next
+    return same(c, v) ? next : { ...next, runs: [step(a, t.fromSide, t.runs[0]), v, ...t.runs] }
   }
   if (run >= m + 1) {
-    if (v < cb - reach(b) - PULL || v > cb + reach(b) + PULL) return { ...t, runs: [...t.runs, v, beside(b, t.toSide, STUB)] }
     const c = clamp(v, cb - reach(b), cb + reach(b)), next = { ...t, toAt: r3(c - cb) }
-    if (same(c, v) || !m || !same(v, L[m - 1])) return next
-    if (m > 1) return { ...next, runs: t.runs.map((x, i) => (i === m - 2 ? c : x)) }
-    return Math.abs(c - ca) <= reach(a) + 1e-9 ? { ...next, fromAt: r3(c - ca) } : next
+    return same(c, v) ? next : { ...next, runs: [...t.runs, v, step(b, t.toSide, t.runs[m - 1])] }
   }
   const runs = [...t.runs]
   runs[run - 1] = v
@@ -116,6 +139,61 @@ export function dragRun(t: Track, a: NodeT, b: NodeT, run: number, v: number): T
   runs[0] = outward(a, t.fromSide, runs[0])
   runs[m - 1] = outward(b, t.toSide, runs[m - 1])
   return { ...t, runs }
+}
+
+/**
+ * The track with the turn between run `run` and the next one moved: both runs that meet there go with it,
+ * the first to `v`, the second to `w`. This is taking a corner of the line in the hand.
+ */
+export function dragTurn(t: Track, a: NodeT, b: NodeT, run: number, v: number, w: number): Track {
+  // the later run first: if it steps round its corner it adds runs after itself, which leaves the earlier one where it was in the row
+  return dragRun(dragRun(t, a, b, run + 1, w), a, b, run, v)
+}
+
+/**
+ * The track with a step put into run `run` where it passes `at` (measured along the run): the line turns there,
+ * goes one cell sideways, and carries on. The part nearer the first component stays where it was, unless it is the
+ * part that arrives at the second, which cannot move. A straight line between two facing sides becomes a step
+ * between them when an end has room to slide, and a detour of three runs when neither has.
+ */
+export function addBend(t: Track, a: NodeT, b: NodeT, run: number, at: number): Track {
+  const L = coordsOf(t, a, b), m = t.runs.length, v = L[run], c = r3(Math.round(at * 4) / 4)
+  // towards the next run that goes the same way, so the step shortens the line rather than lengthening it
+  const dir = (to: number | undefined) => (to !== undefined && !same(to, v) ? Math.sign(to - v) : 1)
+  if (m === 0) {
+    const cb = centreOn(b, t.toSide), ca = centreOn(a, t.fromSide)
+    for (const d of [1, -1, 0.5, -0.5]) {
+      if (Math.abs(v + d - cb) <= reach(b) + 1e-9) return { ...t, toAt: r3(v + d - cb), runs: [c] }
+      if (Math.abs(v + d - ca) <= reach(a) + 1e-9) return { ...t, fromAt: r3(v + d - ca), runs: [c] }
+    }
+    return { ...t, runs: [c - 0.5, v + 1, c + 0.5] }
+  }
+  if (run >= m + 1) return { ...t, runs: [...t.runs, r3(v + dir(L[run - 2])), c] }
+  if (run <= 0) return { ...t, runs: [c, r3(v + dir(L[2])), ...t.runs] }
+  return { ...t, runs: [...t.runs.slice(0, run), c, r3(v + dir(L[run + 2])), ...t.runs.slice(run)] }
+}
+
+/**
+ * The track with the turn between run `run` and the next taken out, by bringing the shorter of the two runs that
+ * meet there down to nothing: the run beyond it comes level with the one before. Null when neither can give way,
+ * which is when both belong to the components and neither end can slide far enough.
+ */
+export function removeBend(t: Track, a: NodeT, b: NodeT, run: number): Track | null {
+  const L = coordsOf(t, a, b), last = L.length - 1
+  if (run < 0 || run + 1 > last) return null
+  // run k has no length once its neighbours k-1 and k+1 stand on the same line
+  const len = (k: number) => (k - 1 >= 0 && k + 1 <= last ? Math.abs(L[k + 1] - L[k - 1]) : Infinity)
+  const tries = len(run) <= len(run + 1) ? [run, run + 1] : [run + 1, run]
+  for (const k of tries) {
+    if (len(k) === Infinity) continue
+    // the neighbour on the far side of the turn comes to the one on the near side; if that cannot be, the other way about
+    const pairs = k === run ? [[k + 1, k - 1], [k - 1, k + 1]] : [[k - 1, k + 1], [k + 1, k - 1]]
+    for (const [move, to] of pairs) {
+      const next = simplify(dragRun(t, a, b, move, L[to]), a, b)
+      if (next.runs.length < t.runs.length) return next
+    }
+  }
+  return null
 }
 
 /** Take out every turn that no longer does anything: two runs on the same line with nothing between them become one. */
@@ -144,6 +222,64 @@ export const withTrack = (e: EdgeT, t: Track): EdgeT => {
 export const unshaped = (e: EdgeT, keepShape = true): EdgeT => {
   const { via: _v, runs: _r, fromAt: _a, toAt: _b, fromSide: _f, toSide: _t, shape, ...rest } = e
   return keepShape && shape ? { ...rest, shape } : rest
+}
+
+/** Its path is the user's: the router follows it rather than planning one. */
+export const isManual = (e: EdgeT) => !!(e.runs || e.via?.length)
+
+/**
+ * Take over each of these connections exactly as it is drawn now: the path the router planned becomes the
+ * connection's own, to be kept from then on. Nothing moves. Lines that are not right-angled have no path to keep.
+ */
+export function keepPath(doc: Doc, ids: string[]): Doc {
+  const routes = routeAll(doc.nodes, doc.edges), byId = new Map(doc.nodes.map((n) => [n.id, n]))
+  let any = false
+  const edges = doc.edges.map((e) => {
+    const r = routes.get(e.id), a = byId.get(e.from), b = byId.get(e.to)
+    const t = ids.includes(e.id) && !e.runs && r && a && b ? trackOf(r, a, b) : null
+    if (t) any = true
+    return t ? withTrack(e, t.track) : e
+  })
+  return any ? { ...doc, edges } : doc
+}
+
+/** Which stretch of a drawn line a point on the ground is nearest to. */
+export function nearestRun(pts: [number, number][], at: [number, number]): number {
+  let best = 0, least = Infinity
+  for (let i = 0; i < pts.length - 1; i++) {
+    const [ax, ay] = pts[i], [bx, by] = pts[i + 1], dx = bx - ax, dy = by - ay
+    const t = Math.max(0, Math.min(1, ((at[0] - ax) * dx + (at[1] - ay) * dy) / (dx * dx + dy * dy || 1)))
+    const d = Math.hypot(at[0] - ax - dx * t, at[1] - ay - dy * t)
+    if (d < least) { least = d; best = i }
+  }
+  return best
+}
+
+/** The connection as drawn, with what is needed to reshape it; null when it is not a right-angled line between two components. */
+function drawn(doc: Doc, id: string) {
+  const e = doc.edges.find((x) => x.id === id), a = e && doc.nodes.find((n) => n.id === e.from), b = e && doc.nodes.find((n) => n.id === e.to)
+  const r = e && routeAll(doc.nodes, doc.edges).get(id), t = r && a && b ? trackOf(r, a, b) : null
+  return e && a && b && r && t ? { e, a, b, r, ...t } : null
+}
+const replaced = (doc: Doc, e: EdgeT): Doc => ({ ...doc, edges: doc.edges.map((x) => (x.id === e.id ? e : x)) })
+
+/** Put a step into a connection at the point of its line nearest `at`. */
+export function bendAt(doc: Doc, id: string, at: [number, number]): Doc {
+  const d = drawn(doc, id)
+  if (!d) return doc
+  const i = nearestRun(d.r.pts, at), p = d.r.pts[i], q = d.r.pts[i + 1], along = p[1] === q[1] ? 0 : 1
+  // not so near either end of the stretch that the step would sit on a turn
+  const lo = Math.min(p[along], q[along]), hi = Math.max(p[along], q[along])
+  if (hi - lo < 1) return doc
+  return replaced(doc, withTrack(d.e, addBend(d.track, d.a, d.b, d.seg[i], Math.max(lo + 0.5, Math.min(hi - 0.5, at[along])))))
+}
+
+/** Take the turn at point `corner` of a connection's drawn line out of it. */
+export function unbend(doc: Doc, id: string, corner: number): Doc {
+  const d = drawn(doc, id)
+  if (!d || corner < 1 || corner > d.r.pts.length - 2 || d.seg[corner - 1] === d.seg[corner]) return doc
+  const next = removeBend(d.track, d.a, d.b, d.seg[corner - 1])
+  return next ? replaced(doc, withTrack(d.e, next)) : doc
 }
 
 export const isShaped = (e: EdgeT) => !!(e.via?.length || e.runs || e.fromSide || e.toSide || e.fromAt !== undefined || e.toAt !== undefined)

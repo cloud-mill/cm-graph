@@ -3,7 +3,7 @@ import { defOf, defaultProps } from './catalog'
 import { ISO_PITCH, ISO_YAW } from './iso'
 import { inArea } from './layout'
 import { guessKind, kindInfo } from './links'
-import { isShaped, lineUpEnds, shifted, straighten, unshaped } from './shape'
+import { bendAt, isShaped, keepPath, lineUpEnds, shifted, straighten, unbend, unshaped } from './shape'
 import { getPref, saveDoc, setPref } from './storage'
 import { type AreaT, type Doc, type EdgeT, type LabelT, type LinkKind, type NodeT, type PricingModel, type Side, emptyDoc, uid } from './types'
 
@@ -36,6 +36,8 @@ interface State {
   panel: Panel
   lens: Lens
   showGrid: boolean
+  /** a line being reshaped is drawn to what it would line up with; off, it goes only where it is put */
+  snapLines: boolean
   showLabels: boolean
   flow: boolean
   /** which cloud the library is showing */
@@ -78,6 +80,12 @@ interface State {
   reverseEdge: (ids: string[]) => void
   /** hand a connection's path back to the automatic router */
   resetRoute: (ids: string[]) => void
+  /** take the path each of these is drawn with now as its own, so the router leaves it alone from then on */
+  keepRoute: (ids: string[]) => void
+  /** put a step into a connection at the point of its line nearest `at` */
+  addBend: (id: string, at: [number, number]) => void
+  /** take the turn at point `corner` of a connection's drawn line out of it */
+  removeBend: (id: string, corner: number) => void
   /** make connections one straight line where they can be; says how many could not, and why */
   straighten: (ids: string[]) => { straight: number; apart: number }
   /** move one end's component level with the other, so the connection between them is straight */
@@ -135,6 +143,7 @@ export const useStore = create<State>((set, get) => ({
   panel: 'inspect',
   lens: 'none',
   showGrid: true,
+  snapLines: true,
   showLabels: true,
   flow: getPref('flow', true),
   provider: getPref<'aws' | 'gcp' | 'azure'>('provider', 'aws'),
@@ -261,6 +270,9 @@ export const useStore = create<State>((set, get) => ({
     edges: d.edges.map((e) => (ids.includes(e.id) ? { ...e, from: e.to, to: e.from, fromSide: e.toSide, toSide: e.fromSide, fromAt: e.toAt, toAt: e.fromAt, ...(e.via ? { via: [...e.via].reverse() } : {}), ...(e.runs ? { runs: [...e.runs].reverse() } : {}) } : e)),
   })),
   resetRoute: (ids) => get().apply((d) => ({ ...d, edges: d.edges.map((e) => (ids.includes(e.id) && isShaped(e) ? unshaped(e) : e)) })),
+  keepRoute: (ids) => get().apply((d) => keepPath(d, ids)),
+  addBend: (id, at) => get().apply((d) => bendAt(d, id, at)),
+  removeBend: (id, corner) => get().apply((d) => unbend(d, id, corner)),
   straighten: (ids) => {
     const { doc, ...count } = straighten(get().doc, ids)
     get().apply(() => doc)

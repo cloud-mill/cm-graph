@@ -122,7 +122,7 @@ describe('selecting', () => {
     // the middle run of the Z, at x = 5
     drag(hit('edge', 'e'), [5, 3], [3.1, 3])
     expect(S().selection).toEqual(['e'])
-    expect(S().doc.edges[0]).toMatchObject({ runs: [3], fromSide: 'e', toSide: 'w' })
+    expect(S().doc.edges[0]).toMatchObject({ runs: [3.1], fromSide: 'e', toSide: 'w' })
     expect(S().past).toHaveLength(1)
     // with Shift it is only added to what is selected
     act(() => S().undo())
@@ -1371,23 +1371,24 @@ describe('shaping a connection', () => {
   const track = { fromSide: 'e', toSide: 'w', fromAt: 0, toAt: 0 } as const
   const drawn = () => document.querySelector('.edge-hit')!.getAttribute('d')!
 
-  it('a selected connection shows its two ends, each run as something to take hold of, and both components marked', () => {
+  it('a selected connection shows its two ends, each run and each turn as something to take hold of, and both components marked', () => {
     linked()
     expect(names()).toEqual(['ea', 'eb', 's0'])
     // the two components it joins are outlined along with the line
     expect(document.querySelectorAll('.overlay path[stroke-opacity="0.8"]')).toHaveLength(2)
     cleanup()
     bent()
-    expect(names()).toEqual(['ea', 'eb', 's0', 's1', 's2'])
+    expect(names()).toEqual(['c1', 'c2', 'ea', 'eb', 's0', 's1', 's2'])
+    expect(document.querySelectorAll('.turn-grip')).toHaveLength(2)
     // a grip in the middle of each run long enough to hold one
     expect(document.querySelectorAll('.run-grip').length).toBe(6)
   })
   it('shows no handles when it is one of several things selected, or while another tool is up', () => {
     linked({}, { selection: ['e', 'a'] })
-    expect(names().filter((n) => /^(ea|eb|s\d)$/.test(n))).toEqual([])
+    expect(names().filter((n) => /^(ea|eb|[sc]\d)$/.test(n))).toEqual([])
     cleanup()
     linked({}, { tool: 'connect' })
-    expect(names().filter((n) => /^(ea|eb|s\d)$/.test(n))).toEqual([])
+    expect(names().filter((n) => /^(ea|eb|[sc]\d)$/.test(n))).toEqual([])
   })
   it('a direct line or a curve has ends to move but no runs', () => {
     linked({ shape: 'direct' })
@@ -1408,19 +1409,89 @@ describe('shaping a connection', () => {
     expect(E().runs).toBeUndefined()
     expect(S().past).toHaveLength(0)
     up(3.2, 3)
-    expect(E()).toMatchObject({ ...track, runs: [3] })
+    expect(E()).toMatchObject({ ...track, runs: [3.2] })
     expect(S().past).toHaveLength(1)
     act(() => S().undo())
     expect(E().runs).toBeUndefined()
     expect(drawn()).toBe(was)
     expect(S().selection).toEqual(['e']) // still selected, still ready to be shaped
   })
-  it('a run keeps to the half grid in the open, and cannot be pushed into the component at its end', () => {
+  it('a run goes exactly where it is put, and cannot be pushed into the component at its end', () => {
     bent()
     drag(handle('s1'), [5, 3], [6.3, 3])
-    expect(E().runs).toEqual([6.5])
-    drag(handle('s1'), [6.5, 3], [0, 3])
+    expect(E().runs).toEqual([6.3])
+    drag(handle('s1'), [6.3, 3], [0, 3])
     expect(E().runs).toEqual([2.3])
+  })
+  it('moves as far as the pointer moves, wherever across its width it was caught: no jump as it is picked up', () => {
+    bent()
+    // caught a fifth of a cell to one side of the line, and pulled one cell
+    drag(handle('s1'), [5.2, 3], [6.2, 3])
+    expect(E().runs).toEqual([6])
+  })
+  it('what is on screen as it is let go is what is kept: the drawn line does not change on release', () => {
+    bent()
+    down(handle('s1'), 5, 3); move(6.37, 3)
+    const held = drawn()
+    up(6.37, 3)
+    expect(drawn()).toBe(held)
+    // nor when it is deselected, or picked again
+    act(() => S().select([]))
+    expect(drawn()).toBe(held)
+    act(() => S().select(['e']))
+    expect(drawn()).toBe(held)
+  })
+  it('the same place is reached whether the pointer went there in one move or a hundred', () => {
+    bent()
+    drag(handle('s1'), [5, 3], [3.37, 3])
+    const fast = E().runs
+    act(() => S().undo())
+    down(handle('s1'), 5, 3)
+    for (let i = 1; i <= 100; i++) move(5 - (1.63 * i) / 100, 3 + Math.sin(i))
+    up(3.37, 3)
+    expect(E().runs).toEqual(fast)
+    expect(S().past).toHaveLength(1)
+  })
+  it('near something it would line up with it settles there; with Alt held, or with snapping off, it goes only where it is put', () => {
+    // a Z between a (middle y = 1) and b (middle y = 2) whose last run is at y = 2: the first run can come as far as y = 1.85
+    const near = () => mount(docOf([node('a'), node('b', 'rds', 8, 1)], [edge('e', 'a', 'b', { ...track, fromAt: -0.5, runs: [5] })]), { selection: ['e'] })
+    near()
+    drag(handle('s0'), [3, 0.5], [3, 1.84])
+    expect(E().runs).toEqual([])
+    cleanup(); near()
+    drag(handle('s0'), [3, 0.5], [3, 1.84], { altKey: true })
+    expect(E()).toMatchObject({ fromAt: 0.84, runs: [5] })
+    cleanup(); near()
+    act(() => S().set({ snapLines: false }))
+    drag(handle('s0'), [3, 0.5], [3, 1.84])
+    expect(E()).toMatchObject({ fromAt: 0.84, runs: [5] })
+    // and with snapping off, Alt turns it on for the one drag
+    act(() => S().undo())
+    drag(handle('s0'), [3, 0.5], [3, 1.84], { altKey: true })
+    expect(E().runs).toEqual([])
+  })
+  it('a turn taken in the hand moves both runs that meet at it', () => {
+    bent()
+    // the turn at (5, 1), where the first run meets the one going down
+    drag(handle('c1'), [5, 1], [4.2, 1.6])
+    expect(E()).toMatchObject({ ...track, fromAt: 0.6, runs: [4.2] })
+    expect(S().past).toHaveLength(1)
+    // and the other, at (4.2, 5): the run going down and the end at b
+    drag(handle('c2'), [4.2, 5], [6.1, 4.7])
+    expect(E()).toMatchObject({ fromAt: 0.6, toAt: -0.3, runs: [6.1] })
+  })
+  it('double-click on a turn takes it out; where the ends are not in line and it cannot go, nothing happens', () => {
+    bent({ ...track, runs: [3, 7, 6] })
+    expect(names().filter((n) => n[0] === 'c')).toEqual(['c1', 'c2', 'c3', 'c4'])
+    const spy = vi.spyOn(document, 'elementFromPoint').mockReturnValue(handle('c2'))
+    fireEvent.doubleClick(svg(), at(3, 7))
+    expect(E().runs).toEqual([6])
+    expect(S().past).toHaveLength(1)
+    spy.mockReturnValue(handle('c1'))
+    fireEvent.doubleClick(svg(), at(6, 1))
+    expect(E().runs).toEqual([6])
+    expect(S().past).toHaveLength(1)
+    spy.mockRestore()
   })
   it('a press on a run that never moves, or barely moves, changes nothing', () => {
     bent()
@@ -1432,11 +1503,11 @@ describe('shaping a connection', () => {
   it('the first run pulled level with the last makes the line straight: the turn between them is taken out', () => {
     // a is at y 0 to 2 and b at y 1 to 3, with a Z laid between them
     mount(docOf([node('a'), node('b', 'rds', 8, 1)], [edge('e', 'a', 'b', { ...track, runs: [5] })]), { selection: ['e'] })
-    expect(names()).toEqual(['ea', 'eb', 's0', 's1', 's2'])
+    expect(names()).toEqual(['c1', 'c2', 'ea', 'eb', 's0', 's1', 's2'])
     down(handle('s0'), 3, 1)
-    move(3, 1.9) // near enough to the last run (y = 2) to be drawn onto its line
+    move(3, 1.84) // near enough to where the two ends can meet (y = 1.85) to be drawn onto that line
     expect(names()).toContain('ea')
-    up(3, 1.9)
+    up(3, 1.84)
     expect(E().runs).toEqual([])
     expect(E().fromAt! + 1).toBe(E().toAt! + 2) // both ends on one line
     expect(names()).toEqual(['ea', 'eb', 's0'])
@@ -1444,13 +1515,13 @@ describe('shaping a connection', () => {
   })
   it('a straight line pulled sideways slides along both components, and past their corners steps out and round', () => {
     linked()
-    drag(handle('s0'), [5, 1], [5, 1.45])
+    drag(handle('s0'), [5, 1], [5, 1.5])
     expect(E()).toMatchObject({ fromAt: 0.5, toAt: 0.5, runs: [] })
     drag(handle('s0'), [5, 1.5], [5, 4])
-    expect(E().runs).toEqual([2.5, 4, 7.5])
-    expect(names()).toEqual(['ea', 'eb', 's0', 's1', 's2', 's3', 's4'])
-    // and pulled back onto the line it left, it is straight again
-    drag(handle('s2'), [5, 4], [5, 1.4])
+    expect(E()).toMatchObject({ fromAt: 0.85, toAt: 0.85, runs: [2.5, 4, 7.5] })
+    expect(names()).toEqual(['c1', 'c2', 'c3', 'c4', 'ea', 'eb', 's0', 's1', 's2', 's3', 's4'])
+    // and pulled back onto the line its ends are on, it is straight again
+    drag(handle('s2'), [5, 4], [5, 1.84])
     expect(E().runs).toEqual([])
   })
   it('putting a run back where it was takes no undo step', () => {
@@ -1488,9 +1559,19 @@ describe('shaping a connection', () => {
     expect(E().shape).toBe('direct')
     press('Right-angled')
     expect(E().shape).toBeUndefined()
-    expect(bar.querySelector('[aria-label="Route automatically"]')).toBeDisabled()
-    press('Straighten'); press('Route automatically')
+    // whose line it is shows on the bar: the router's now, and the user's once they keep the path or shape it
+    expect(bar.querySelector('[aria-label="Route automatically"]')).toHaveAttribute('aria-pressed', 'true')
+    expect(bar.querySelector('[aria-label="Keep this path"]')).toHaveAttribute('aria-pressed', 'false')
+    const was = drawn()
+    press('Keep this path')
+    expect(E().runs).toEqual([])
+    expect(drawn()).toBe(was)
+    expect(bar.querySelector('[aria-label="Keep this path"]')).toHaveAttribute('aria-pressed', 'true')
+    expect(bar.querySelector('[aria-label="Route automatically"]')).toHaveAttribute('aria-pressed', 'false')
+    press('Route automatically')
     expect(E().runs).toBeUndefined()
+    press('Curved')
+    expect(bar.querySelector('[aria-label="Keep this path"]')).toBeDisabled()
   })
   it('for two components that are out of line the bar offers to line them up, and for one with something between says what straight will mean', () => {
     bent()
@@ -1567,6 +1648,44 @@ describe('shaping a connection', () => {
     }
     expect(Number(handle('s1').querySelector('line')!.getAttribute('stroke-width'))).toBeGreaterThanOrEqual(30)
   })
+  it('a finger that rests on the line and lifts without pulling it gets the line\'s menu; one that pulls, however slowly it starts, never does', () => {
+    stubMedia(COARSE)
+    vi.useFakeTimers()
+    bent()
+    const o = { pointerType: 'touch', pointerId: 32 }
+    const spy = vi.spyOn(document, 'elementFromPoint').mockImplementation(() => handle('s1'))
+    // rested well past a press-and-hold, then pulled: it is a pull, and no menu comes up during it or after
+    down(handle('s1'), 5, 3, o)
+    act(() => { vi.advanceTimersByTime(HOLD_MS * 3) })
+    expect(document.querySelector('.ctx-menu')).toBeNull()
+    move(4.2, 3, o); up(4.2, 3, o)
+    act(() => { vi.advanceTimersByTime(500) })
+    expect(document.querySelector('.ctx-menu')).toBeNull()
+    expect(E().runs).toEqual([4.2])
+    // a quick tap is neither
+    down(handle('s1'), 4.2, 3, o); up(4.2, 3, o)
+    act(() => { vi.advanceTimersByTime(500) })
+    expect(document.querySelector('.ctx-menu')).toBeNull()
+    // rested and lifted: the menu, once the tap that the lifting finger counts as has gone by
+    down(handle('s1'), 4.2, 3, o)
+    act(() => { vi.advanceTimersByTime(HOLD_MS + 20) })
+    up(4.2, 3, o)
+    expect(document.querySelector('.ctx-menu')).toBeNull()
+    act(() => { vi.advanceTimersByTime(100) })
+    expect([...document.querySelectorAll('.ctx-menu button span')].map((b) => b.textContent)).toContain('Add a bend here')
+    expect(E().runs).toEqual([4.2])
+    spy.mockRestore()
+    vi.useRealTimers()
+  })
+  it('a right-click on the handles the selected line wears opens the line\'s menu, not the canvas\'s', () => {
+    bent()
+    const spy = vi.spyOn(document, 'elementFromPoint').mockReturnValue(handle('s1'))
+    fireEvent.pointerDown(handle('s1'), { pointerId: 1, button: 2, ...at(5, 3) })
+    fireEvent.pointerUp(svg(), { pointerId: 1, button: 2, ...at(5, 3) })
+    expect(S().selection).toEqual(['e'])
+    expect([...document.querySelectorAll('.ctx-menu button span')].map((b) => b.textContent)).toContain('Add a bend here')
+    spy.mockRestore()
+  })
   it('a finger drags a run without panning the view, with a tick when a turn drops out', () => {
     stubMedia(COARSE)
     const buzz = vi.fn<(n: number) => boolean>(() => true)
@@ -1574,7 +1693,7 @@ describe('shaping a connection', () => {
     mount(docOf([node('a'), node('b', 'rds', 8, 1)], [edge('e', 'a', 'b', { ...track, runs: [5] })]), { selection: ['e'] })
     const view = S().view
     const o = { pointerType: 'touch', pointerId: 31 }
-    down(handle('s0'), 3, 1, o); move(3, 1.5, o); move(3, 2, o); up(3, 2, o)
+    down(handle('s0'), 3, 1, o); move(3, 1.5, o); move(3, 1.86, o); up(3, 1.86, o) // let go just by the line where the two ends can meet
     expect(E().runs).toEqual([])
     expect(S().view).toEqual(view)
     expect(buzz).toHaveBeenCalled()

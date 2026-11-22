@@ -268,11 +268,9 @@ export function routeAll(nodes: NodeT[], edges: EdgeT[]): Map<string, Routed> {
     })
   }
 
-  // 2. an end the user placed sits where they put it. The rest that share a side are spread along it, in the order of where they lead
+  // 2. ends that share a side are spread along it, in the order of where they lead. One the user placed sits where they put it
   const sides = new Map<string, End[]>()
   for (const { a, b } of ends.values()) for (const end of [a, b]) {
-    const r = rects.get(end.node)!
-    if (end.at !== undefined) { const reach = (r.x1 - r.x0) / 2 - EDGE; put(end, r, centreOn(r, end.side) + Math.max(-reach, Math.min(reach, end.at))); continue }
     const k = end.node + ':' + end.side
     ;(sides.get(k) ?? sides.set(k, []).get(k)!).push(end)
   }
@@ -281,8 +279,10 @@ export function routeAll(nodes: NodeT[], edges: EdgeT[]): Map<string, Routed> {
     const r = rects.get(list[0].node)!, size = r.x1 - r.x0
     const gap = Math.min(0.5, (size * 0.76) / list.length)
     const centre = centreOn(r, list[0].side)
+    const reach = size / 2 - EDGE
     list.forEach((end, i) => {
-      put(end, r, centre + (i - (list.length - 1) / 2) * gap)
+      // an end the user placed keeps its turn in the order, so the others do not shuffle along when a line is taken in hand
+      put(end, r, end.at !== undefined ? centre + Math.max(-reach, Math.min(reach, end.at)) : centre + (i - (list.length - 1) / 2) * gap)
       end.mates = list.length; end.list = list
       // Siblings leaving one side each turn in a channel of their own. Those heading the same way are nested:
       // the one that has furthest to go along the side turns last, so none of them has to cross another.

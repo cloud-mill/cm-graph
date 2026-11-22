@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { docOf, edge, node } from '../test/helpers'
 import { routeAll } from './router'
-import { type Track, dragRun, isShaped, lineUpEnds, shifted, simplify, snapRun, straighten, straightness, trackOf, unshaped, withTrack } from './shape'
+import { type Track, addBend, bendAt, dragRun, dragTurn, isManual, isShaped, keepPath, lineUpEnds, nearestRun, removeBend, shifted, simplify, snapRun, straighten, straightness, trackOf, unbend, unshaped, withTrack } from './shape'
 import type { EdgeT, NodeT } from './types'
 
 const N = (id: string, x: number, y: number, extra: Partial<NodeT> = {}) => node(id, 'ec2', x, y, extra)
@@ -66,48 +66,55 @@ describe('moving a run', () => {
     expect(dragRun(z, a, b, 2, 4.5).toAt).toBe(-0.5)
     expect(dragRun(z, a, b, 2, 6.2).toAt).toBe(0.85)
   })
-  it('an end run heading for the next run along is met by it when the side ends first, so the turn between them can go', () => {
+  it('past the corner an end run steps out and round, starting from nothing: it never sticks and then jumps', () => {
+    // the end stops at the corner of its side (y = 1.85) and the run carries on under the hand
+    const just = dragRun(z, a, b, 0, 1.86)
+    expect(just).toMatchObject({ fromAt: 0.85, runs: [2.5, 1.86, 5] })
+    expect(drawn(just)).toEqual([[2, 1.85], [2.5, 1.85], [2.5, 1.86], [5, 1.86], [5, 5], [8, 5]])
+    const out = dragRun(z, a, b, 0, 4)
+    expect(out).toMatchObject({ fromAt: 0.85, runs: [2.5, 4, 5] })
+    expect(drawn(out)).toEqual([[2, 1.85], [2.5, 1.85], [2.5, 4], [5, 4], [5, 5], [8, 5]])
+    const back = dragRun(z, a, b, 2, 8)
+    expect(back).toMatchObject({ toAt: 0.85, runs: [5, 8, 7.5] })
+    expect(drawn(back).at(-2)).toEqual([7.5, 5.85])
+    // where the line already turns close to the component, the step is taken nearer still, so the run in the hand has somewhere to be
+    expect(dragRun({ ...z, runs: [2.4] }, a, b, 0, 4).runs).toEqual([2.3, 4, 2.4])
+  })
+  it('an end of a single step put on the line where the two ends can meet makes the connection straight: the far end comes the last of the way', () => {
     // a's middle is y = 1 and b's is y = 2: neither end can reach the other's line, but both can reach y = 1.85
     const near = N('b', 8, 1)
-    const down = dragRun(z, a, near, 0, 2)
+    expect(snapRun(z, a, near, 0, 1.8)).toBe(1.85)
+    const down = dragRun(z, a, near, 0, 1.85)
     expect(down).toMatchObject({ fromAt: 0.85, toAt: -0.15 })
     expect(simplify(down, a, near).runs).toEqual([])
-    const up = dragRun(z, a, near, 2, 1)
-    expect(up).toMatchObject({ fromAt: 0.15, toAt: -0.85 })
-    // with more runs between, it is the next run on the same axis that comes to meet it
-    const far = N('b', 8, 6), long: Track = { ...z, runs: [3, 2, 6] }
-    expect(dragRun(long, a, far, 0, 2)).toMatchObject({ fromAt: 0.85, runs: [3, 1.85, 6] })
-    expect(dragRun({ ...z, runs: [3, 6, 6] }, a, far, 4, 6)).toMatchObject({ toAt: -0.85, runs: [3, 6.15, 6] })
-    // heading nowhere in particular, an end simply stops at the end of its side
-    expect(dragRun(z, a, near, 0, 2.1)).toMatchObject({ fromAt: 0.85, toAt: 0 })
-    // and when the other end could not come that far either, it stays where it is
-    expect(dragRun({ ...z, toAt: -0.3 }, a, N('b', 8, 1.8), 0, 2.5)).toMatchObject({ fromAt: 0.85, toAt: -0.3 })
-    expect(dragRun({ ...z, fromAt: -0.3 }, N('a', 0, 1.8), N('b', 8, 0), 2, 2.5)).toMatchObject({ fromAt: -0.3, toAt: 0.85 })
+    expect(snapRun(z, a, near, 2, 1.2)).toBe(1.15)
+    expect(simplify(dragRun(z, a, near, 2, 1.15), a, near)).toMatchObject({ fromAt: 0.15, toAt: -0.85, runs: [] })
+    // when the far end is already somewhere this end can reach, it does not move at all
+    const level = N('b', 8, 0), off: Track = { ...z, toAt: 0.5 }
+    expect(dragRun(off, a, level, 0, 1.5)).toEqual({ ...off, fromAt: 0.5 })
+    // and two that share no line have nowhere to meet
+    expect(snapRun(z, a, b, 0, 1.8)).toBe(1.8)
   })
-  it('pulled well past the corner, an end run steps out of the side and goes round', () => {
-    const out = dragRun(z, a, b, 0, 4)
-    expect(out.fromAt).toBe(0)
-    expect(out.runs).toEqual([2.5, 4, 5])
-    expect(drawn(out)).toEqual([[2, 1], [2.5, 1], [2.5, 4], [5, 4], [5, 5], [8, 5]])
-    const back = dragRun(z, a, b, 2, 8)
-    expect(back.runs).toEqual([5, 8, 7.5])
-    expect(drawn(back).at(-2)).toEqual([7.5, 5])
+  it('nothing else moves otherwise: an end run pulled past its corner leaves the far end and every other run alone', () => {
+    const near = N('b', 8, 1)
+    expect(dragRun(z, a, near, 0, 2)).toMatchObject({ fromAt: 0.85, toAt: 0, runs: [2.5, 2, 5] })
+    const far = N('b', 8, 6), long: Track = { ...z, runs: [3, 2, 6] }
+    expect(dragRun(long, a, far, 0, 2).runs.slice(-3)).toEqual([3, 2, 6])
   })
   it('one straight run slides along both sides at once, within the strip they share', () => {
     const level = N('b', 8, 1), s: Track = { ...z, runs: [], fromAt: 0.5, toAt: -0.5 }
-    const down = dragRun(s, a, level, 0, 1.75)
-    expect(down).toMatchObject({ fromAt: 0.75, toAt: -0.25, runs: [] })
-    // it stops at the end of the shared strip
-    expect(dragRun(s, a, level, 0, 2.2)).toMatchObject({ fromAt: 0.85, runs: [] })
-    expect(dragRun(s, a, level, 0, 0.7)).toMatchObject({ toAt: -0.85, runs: [] })
+    expect(dragRun(s, a, level, 0, 1.75)).toEqual({ ...s, fromAt: 0.75, toAt: -0.25 })
+    // past the end of the strip the two ends wait at the corner and the run goes on round
+    expect(dragRun(s, a, level, 0, 2.2)).toMatchObject({ fromAt: 0.85, toAt: -0.15, runs: [2.5, 2.2, 7.5] })
+    expect(dragRun(s, a, level, 0, 0.7)).toMatchObject({ fromAt: 0.15, toAt: -0.85, runs: [2.5, 0.7, 7.5] })
   })
   it('pulled right off both components, a straight run becomes a way round', () => {
     const level = N('b', 8, 0), s: Track = { ...z, runs: [] }
     const round = dragRun(s, a, level, 0, 4)
     expect(round.runs).toEqual([2.5, 4, 7.5])
-    expect(drawn(round, [a, level])).toEqual([[2, 1], [2.5, 1], [2.5, 4], [7.5, 4], [7.5, 1], [8, 1]])
-    // and the same when the two do not overlap at all, so there is no strip to slide in
-    expect(dragRun({ ...z, runs: [] }, a, N('b', 8, 9), 0, 4).runs).toHaveLength(3)
+    expect(drawn(round, [a, level])).toEqual([[2, 1.85], [2.5, 1.85], [2.5, 4], [7.5, 4], [7.5, 1.85], [8, 1.85]])
+    // and the same when the two do not overlap at all, so there is no strip to slide in: the ends stay as they were
+    expect(dragRun({ ...z, runs: [] }, a, N('b', 8, 9), 0, 4)).toMatchObject({ fromAt: 0, toAt: 0, runs: [2.5, 4, 7.5] })
   })
   it('a single corner slides either end along its side', () => {
     const corner: Track = { fromSide: 'e', toSide: 'n', fromAt: 0, toAt: 0, runs: [] }
@@ -116,29 +123,131 @@ describe('moving a run', () => {
   })
 })
 
+describe('taking a turn in the hand', () => {
+  it('both runs that meet at it go where it goes', () => {
+    expect(dragTurn(z, a, b, 0, 1.5, 4)).toEqual({ ...z, fromAt: 0.5, runs: [4] })
+    expect(dragTurn(z, a, b, 1, 6, 4.5)).toEqual({ ...z, toAt: -0.5, runs: [6] })
+  })
+  it('and when one of them steps round its corner, the other still lands where it was put', () => {
+    expect(dragTurn(z, a, b, 1, 6, 7)).toEqual({ ...z, toAt: 0.85, runs: [6, 7, 7.5] })
+    expect(dragTurn(z, a, b, 0, 3, 4)).toEqual({ ...z, fromAt: 0.85, runs: [2.5, 3, 4] })
+  })
+})
+
 describe('where a run in the hand comes to rest', () => {
-  it('level with the next run along, which is what takes a turn out', () => {
-    // the first run (y = 1) pulled down towards the last (y = 5)
-    const near: Track = { ...z, toAt: -0.8 } // last run at y = 4.2... the first cannot reach, but the pull is the same
-    expect(snapRun(near, a, b, 0, 4.05)).toBe(4.2)
-    expect(snapRun({ ...z, runs: [3, 7, 6] }, a, b, 1, 6.2)).toBe(6)
-    expect(snapRun({ ...z, runs: [3, 7, 6] }, a, b, 3, 2.8)).toBe(3)
+  it('exactly where it is put, when nothing is near', () => {
+    expect(snapRun(z, a, b, 1, 4.37)).toBe(4.37)
+    expect(snapRun({ ...z, toAt: -0.8 }, a, b, 0, 3.8)).toBe(3.8)
+    // however wide the pull, the grid only ever draws it a little way
+    expect(snapRun(z, a, b, 1, 4.35, 1)).toBe(4.35)
+  })
+  it('level with the next run along when it is within a few pixels of it, which is what takes a turn out', () => {
+    expect(snapRun({ ...z, toAt: -0.8 }, a, b, 0, 4.27)).toBe(4.2)
+    expect(snapRun({ ...z, runs: [3, 7, 6] }, a, b, 1, 6.08)).toBe(6)
+    expect(snapRun({ ...z, runs: [3, 7, 6] }, a, b, 3, 2.93)).toBe(3)
   })
   it('on the middle of its component, for an end run', () => {
-    expect(snapRun({ ...z, fromAt: 0.5 }, a, b, 0, 1.1)).toBe(1)
-    expect(snapRun({ ...z, toAt: 0.5 }, a, b, 2, 4.9)).toBe(5)
+    expect(snapRun({ ...z, fromAt: 0.5 }, a, b, 0, 1.06)).toBe(1)
+    expect(snapRun({ ...z, toAt: 0.5 }, a, b, 2, 4.94)).toBe(5)
   })
   it('a straight run is drawn to the middle of either component', () => {
     const level = N('b', 8, 1), s: Track = { ...z, runs: [], fromAt: 0.5, toAt: -0.5 }
-    expect(snapRun(s, a, level, 0, 1.1)).toBe(1)
-    expect(snapRun(s, a, level, 0, 1.9)).toBe(2)
+    expect(snapRun(s, a, level, 0, 1.06)).toBe(1)
+    expect(snapRun(s, a, level, 0, 1.94)).toBe(2)
   })
-  it('the nearer of two marks wins, and otherwise it keeps to the grid: quarter cells along a side, half cells in the open', () => {
-    expect(snapRun({ ...z, fromAt: 0.5, toAt: -3.3 }, a, b, 0, 1.4)).toBe(1.5) // nothing within reach
-    expect(snapRun(z, a, b, 0, 1.62)).toBe(1.5)
-    expect(snapRun(z, a, b, 1, 4.3)).toBe(4.5)
+  it('the nearer of two marks wins, and a half cell of the grid draws it only from very close', () => {
     expect(snapRun({ ...z, runs: [3, 7, 6], toAt: 1.8 }, a, b, 2, 6.9, 1)).toBe(6.8) // 6.8 (the last run) is nearer than 1 (the first)
-    expect(snapRun(z, a, b, 0, 1.2, 0.05)).toBe(1.25)
+    expect(snapRun(z, a, b, 1, 4.46)).toBe(4.5)
+    expect(snapRun(z, a, b, 1, 4.4)).toBe(4.4)
+  })
+  it('with no pull at all nothing draws it: it goes where it is put', () => {
+    expect(snapRun(z, a, b, 1, 4.47, 0)).toBe(4.47)
+    expect(snapRun({ ...z, fromAt: 0.5 }, a, b, 0, 1.01, 0)).toBe(1.01)
+  })
+})
+
+describe('putting a bend in, and taking one out', () => {
+  it('a run is given a step where it was pointed at: the part nearer the start stays', () => {
+    expect(drawn(addBend(z, a, b, 1, 3))).toEqual([[2, 1], [5, 1], [5, 3], [6, 3], [6, 5], [8, 5]])
+    // in the first run the step goes towards where the line is heading, and in the last it is the earlier part that moves
+    expect(addBend(z, a, b, 0, 3.4).runs).toEqual([3.5, 2, 5])
+    expect(drawn(addBend(z, a, b, 2, 6.5))).toEqual([[2, 1], [5, 1], [5, 4], [6.5, 4], [6.5, 5], [8, 5]])
+  })
+  it('a straight line gets a step by sliding one end along its side, or a detour when neither has room', () => {
+    const level = N('b', 8, 0), s: Track = { ...z, runs: [] }
+    expect(addBend(s, a, level, 0, 5.1)).toEqual({ ...s, toAt: 0.5, runs: [5] })
+    expect(addBend({ ...s, fromAt: 0.6, toAt: 0.6 }, a, level, 0, 5)).toMatchObject({ toAt: -0.4, runs: [5] })
+    // b is too small for its end to slide that far, so it is a's end that moves
+    expect(addBend(s, a, N('b', 8, 0.5, { scale: 0.5 }), 0, 5)).toMatchObject({ fromAt: 0.5, toAt: 0, runs: [5] })
+    const small = [N('a', 0, 0, { scale: 0.5 }), N('b', 8, 0, { scale: 0.5 })]
+    expect(addBend(s, small[0], small[1], 0, 5).runs).toEqual([4.5, 1.5, 5.5])
+  })
+  it('a turn is taken out by bringing the shorter run at it down to nothing', () => {
+    // out at y = 1, down x = 3, along y = 7, up x = 6, in at y = 5: the turn where x = 3 meets y = 7
+    expect(removeBend({ ...z, runs: [3, 7, 6] }, a, b, 1)).toMatchObject({ runs: [6] })
+    // two components nearly level: the end slides and the line is straight
+    const near = N('b', 8, 0.5)
+    expect(removeBend(z, a, near, 0)).toEqual({ ...z, fromAt: 0.5, runs: [] })
+  })
+  it('one that cannot go, because the ends are not in line, is left', () => {
+    expect(removeBend(z, a, b, 0)).toBeNull()
+    expect(removeBend(z, a, b, 1)).toBeNull()
+    expect(removeBend(z, a, b, 5)).toBeNull()
+    expect(removeBend(z, a, b, -1)).toBeNull()
+  })
+  it('on a blueprint: at the point of the line nearest where it was asked for', () => {
+    const d = docOf([a, b], [edge('e', 'a', 'b')])
+    expect(bendAt(d, 'e', [5.2, 3]).edges[0]).toMatchObject({ runs: [5, 3, 6], fromSide: 'e', toSide: 'w' })
+    // never on top of a turn, and not at all in a stretch too short to hold one
+    expect(bendAt(d, 'e', [5, 1.1]).edges[0].runs).toEqual([5, 1.5, 6])
+    const tight = docOf([a, N('b', 2.8, 4)], [edge('e', 'a', 'b', { fromSide: 'e', toSide: 'w', runs: [2.4] })])
+    expect(bendAt(tight, 'e', [2.3, 1])).toBe(tight)
+    expect(bendAt(d, 'nope', [0, 0])).toBe(d)
+    const bent = docOf([a, b], [edge('e', 'a', 'b', { ...z, runs: [3, 7, 6] })])
+    expect(unbend(bent, 'e', 2).edges[0].runs).toEqual([6])
+    expect(unbend(bent, 'e', 0)).toBe(bent)
+    expect(unbend(bent, 'e', 9)).toBe(bent)
+    expect(unbend(d, 'e', 1)).toBe(d)
+    expect(unbend(d, 'nope', 1)).toBe(d)
+  })
+  it('which stretch of a line a point is nearest to', () => {
+    const pts: [number, number][] = [[2, 1], [5, 1], [5, 5], [8, 5]]
+    expect(nearestRun(pts, [3, 1.4])).toBe(0)
+    expect(nearestRun(pts, [5.3, 3])).toBe(1)
+    expect(nearestRun(pts, [9, 6])).toBe(2)
+    expect(nearestRun([[1, 1], [1, 1]], [4, 4])).toBe(0)
+  })
+})
+
+describe('whose line it is', () => {
+  it('keeping a path takes the line exactly as the router drew it: nothing moves, and it is the user\'s from then on', () => {
+    const c = N('c', 8, 0), d = docOf([a, b, c], [edge('e', 'a', 'b'), edge('f', 'a', 'c'), edge('g', 'a', 'b', { shape: 'curved' })])
+    const before = routeAll(d.nodes, d.edges)
+    const kept = keepPath(d, ['e', 'g'])
+    expect(isManual(kept.edges[0])).toBe(true)
+    expect(isManual(kept.edges[1])).toBe(false)
+    expect(kept.edges[2]).toBe(d.edges[2]) // a curve has no path to keep
+    const after = routeAll(kept.nodes, kept.edges)
+    // not the line itself, and not the one beside it on the same side
+    expect(after.get('e')!.pts).toEqual(before.get('e')!.pts)
+    expect(after.get('f')!.pts).toEqual(before.get('f')!.pts)
+    expect(after.get('e')!.manual).toBe(true)
+    // once kept there is nothing more to keep
+    expect(keepPath(kept, ['e'])).toBe(kept)
+    expect(keepPath(d, ['nope'])).toBe(d)
+  })
+  it('a kept path stays put when something else in the diagram moves or is added', () => {
+    const d = keepPath(docOf([a, b], [edge('e', 'a', 'b')]), ['e'])
+    const was = routeAll(d.nodes, d.edges).get('e')!.pts
+    // a component dropped right on the line, and another line added to the same side
+    const more = { ...d, nodes: [...d.nodes, N('x', 4, 2), N('c', 8, 0)], edges: [...d.edges, edge('f', 'a', 'c')] }
+    expect(routeAll(more.nodes, more.edges).get('e')!.pts).toEqual(was)
+  })
+  it('manual means it has a path of its own, in either form', () => {
+    expect(isManual(edge('e', 'a', 'b'))).toBe(false)
+    expect(isManual(edge('e', 'a', 'b', { fromSide: 'e' }))).toBe(false)
+    expect(isManual(edge('e', 'a', 'b', { runs: [] }))).toBe(true)
+    expect(isManual(edge('e', 'a', 'b', { via: [[3, 3]] }))).toBe(true)
   })
 })
 

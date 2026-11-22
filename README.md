@@ -178,18 +178,41 @@ or not, and pull:
 
 - the first or last run slides that end along the side of its component;
 - a run in the middle moves alone, and its neighbours stretch;
-- an end run pulled past the corner of its component steps out and goes round;
+- an end run pulled past the corner of its component steps out and goes round,
+  starting from nothing, so it never sticks and then jumps;
+- a turn (the dot where two runs meet) moves both runs at once;
 - a run brought level with the next one along merges with it, and the turn
-  between them is gone. That is how a line is straightened by hand: it is drawn
-  onto the other run's line when it comes near, so no precision is needed.
+  between them is gone. That is how a line is straightened by hand.
 
-There are no loose points to place, so a line cannot be tied in a knot. Drag an
-end onto another component to reconnect it, or onto a door of the same one to
-pin that side. A line you have shaped is yours: it is stored as a track (the
-position of each run, in `src/core/shape.ts`), so when a component moves only
-the runs next to it stretch, and it is never re-planned until you choose "Route
-automatically" (or tidy the whole layout). Every step is one undo step, shown
-live while it is in the hand and written once when it is let go.
+Right-click a line (press and hold on a phone) for "Add a bend here";
+double-click a turn to take it out. Drag an end onto another component to
+reconnect it, or onto a door of the same one to pin that side.
+
+**The line does what the hand does.** These are rules the code is held to by
+tests, not aspirations:
+
+- A run moves exactly as far as the pointer moves, from wherever across its
+  width it was caught. Nothing is rounded to the grid.
+- Snapping is a few pixels wide (6 with a mouse, 10 with a finger), measured on
+  screen, so it is the same at every zoom. It draws a run onto the next run's
+  line, the middle of a component, or, more weakly, a half cell. Hold Alt to
+  drag without it, or switch it off in the inspector ("Snap").
+- What is on screen when the pointer is let go is what is kept. Letting go,
+  deselecting, reselecting and reloading never change the line.
+- Only the run in the hand moves. The one exception is asked for by the user: a
+  single step between two facing sides, dropped on the line where its two ends
+  can meet, becomes straight.
+
+**Whose line it is.** Every right-angled connection is either Automatic (the
+router plans it, and plans it again whenever things move) or Manual (it follows
+the track you left, stored as the position of each run in `src/core/shape.ts`).
+Dragging any part of an automatic line makes it manual in the same gesture,
+with the line exactly where it was. "Keep this path" does the same without
+moving anything, and "Route automatically" hands it back. The bar above a
+selected line and the inspector's Routing control both show which it is. A
+manual line is never re-planned: not when something is dropped on it, not when
+another line joins the same side, not when its own component moves (then only
+the runs next to that component stretch). Every change is one undo step.
 
 **Following the flow.** "Follow the flow" on a component or a connection lights
 everything upstream and downstream of it and steps the rest of the diagram back.

@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { AlignCenterVertical, AlignHorizontalSpaceAround, Copy, CornerDownRight, Group, Minus, RotateCcw, Scan, Slash, Spline, Trash2, Waypoints } from 'lucide-react'
+import { AlignCenterVertical, AlignHorizontalSpaceAround, Copy, CornerDownRight, Group, Minus, Pin, Scan, Slash, Spline, Trash2, Wand2, Waypoints } from 'lucide-react'
 import { MAX_PITCH, MIN_PITCH, type Proj, U, f, makeCam, mix, normYaw, planeMatrix, poly, pt, unproject, upright } from '../core/iso'
 import { costOf, defOf, defaultProps, docCost, money, nodeName } from '../core/catalog'
 import { traceFlow } from '../core/links'
 import { routePair, routeToPoint } from '../core/router'
 import { arrowAt, lineOf, pathOf } from '../core/routing'
-import { type Track, dragRun, isShaped, simplify, snapRun, straightness, trackOf, withTrack } from '../core/shape'
+import { type Track, coordsOf, dragRun, isManual, nearestRun, simplify, snapRun, straightness, trackOf, withTrack } from '../core/shape'
 import { SIDES, clearOf, doorNear, magnet, portsOf, reachTo, soft } from '../core/snap'
 import { inArea, lineUp, spaceEvenly } from '../core/layout'
 import { type View, kindOf, moveItems, useStore } from '../core/store'
@@ -32,9 +32,11 @@ type Drag =
   | { mode: 'resize'; id: string; corner: number; base: AreaT; active: boolean }
   | { mode: 'nresize'; id: string; corner: number; base: NodeT; active: boolean }
   | { mode: 'connect'; from: string; sx: number; sy: number }
-  // one run of a connection being moved sideways. `track` is the line as it was picked up, `run` which of its runs is in the hand,
-  // `axis` the ground coordinate the pointer supplies for it, and `last` the track as it would be left if let go now
-  | { mode: 'seg'; id: string; run: number; axis: 'x' | 'y'; track: Track; last: Track; turns: number; active: boolean; base: Doc; sx: number; sy: number }
+  // a connection being reshaped: one run moved sideways, or a turn (the two runs that meet at it) moved about. `track` is the line
+  // as it was picked up and `last` as it would be left if let go now. Each run in the hand remembers where it stood (`from`) and
+  // which ground coordinate moves it; `wx`, `wy` is where on the ground it was taken hold of, so it goes as far as the pointer does
+  // and no further, wherever on its width it was caught
+  | { mode: 'seg'; id: string; held: { run: number; axis: 'x' | 'y'; from: number }[]; track: Track; last: Track; turns: number; active: boolean; base: Doc; sx: number; sy: number; wx: number; wy: number; rested?: number }
   // one end of a connection being dragged to another component, or to another side of the same one
   | { mode: 'relink'; id: string; end: 'from' | 'to'; active: boolean; sx: number; sy: number }
   | { mode: 'marquee'; sx: number; sy: number }
@@ -50,18 +52,6 @@ export function heat(t: number) {
 
 // rough body heights, so the selection bar sits just above each kind of component
 const HEIGHT: Record<string, number> = { tower: 1.9, rack: 2.1, slab: 0.55, tile: 0.3, cylinder: 1.7, bucket: 1.5, stack: 1.05, cluster: 0.95, people: 1.2, globe: 1.9, disc: 0.5, gate: 1.45 }
-
-/** Which stretch of a drawn line a point on the ground is nearest to. */
-export function nearestRun(pts: [number, number][], at: [number, number]): number {
-  let best = 0, least = Infinity
-  for (let i = 0; i < pts.length - 1; i++) {
-    const [ax, ay] = pts[i], [bx, by] = pts[i + 1], dx = bx - ax, dy = by - ay
-    const t = Math.max(0, Math.min(1, ((at[0] - ax) * dx + (at[1] - ay) * dy) / (dx * dx + dy * dy || 1)))
-    const d = Math.hypot(at[0] - ax - dx * t, at[1] - ay - dy * t)
-    if (d < least) { least = d; best = i }
-  }
-  return best
-}
 
 /** how long a finger rests before it counts as press-and-hold, and how far it may wander and still be a tap */
 export const HOLD_MS = 420
@@ -346,9 +336,12 @@ export function Canvas() {
       if (touch) haptic(6)
       return
     }
-    if (handle && /^s\d+$/.test(handle)) {
-      // a run of the selected connection: pulled sideways, it moves
-      grabRun(st.selection[0], Number(handle.slice(1)), e.clientX, e.clientY)
+    if (handle && /^[sc]\d+$/.test(handle)) {
+      // a run of the selected connection: pulled sideways, it moves. A turn: both runs that meet at it go where it goes
+      grabRun(st.selection[0], Number(handle.slice(1)), e.clientX, e.clientY, handle[0] === 'c')
+      // a finger that rests on the line and lifts without pulling it is asking for the line's menu. It is only known
+      // when the finger lifts: a slow start to a pull must never be cut short by a menu
+      if (touch && drag.current?.mode === 'seg') drag.current.rested = performance.now()
       return
     }
     if (handle === 'ea' || handle === 'eb') {
@@ -426,16 +419,19 @@ export function Canvas() {
     return more
   }
 
-  /** Take hold of stretch `i` of a connection's drawn line, ready to move the run it belongs to. */
-  const grabRun = (id: string, i: number, sx: number, sy: number) => {
+  /** Take hold of stretch `i` of a connection's drawn line, ready to move the run it belongs to; or, with `turn`, of the turn at point `i` of it. */
+  const grabRun = (id: string, i: number, sx: number, sy: number, turn = false) => {
     const st = useStore.getState()
     const e = st.doc.edges.find((x) => x.id === id), r = routes.get(id)
     const a = e && st.doc.nodes.find((n) => n.id === e.from), b = e && st.doc.nodes.find((n) => n.id === e.to)
     const t = r && a && b ? trackOf(r, a, b) : null
-    if (!t || !r) return
-    const p = r.pts[i], q = r.pts[i + 1]
-    if (!p || !q) return
-    drag.current = { mode: 'seg', id, run: t.seg[i], axis: p[1] === q[1] ? 'y' : 'x', track: t.track, last: t.track, turns: t.track.runs.length, active: false, base: st.doc, sx, sy }
+    if (!t || !r || !a || !b) return
+    const L = coordsOf(t.track, a, b)
+    const hold = (k: number) => { const p = r.pts[k], q = r.pts[k + 1]; return p && q ? { run: t.seg[k], axis: p[1] === q[1] ? 'y' as const : 'x' as const, from: L[t.seg[k]] } : null }
+    const held = (turn ? [hold(i - 1), hold(i)] : [hold(i)]).filter((h): h is NonNullable<typeof h> => !!h)
+    if (held.length !== (turn ? 2 : 1) || (turn && held[0].run === held[1].run)) return
+    const [wx, wy] = toWorld(sx, sy)
+    drag.current = { mode: 'seg', id, held, track: t.track, last: t.track, turns: t.track.runs.length, active: false, base: st.doc, sx, sy, wx, wy }
   }
 
   /** Put down whatever is in the hand without keeping it. */
@@ -532,10 +528,14 @@ export function Canvas() {
       }
       const edge = d.base.edges.find((x) => x.id === d.id), a = edge && d.base.nodes.find((n) => n.id === edge.from), b = edge && d.base.nodes.find((n) => n.id === edge.to)
       if (!edge || !a || !b) return
-      const [wx, wy] = toWorld(p.x, p.y), raw = d.axis === 'y' ? wy : wx
-      // it is drawn to whatever it would line up with: the next run along (which takes the turn out) or the middle of a component
-      const v = snapRun(d.track, a, b, d.run, raw, Math.max(0.3, (p.touch ? 16 : 9) / (U * st.view.k)))
-      const next = dragRun(d.track, a, b, d.run, v)
+      const [wx, wy] = toWorld(p.x, p.y)
+      // It goes exactly as far as the pointer has gone. Within a few pixels of something it would line up with (the next run along,
+      // which takes the turn out; the middle of a component; a half cell) it settles there, unless Alt is held or snapping is off
+      const pull = st.snapLines !== p.alt ? (p.touch ? 10 : 6) / (U * st.view.k) : 0
+      const to = d.held.map((h) => snapRun(d.track, a, b, h.run, h.from + (h.axis === 'y' ? wy - d.wy : wx - d.wx), pull))
+      // the later run first: if it steps round a corner it adds runs after itself, which leaves the earlier one where it was in the row
+      let next = d.track
+      for (let i = d.held.length - 1; i >= 0; i--) next = dragRun(next, a, b, d.held[i].run, to[i])
       if (JSON.stringify(next) === JSON.stringify(d.last) && liveRef.current) return
       d.last = next
       // a tick under the finger each time a turn drops out of the line or comes back into it
@@ -791,7 +791,13 @@ export function Canvas() {
     }
     if (d.mode === 'seg') {
       setLive(null)
-      if (!d.active) return
+      if (!d.active) {
+        if (d.rested !== undefined && e.type !== 'pointercancel' && performance.now() - d.rested >= HOLD_MS) {
+          // after the tap that the lifting finger also counts as has been and gone, so it cannot land on the menu
+          haptic(12); setTimeout(() => openMenuAt(d.sx, d.sy), 90)
+        }
+        return
+      }
       const edge = d.base.edges.find((x) => x.id === d.id), a = edge && d.base.nodes.find((n) => n.id === edge.from), b = edge && d.base.nodes.find((n) => n.id === edge.to)
       if (!edge || !a || !b) return
       // turns that no longer do anything are taken out as it is put down; one step, and none at all if the line ends up as it began
@@ -863,12 +869,15 @@ export function Canvas() {
   const openMenuAt = (cx: number, cy: number) => {
     const st = useStore.getState()
     // the pointer is captured by the canvas, so look up what is actually under it
-    const hit = (document.elementFromPoint(cx, cy)?.closest('[data-kind]') ?? null) as HTMLElement | null
-    const id = hit?.dataset.id
+    const under = document.elementFromPoint(cx, cy)
+    const hit = (under?.closest('[data-kind]') ?? null) as HTMLElement | null
+    // the selected connection wears its handles over the line: a press on one of those is a press on the line
+    const worn = !hit && under?.closest('.edge-sel') && st.selection.length === 1 && st.doc.edges.some((e) => e.id === st.selection[0])
+    const id = worn ? st.selection[0] : hit?.dataset.id
     if (id && !st.selection.includes(id)) st.select([id])
     if (!id) st.select([])
     const [wx, wy] = toWorld(cx, cy)
-    setMenu({ x: cx, y: cy, wx, wy, target: id ? (hit!.dataset.kind as any) : null })
+    setMenu({ x: cx, y: cy, wx, wy, target: worn ? 'edge' : id ? (hit!.dataset.kind as any) : null })
   }
 
   const onDoubleClick = (e: React.MouseEvent) => {
@@ -876,6 +885,9 @@ export function Canvas() {
     const hit = (document.elementFromPoint(e.clientX, e.clientY)?.closest('[data-kind]') ?? (e.target as HTMLElement).closest('[data-kind]')) as HTMLElement | null
     // while several things are being picked, two quick taps are two picks, not a request to edit
     if (useStore.getState().multi) return
+    // on a turn of the selected connection: that turn is taken out
+    const turn = (document.elementFromPoint(e.clientX, e.clientY)?.closest('[data-handle]') as HTMLElement | null)?.dataset.handle
+    if (turn && /^c\d+$/.test(turn)) { const st = useStore.getState(); st.removeBend(st.selection[0], Number(turn.slice(1))); return }
     // opens the inspector if it was put away, since a rename has to happen somewhere
     if (hit?.dataset.id) useStore.setState((s) => ({ panel: 'inspect', showInsp: true, ...(innerWidth <= 760 ? { showLib: false } : {}), focusName: s.focusName + 1 }))
   }
@@ -1028,6 +1040,17 @@ export function Canvas() {
                       </g>
                     )
                   })}
+                  {/* each turn can be taken hold of too, and moved wherever: the two runs that meet at it follow */}
+                  {editing && !moving && r.shape === 'ortho' && r.pts.slice(1, -1).map((p, i) => {
+                    const c = P(p)
+                    return (
+                      <g key={'c' + i}>
+                        {grab(c, 'c' + (i + 1))}
+                        <circle cx={c[0]} cy={c[1]} r={8 / view.k} fill="transparent" data-handle={'c' + (i + 1)} style={{ cursor: 'move' }} />
+                        <circle className="turn-grip" cx={c[0]} cy={c[1]} r={3.2 / view.k} fill={ACCENT} stroke={theme.bg} strokeWidth={1.5 / view.k} pointerEvents="none" />
+                      </g>
+                    )
+                  })}
                   {editing && ([['ea', r.pts[0]], ['eb', r.pts[last]]] as const).map(([name, p]) => {
                     const c = P(p as [number, number])
                     return (
@@ -1164,7 +1187,9 @@ export function Canvas() {
           <button aria-label="Direct" aria-pressed={oneEdge.shape === 'direct'} data-tip="Direct: one line, at any angle" onClick={() => useStore.getState().setShape([oneEdge.id], 'direct')}><Slash size={14} /></button>
           <button aria-label="Curved" aria-pressed={oneEdge.shape === 'curved'} data-tip="Curved" onClick={() => useStore.getState().setShape([oneEdge.id], 'curved')}><Spline size={14} /></button>
           <span className="sel-bar-sep" />
-          <button aria-label="Route automatically" disabled={!isShaped(oneEdge)} data-tip="Route automatically" onClick={() => useStore.getState().resetRoute([oneEdge.id])}><RotateCcw size={14} /></button>
+          {/* whose line it is: the router's, to plan afresh as things move, or the user's, to stay as it was left */}
+          <button aria-label="Route automatically" aria-pressed={!isManual(oneEdge)} data-tip={isManual(oneEdge) ? 'Shaped by hand. Route it automatically again' : 'Routed automatically'} onClick={() => useStore.getState().resetRoute([oneEdge.id])}><Wand2 size={14} /></button>
+          <button aria-label="Keep this path" aria-pressed={isManual(oneEdge)} disabled={!!oneEdge.shape} data-tip={isManual(oneEdge) ? 'Shaped by hand: it stays as you left it' : 'Keep this path as it is'} onClick={() => useStore.getState().keepRoute([oneEdge.id])}><Pin size={14} /></button>
         </div>
       )}
       {doc.nodes.length === 0 && doc.areas.length === 0 && doc.labels.length === 0 && !placing && (
