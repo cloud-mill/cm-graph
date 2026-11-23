@@ -8,6 +8,7 @@ import { useStore } from '../core/store'
 import type { PricingModel } from '../core/types'
 import { Segmented, Toggle, Select } from './atoms'
 
+/** A ring split by share of `total`. Each part is one full circle whose dash is as long as its share, started where the last one ended. */
 function Donut({ parts, total }: { parts: { color: string; value: number }[]; total: number }) {
   const R = 44, C = 2 * Math.PI * R
   let acc = 0
@@ -32,6 +33,12 @@ const BASIS_ROWS = [
   { id: 'estimate', name: 'Estimated', blurb: 'The rate itself is not verified: a service or region whose price list is not loaded, or a size that is not sold.' },
 ] as const
 
+/**
+ * The Budget tab: what the blueprint costs a month and what that figure rests on. Two totals are in
+ * play: `cost.list` is every line added up, and `cost.total` is that less the free allowances.
+ * Shares and the ring are of the list price; the headline is the total. Pricing model and the heatmap
+ * are session settings in the store; region belongs to the blueprint and changing it is an undo step.
+ */
 export function BudgetPanel() {
   const doc = useStore((s) => s.doc)
   const pricing = useStore((s) => s.pricing)

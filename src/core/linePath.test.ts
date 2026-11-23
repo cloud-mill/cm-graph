@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { FLAT, ISO, U } from './iso'
-import { type W, arrowAt, captionAnchor, curveOf, labelAnchor, lineOf, pathOf, route } from './routing'
+import { type W, arrowAt, captionAnchor, curveOf, labelAnchor, lineOf, pathOf, route } from './linePath'
 
 const at = (x: number, y: number, scale?: number) => ({ x, y, scale })
 

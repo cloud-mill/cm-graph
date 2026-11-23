@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { defaultProps, docCost } from './catalog'
+import { defaultProps, docCost } from '../core/catalog'
 import { budgetCsv, download, pngBlob, slug, svgString } from './exporters'
-import { TEMPLATES } from './templates'
+import { TEMPLATES } from '../core/templates'
 import { docOf, edge, node } from '../test/helpers'
 
 afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals() })

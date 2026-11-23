@@ -22,10 +22,12 @@ function ScoreRing({ score }: { score: number }) {
   )
 }
 
+/** The Advisor tab. Findings are worked out again from the blueprint whenever it changes; nothing about them is stored. */
 export function AdvisorPanel() {
   const doc = useStore((s) => s.doc)
   const s = useStore.getState()
   const { findings, score } = useMemo(() => analyze(doc), [doc])
+  // "apply all" leaves out the idle load balancer's fix, which is to delete it: that one is only done when asked for by itself
   const fixable = findings.filter((f) => f.fix && !f.id.startsWith('idle-lb'))
   const savings = findings.filter((f) => f.fix && f.saving).reduce((a, f) => a + f.saving!, 0)
 
@@ -39,6 +41,7 @@ export function AdvisorPanel() {
     s.toast(`Applied: ${f.fix!.label}`)
   }
   const fixAll = () => {
+    // all of them in one undo step
     s.apply((d) => fixable.reduce((acc, f) => f.fix!.apply(acc), d))
     s.toast(`Applied ${fixable.length} fix${fixable.length === 1 ? '' : 'es'}`)
   }

@@ -5,12 +5,17 @@ import { type NodeT, type Side, footOf } from './types'
  * being drawn is reaching for, and where a component's doors are.
  *
  * All of it is pure geometry on the ground plane, so it behaves the same at
- * any zoom or camera angle and can be tested without a screen.
+ * any zoom or camera angle and can be tested without a screen. Distances are
+ * in cells; callers turn a reach in pixels into cells for the zoom they are at.
+ *
+ * Despite the file's name, snapping to the grid is not here: the canvas rounds
+ * positions itself when the `snap` setting is on, and `snapRun` is in `core/shape`.
  */
 
+/** A point on the ground, in cells. */
 export type W = [number, number]
 
-/** how far outside its footprint a component's doors sit */
+/** how far outside its footprint a component's doors sit, in cells */
 export const PORT_OUT = 0.42
 export const SIDES: Side[] = ['n', 'e', 's', 'w']
 

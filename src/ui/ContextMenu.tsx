@@ -6,20 +6,33 @@ import { useStore } from '../core/store'
 import { canReroute, isManual, kinked, straightness } from '../core/shape'
 import { cleanLines, fitAreaToContents, selectAll, straightenLinks, tidy, wrapSelectionInArea } from './actions'
 
+/**
+ * Where a context menu was opened and on what. The canvas makes this (and holds it: the menu is open
+ * while it is set), after selecting whatever was under the pointer, so the menu acts on the selection.
+ */
 export interface MenuState {
+  /** where it was asked for, in window pixels */
   x: number
   y: number
+  /** the same spot on the ground, in cells */
   wx: number
   wy: number
+  /** the kind of thing under the pointer; null on empty ground */
   target: 'node' | 'edge' | 'area' | 'label' | null
 }
 
 type Item = { label: string; kbd?: string; run: () => void; danger?: boolean } | 'sep'
 
+/**
+ * The right-click (or press-and-hold) menu. Its items are worked out once, from the store as it is
+ * when the menu opens: nothing can change under it, because any press outside it, Escape, Back or
+ * choosing an item closes it.
+ */
 export function ContextMenu({ menu, onClose }: { menu: MenuState; onClose: () => void }) {
   const ref = useRef<HTMLDivElement>(null)
   const [pos, setPos] = useState({ x: menu.x, y: menu.y })
   const s = useStore.getState()
+  // measured after it is laid out and moved before it is painted, so it never shows hanging off the right or bottom edge
   useLayoutEffect(() => {
     const r = ref.current!.getBoundingClientRect()
     setPos({ x: Math.min(menu.x, innerWidth - r.width - 8), y: Math.min(menu.y, innerHeight - r.height - 8) })

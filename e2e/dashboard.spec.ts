@@ -1,3 +1,7 @@
+/**
+ * The dashboard: what a first visit shows, making, opening, duplicating and deleting blueprints, templates, the
+ * theme, and importing Terraform. A failure means someone cannot get into, or back to, their work.
+ */
 import { TRIO, expect, makeDoc, test } from './fixtures'
 
 test.describe('dashboard', () => {

@@ -247,7 +247,7 @@ describe('translateDoc', () => {
     // Cloud Tasks m0 "Operations" → Service Bus m0 "Operations": same label, carried
     const sb = translateDoc(docOf([node('q', 'gcp-tasks', 0, 0, { props: { m0: 77, dlq: true } })]), 'azure').doc.nodes[0]
     expect(sb.props).toEqual({ m0: 77, dlq: true })
-    // Memorystore m0 "Capacity" → DocumentDB? no: pick a pair whose m0 labels differ
+    // Cloud Load Balancing → Application Gateway: the same keys with different labels, so the defaults apply
     const cdn = translateDoc(docOf([node('c', 'gcp-lb', 0, 0, { props: { m0: 9, m1: 1234 } })]), 'azure').doc.nodes[0]
     expect(cdn.type).toBe('az-appgw')
     expect(cdn.props).toEqual({ m0: 1, m1: 5 }) // "Forwarding rules"/"Data processed" are not "Gateways"/"Capacity units"

@@ -25,6 +25,21 @@ import { usePhone } from './device'
 import { GestureGuide, MobileDock, ViewFabs } from './MobileDock'
 import { Sheet } from './Sheet'
 
+/*
+ * The editor screen: the canvas with everything that floats over it (top bar, toolbar, view cube,
+ * read-outs, side panels or phone sheets, dialogs), the keyboard shortcuts, and the loading and
+ * autosaving of the blueprint being edited. Drawing and pointer handling belong to canvas/Canvas.
+ *
+ * All editor state lives in the store, including which panels and which dialog are open, so that
+ * menus, the command palette and shortcuts can all change it. Components here keep no state of
+ * their own beyond a drag in progress.
+ *
+ * A pattern used throughout ui/: values that are drawn are read with `useStore(selector)`, which
+ * re-renders when they change; `const s = useStore.getState()` is only a way to reach the store's
+ * actions (which never change) from event handlers, without subscribing to anything. State must
+ * not be drawn from `s`: it is a snapshot taken at render.
+ */
+
 /** Three stacked planes: the product is literally layers of infrastructure. */
 export function Logo({ size = 22 }: { size?: number }) {
   return (
@@ -100,7 +115,8 @@ function TopBar({ phone }: { phone?: boolean }) {
   )
 }
 
-// below this width the panels are bottom sheets, so only one is open at a time
+// below this width the panels are bottom sheets, so only one is open at a time.
+// 760 is the same width at which ui/device.ts and styles.css switch to the phone layout
 const narrow = () => innerWidth <= 760
 
 const TOOLS: { id: Tool; label: string; kbd: string; icon: any }[] = [
@@ -126,7 +142,7 @@ function Toolbar() {
       <hr />
       <IconBtn title="Traffic animation" active={flow} onClick={() => s.set({ flow: !flow })}><Activity size={16} /></IconBtn>
       <IconBtn title="Grid" kbd="G" active={showGrid} onClick={() => s.set({ showGrid: !showGrid })}><Grid3x3 size={16} /></IconBtn>
-      {/* off, everything stays exactly where it is put. On, components keep to the grid and lines settle on what they line up with */}
+      {/* off, everything stays exactly where it is put. On, components keep to the grid and lines are drawn to what they line up with. The choice is remembered across sessions */}
       <IconBtn title={snap ? 'Snap to grid: on' : 'Snap to grid: off'} kbd="S" active={snap} onClick={() => { setPref('snap', !snap); s.set({ snap: !snap }) }}><Magnet size={16} /></IconBtn>
       <IconBtn title="Component names" kbd="L" active={showLabels} onClick={() => s.set({ showLabels: !showLabels })}><Tag size={16} /></IconBtn>
       <hr />
@@ -135,6 +151,10 @@ function Toolbar() {
   )
 }
 
+/**
+ * The whole diagram in small, with the part on screen framed. Everything in it is in scene
+ * coordinates: projected screen pixels at zoom 1, before the view's pan and zoom are applied.
+ */
 function Minimap() {
   const doc = useStore((s) => s.doc)
   const view = useStore((s) => s.view)
@@ -142,12 +162,11 @@ function Minimap() {
   const pitch = useStore((s) => s.pitch)
   const ref = useRef<SVGSVGElement>(null)
   const proj = useMemo(() => makeCam(yaw, pitch), [yaw, pitch])
-  const b = useMemo(() => {
-    const bb = sceneBounds(doc, proj, 120)
-    // include the viewport so the frame never leaves the map
-    return bb
-  }, [doc, proj])
+  const b = useMemo(() => sceneBounds(doc, proj, 120), [doc, proj])
+  // the visible part of the canvas, taken back through the view transform (screen = scene * k + offset)
   const vp = { x: -view.x / view.k, y: -view.y / view.k, w: cam.w / view.k, h: cam.h / view.k }
+  // centre the view on the point pressed. The map is letterboxed in its box (`xMidYMid meet`), so the
+  // margins that adds are taken off before a pixel is turned into a scene position
   const jump = (e: React.PointerEvent) => {
     const r = ref.current!.getBoundingClientRect()
     const scale = Math.max(b.w / r.width, b.h / r.height)
@@ -173,11 +192,14 @@ function Minimap() {
 /**
  * Navigation cube, as found in CAD viewers: it mirrors the camera, can be
  * dragged to orbit, and each face snaps to that standard view.
+ *
+ * The drag is kept in a ref: it changes on every pointer move and nothing is drawn from it (the
+ * cube redraws because the camera angle in the store changes). The face under the press is noted
+ * at pointer down, because once the pointer is captured later events report the svg as their target.
  */
 function ViewCube() {
   const yaw = useStore((s) => s.yaw)
   const pitch = useStore((s) => s.pitch)
-  const flat = useStore((s) => s.flat)
   const p = useMemo(() => makeCam(yaw, pitch), [yaw, pitch])
   const drag = useRef<{ x: number; y: number; moved: boolean; update: (dx: number, dy: number) => void; face: string | null } | null>(null)
   const K = 0.52 // cube half-size in world units → fits the 76px box at any angle
@@ -191,6 +213,7 @@ function ViewCube() {
     pts: [P(xF, -1, -1), P(xF, 1, -1), P(xF, 1, 1), P(xF, -1, 1)] })
   faces.push({ id: 'top', label: 'TOP', fill: 'var(--cube-top)', go: viewTop, pts: [P(-1, -1, 1), P(1, -1, 1), P(1, 1, 1), P(-1, 1, 1)] })
   const centre = (q: [number, number][]) => [q.reduce((s, v) => s + v[0], 0) / 4, q.reduce((s, v) => s + v[1], 0) / 4]
+  // a face's size on screen: one seen nearly edge-on is too thin to carry its name
   const area = (q: [number, number][]) => Math.abs((q[1][0] - q[0][0]) * (q[3][1] - q[0][1]) - (q[3][0] - q[0][0]) * (q[1][1] - q[0][1]))
   return (
     <div className="viewcube">
@@ -203,6 +226,7 @@ function ViewCube() {
           const d = drag.current
           if (!d) return
           const dx = e.clientX - d.x, dy = e.clientY - d.y
+          // under 3px of travel it is still a click on a face, not a drag
           if (!d.moved && Math.hypot(dx, dy) < 3) return
           d.moved = true
           d.update(dx * 1.6, dy * 1.6)
@@ -224,7 +248,7 @@ function ViewCube() {
       </svg>
       <div className="viewcube-bar">
         <IconBtn title="Turn left" kbd="Q" onClick={() => turn(45)}><RotateCcw size={13} /></IconBtn>
-        <IconBtn title={flat ? 'Home view' : 'Home view'} kbd="3" onClick={viewHome}><Home size={13} /></IconBtn>
+        <IconBtn title="Home view" kbd="3" onClick={viewHome}><Home size={13} /></IconBtn>
         <IconBtn title="Turn right" kbd="E" onClick={() => turn(-45)}><RotateCw size={13} /></IconBtn>
       </div>
     </div>
@@ -240,6 +264,7 @@ function Hud() {
   const pitch = useStore((s) => s.pitch)
   const total = useTween(useMemo(() => docCost(doc, pricing).total, [doc, pricing]))
   const cursor = useRef<HTMLSpanElement>(null)
+  // the canvas writes the cursor position straight into this element on every pointer move, so tracking it never renders React
   useEffect(() => { hud.el = cursor.current; return () => { hud.el = null } }, [])
   const s = useStore.getState()
   const deg = (v: number) => String(Math.round(v)).padStart(3, '0') + '°'
@@ -353,6 +378,20 @@ function InspectSheet({ onClose }: { onClose: () => void }) {
   )
 }
 
+/**
+ * The editor's keyboard shortcuts: one `keydown` listener on the window for as long as the editor is
+ * mounted. It reads the store when a key arrives, not when it was set up, so it never needs replacing.
+ *
+ * The order of the checks is the policy:
+ * 1. just after a field was asked to take focus, plain characters are kept for that field;
+ * 2. Cmd/Ctrl+K toggles the command palette from anywhere, even over another dialog;
+ * 3. with any dialog open, nothing else here runs: the dialog has the keyboard;
+ * 4. Cmd/Ctrl+S and Cmd/Ctrl+E work while typing in a field;
+ * 5. everything else is ignored while typing, so text fields keep their own undo, copy, arrows and letters.
+ *
+ * Phone sheets and the side panels are not dialogs, so shortcuts keep working while they are open.
+ * Copy and cut are the only ones that leave the browser's own handling of the key in place.
+ */
 function useShortcuts() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -425,6 +464,11 @@ function useShortcuts() {
   }, [])
 }
 
+/**
+ * The editor for the blueprint stored under `id`. It owns the blueprint's time in the store: it loads
+ * it, turns autosave on while it is open, and writes the last change as it closes. App keys it by `id`,
+ * so each blueprint gets a fresh one.
+ */
 export function Editor({ id }: { id: string }) {
   const loaded = useStore((s) => s.doc.id === id)
   const modal = useStore((s) => s.modal)
@@ -436,6 +480,7 @@ export function Editor({ id }: { id: string }) {
       const doc = loadDoc(id)
       // replaced, not added: Back from the dashboard must not land on the missing blueprint and be bounced again
       if (!doc) { navigate('#/', { replace: true }); return }
+      // off while the store is filled, so loading is not itself taken for an edit and written back
       enableAutosave(false)
       useStore.getState().load(doc)
       useStore.setState({ yaw: 45, pitch: 35.264, flat: false })
@@ -443,14 +488,17 @@ export function Editor({ id }: { id: string }) {
     enableAutosave(true)
     const flush = () => flushSave()
     window.addEventListener('beforeunload', flush)
+    // flush first: it only writes while autosave is on. A pending save is on a timer that closing would otherwise outrun
     return () => { flushSave(); enableAutosave(false); window.removeEventListener('beforeunload', flush) }
+    // `loaded` is a dependency so that the store losing this blueprint (it is module state, and can be replaced under us) loads it again
   }, [id, loaded])
   const title = useStore((st) => st.doc.name)
   useEffect(() => { document.title = (title || 'Untitled') + ' · CloudMill Graph' }, [title])
   const showLib = useStore((st) => st.showLib)
   const showInsp = useStore((st) => st.showInsp)
   const phone = usePhone()
-  // the gestures are the interface on a phone, so they are named once, the first time
+  // the gestures are the interface on a phone, so they are named once, the first time: after a pause, only if
+  // nothing else has opened meanwhile, and marked as seen only when actually shown
   useEffect(() => {
     if (!phone || !loaded || getPref('coached', false)) return
     const t = setTimeout(() => { const st = useStore.getState(); if (!st.modal && !st.showLib && !st.showInsp) { st.set({ modal: 'gestures' }); setPref('coached', true) } }, 1400)

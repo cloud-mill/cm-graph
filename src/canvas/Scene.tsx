@@ -2,11 +2,18 @@ import { memo, useMemo, useState } from 'react'
 import { type Proj, type Pt, U, alpha, f, planeMatrixUV, poly, pt, upright, uprightAlong } from '../core/iso'
 import { captionOf, type Flow } from '../core/links'
 import { type Routed, routeAll } from '../core/router'
-import { arrowAt, captionAnchor, lineOf } from '../core/routing'
+import { arrowAt, captionAnchor, lineOf } from '../core/linePath'
 import { nodeColor, nodeName } from '../core/catalog'
 import { type AreaT, type Doc, type EdgeT, type LabelT, type NodeT, centerOf, footOf } from '../core/types'
 import { Model, SceneDefs } from './models'
 
+// The diagram as SVG: areas, then connections, then labels, then components from far to near. It draws a `Doc` through a
+// `Proj` and nothing else: no store, no pointer handling, no pan or zoom (whoever uses it wraps it in a transform).
+// Coordinates out are scene px: ground cells through `pt`, at zoom 1.
+//
+// What can be pressed carries `data-kind` (node, edge, area, label) and `data-id`; the canvas reads those to tell what a
+// press landed on. Each kind of thing is a memoised view, so a drag that renders the scene every frame leaves alone
+// whatever is handed the same props as before.
 export interface SceneTheme {
   bg: string
   grid: string
@@ -56,7 +63,8 @@ export interface SceneProps {
  * moving one component only redraws the lines that actually changed.
  */
 export function useRoutes(doc: Doc): Map<string, Routed> {
-  // a holder that lives as long as the component does; what it holds is only ever touched while working out routes
+  // a holder that lives as long as the component does; what it holds is only ever touched while working out routes.
+  // A route that comes out the same as last time is handed back as the very same object, which is what lets a memoised line skip its redraw
   const [keep] = useState(() => ({ last: new Map<string, Routed>() }))
   return useMemo(() => {
     const next = routeAll(doc.nodes, doc.edges)
@@ -196,6 +204,7 @@ const LabelView = memo(function LabelView({ l, proj, theme }: { l: LabelT; proj:
   )
 })
 
+// areas are drawn outermost kind first, and within a kind the larger first, so one that sits inside another is on top of it
 const KIND_ORDER = { vpc: 0, zone: 1, group: 2, subnet: 3 }
 
 /** The diagram itself: pure, so it is reused for the editor, thumbnails and exports. */
@@ -223,7 +232,10 @@ export const Scene = memo(function Scene({ doc, proj, theme, showLabels = true, 
   )
 })
 
-/** Bounding box of the projected diagram in scene px. */
+/**
+ * Bounding box of the projected diagram in scene px (before pan and zoom), with `pad` px added all round.
+ * It allows for each component's height and for 0.9 of a cell past each of its sides; an empty diagram gets a small box about the origin.
+ */
 export function sceneBounds(doc: Doc, proj: Proj, pad = 60) {
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
   const add = (x: number, y: number, z = 0) => {

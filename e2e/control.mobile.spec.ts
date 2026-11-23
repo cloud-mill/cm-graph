@@ -39,7 +39,7 @@ test.describe('phone: a line under the finger', () => {
     const view = await corner(page), from = await at(page), d = await across(page)
     const to = { x: from.x + d.x, y: from.y + d.y }
     await fingers.drag(from, to, { steps: 14 })
-    // under the finger, give or take the few pixels from which it settles on a half cell
+    // under the finger, to within a few pixels (snapping is off by default, so nothing draws it to a half cell)
     expect(await gap(page, to)).toBeLessThanOrEqual(6)
     expect(await corner(page)).toEqual(view)
     const left = await path(page)

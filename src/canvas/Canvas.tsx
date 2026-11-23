@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { AlignCenterVertical, AlignHorizontalSpaceAround, Copy, CornerDownRight, Group, Minus, Pin, Scan, Slash, Spline, Trash2, Wand2, Waypoints } from 'lucide-react'
-import { MAX_PITCH, MIN_PITCH, type Proj, U, f, makeCam, mix, normYaw, planeMatrix, poly, pt, unproject, upright } from '../core/iso'
+import { MAX_PITCH, MIN_PITCH, type Proj, U, f, makeCam, mix, normYaw, poly, pt, unproject, upright } from '../core/iso'
 import { costOf, defOf, defaultProps, docCost, money, nodeName } from '../core/catalog'
 import { traceFlow } from '../core/links'
 import { routeAll, routeToPoint } from '../core/router'
-import { arrowAt, lineOf, pathOf } from '../core/routing'
+import { arrowAt, lineOf, pathOf } from '../core/linePath'
 import { type Track, alignRun, coordsOf, dragRun, isManual, nearestRun, simplify, snapRun, straightness, trackOf, withTrack } from '../core/shape'
 import { SIDES, doorNear, magnet, portsOf, reachTo } from '../core/snap'
 import { inArea, lineUp, spaceEvenly } from '../core/layout'
@@ -21,18 +21,48 @@ import { straightenLinks, wrapSelectionInArea } from '../ui/actions'
 import { ContextMenu, type MenuState } from '../ui/ContextMenu'
 import { keys } from '../ui/atoms'
 
+/**
+ * The interactive canvas: one <svg> that owns every pointer, touch and wheel gesture on the diagram, and the overlays
+ * (selection marks, handles, doors, guides, the bars above a selection) drawn around <Scene/>.
+ *
+ * How a drag works. Pointer-down decides what the press is and records it in `drag.current` (see `Drag`); pointer-move takes
+ * it a step further; pointer-up, or pointer-cancel, ends it. Nothing is written to the blueprint in between: a drag that
+ * changes it builds a live document, which is drawn in place of the store's, and the release hands that document to the
+ * store's `apply`. Escape drops it instead.
+ *
+ * Coordinates. Pointer events arrive in client px. `toWorld` turns them into ground cells: less the canvas's corner, less the
+ * pan and divided by the zoom (`view`), then back through the camera (`proj`, made from yaw and pitch). `pt` goes the other
+ * way, from cells to scene px, and the outer <g> applies `view`. Everything kept in a `Doc` is in cells.
+ *
+ * Not done here: the camera's own animations (camera.ts), telling two-finger gestures apart (touch.ts), working out where
+ * lines run (core/router), and any key but Space and Escape.
+ */
+/**
+ * What the pointer that is down is doing. A ref, not state: it changes on every pointer event and must be read by the very
+ * next one, render or no render. Drawing reads it only next to the `moving` state, which is what causes the redraw.
+ * Throughout: `sx`, `sy` are client px where the press began; `wx`, `wy` are ground cells; `vx`, `vy` are the view's pan when
+ * it began. `active` stays false until the drag has really begun (for `move` and `seg`, once the pointer is past the slop),
+ * and a drag that never became active writes nothing. `base` is the blueprint, or the one thing, as it was picked up: every
+ * step is worked out from it and the whole distance travelled, never from the step before, so nothing drifts.
+ */
 type Drag =
+  // the view sliding under the pointer. `moved` stays false while it may still be a click on bare ground, which clears the selection.
+  // `quiet`: left over from a two-finger gesture when one finger lifted, so a short last slide is not read as a flick
   | { mode: 'pan'; sx: number; sy: number; vx: number; vy: number; moved: boolean; quiet?: boolean }
   // second tap of a double tap on bare ground, held: sliding it zooms with one thumb
   | { mode: 'dtap'; sx: number; sy: number; view: View; moved: boolean }
   // a finger has landed and has not yet said what it wants: a tap, a pan, or a press-and-hold
   | { mode: 'touch'; id: string | null; kind: string | null; sx: number; sy: number; vx: number; vy: number; wx: number; wy: number }
   // `lx`, `ly`: how far it has been moved, which is what is on screen and what is kept; `ax`, `ay`: where the thing under the pointer stood,
-  // which is what goes from grid position to grid position when snapping is on; `cloned`: this drag made the copies it is moving
+  // which is what goes from grid position to grid position when snapping is on; `cloned`: this drag made the copies it is moving;
+  // `step`: the grid, in cells, that snapping keeps to (half cells when only labels are held); `home`: the area the selection
+  // stood in when picked up, so that only a different one lights up as somewhere it would be dropped into
   | { mode: 'move'; wx: number; wy: number; sx: number; sy: number; base: Doc; active: boolean; step: number; lx: number; ly: number; ax?: number; ay?: number; cloned?: boolean; home: string | null }
-  // `wx`, `wy`: where on the ground the corner was taken hold of, so it moves as far as the pointer does from wherever on the handle it was caught
+  // `wx`, `wy`: where on the ground the corner was taken hold of, so it moves as far as the pointer does from wherever on the handle it was caught.
+  // `resize` is a corner of an area, `nresize` a corner of a component; `corner` counts 0 to 3 from the one at the least x and y, by way of +x
   | { mode: 'resize'; id: string; corner: number; base: AreaT; active: boolean; wx: number; wy: number }
   | { mode: 'nresize'; id: string; corner: number; base: NodeT; active: boolean; wx: number; wy: number }
+  // a new connection being pulled out of component `from`; where its loose end is and what it has caught live in `wire`
   | { mode: 'connect'; from: string; sx: number; sy: number }
   // a connection being reshaped: one run moved sideways, or a turn (the two runs that meet at it) moved about. `track` is the line
   // as it was picked up and `last` as it would be left if let go now. Each run in the hand remembers where it stood (`from`) and
@@ -41,26 +71,37 @@ type Drag =
   | { mode: 'seg'; id: string; held: { run: number; axis: 'x' | 'y'; from: number; on?: number }[]; track: Track; last: Track; turns: number; active: boolean; base: Doc; sx: number; sy: number; wx: number; wy: number; rested?: number }
   // one end of a connection being dragged to another component, or to another side of the same one
   | { mode: 'relink'; id: string; end: 'from' | 'to'; active: boolean; sx: number; sy: number }
+  // a selection box, kept in screen px: it is a rectangle on the glass, not on the ground
   | { mode: 'marquee'; sx: number; sy: number }
+  // a new area being drawn with the area tool, from the corner where the press began
   | { mode: 'area'; wx: number; wy: number }
+  // the camera being turned and tilted. `update` comes from `beginOrbit` and takes the pointer's whole travel in px;
+  // `button` is kept because a right press that never moves is a request for the menu
   | { mode: 'orbit'; sx: number; sy: number; moved: boolean; button: number; update: (dx: number, dy: number) => void }
 
 
+/**
+ * Colour for the cost lens. `t` is a component's monthly cost as a share of the dearest one's, 0 to 1; nothing spent is grey.
+ * The square root spreads out the cheap end, so small costs can still be told apart beside a large one.
+ */
 export function heat(t: number) {
   if (t <= 0) return '#4a556b'
   const s = Math.sqrt(t)
   return s < 0.5 ? mix('#2BB5D4', '#E8C13D', s * 2) : mix('#E8C13D', '#E5574F', (s - 0.5) * 2)
 }
 
-// rough body heights, so the selection bar sits just above each kind of component
+// rough body heights by model, in cells for a component at its ordinary size, so the selection bar sits just above each kind of component
 const HEIGHT: Record<string, number> = { tower: 1.9, rack: 2.1, slab: 0.55, tile: 0.3, cylinder: 1.7, bucket: 1.5, stack: 1.05, cluster: 0.95, people: 1.2, globe: 1.9, disc: 0.5, gate: 1.45 }
 
-/** how long a finger rests before it counts as press-and-hold, and how far it may wander and still be a tap */
+/** How long a finger must rest in one place, in ms, before it counts as press-and-hold. */
 export const HOLD_MS = 420
-const TOUCH_SLOP = 9
+// How far a pointer may wander, in screen px, and still be a tap, a click or a hold. Past it the press is a drag
+// (or, for a finger on the ground, a pan). A mouse is steadier than a finger, so it gets less
+const TOUCH_SLOP = 9, MOUSE_SLOP = 4
 
-/** Where the pointer is and what is held down with it: everything a drag needs to take its next step. */
+/** Where the pointer is (client px) and what is held down with it: everything a drag needs to take its next step. */
 interface Ptr { x: number; y: number; shift: boolean; alt: boolean; ctrl: boolean; touch: boolean }
+// to a thousandth of a cell, so sums of fractions do not leave a long tail in the blueprint; `+ 0` makes a minus zero plain zero
 const r3 = (v: number) => Math.round(v * 1000) / 1000 + 0
 /** A coordinate as it is kept: where it was put, or the nearest grid position when snapping is on. */
 const put = (v: number, step: number, snap: boolean) => (snap ? Math.round(v / step) * step + 0 : r3(v))
@@ -70,6 +111,7 @@ const snapping = (p: { ctrl?: boolean; ctrlKey?: boolean; metaKey?: boolean }) =
 interface Wire { from: string; to: [number, number]; target: string | null; side?: Side; bad?: boolean; relink?: { id: string; end: 'from' | 'to' } }
 /** drags that carry something across the ground, which the view follows when the pointer reaches its edge */
 const CARRIES = new Set(['move', 'connect', 'relink', 'seg', 'resize', 'nresize'])
+// how near an edge of the clear canvas, in screen px, the pointer must be before the view starts to follow it
 const EDGE_ZONE = 30
 
 export function Canvas() {
@@ -97,9 +139,12 @@ export function Canvas() {
   const [intro, setIntro] = useState(true)
   useEffect(() => { setIntro(true); const t = setTimeout(() => setIntro(false), 1500); return () => clearTimeout(t) }, [doc.id])
   const drag = useRef<Drag | null>(null)
+  // Space is down, so the next press pans. A ref so that press sees it at once; `panning` is the state that turns the cursor
   const space = useRef(false)
   // ---- what is in the hand. None of this is the blueprint: it is drawn over it while a drag lasts and written once, when it ends.
   // The panels, the autosave and the undo history never see the frames in between.
+  // The live document is kept twice, and so are the wire, the draft and the marquee below: as state so that it is drawn, and in
+  // a ref so that the next pointer event, which can come before the next render, works from the latest. Always set both together
   const [liveDoc, setLiveDoc] = useState<Doc | null>(null)
   const liveRef = useRef<Doc | null>(null)
   const setLive = (d: Doc | null) => { liveRef.current = d; setLiveDoc(d) }
@@ -107,10 +152,13 @@ export function Canvas() {
   const [dropArea, setDropArea] = useState<string | null>(null)
   const [hover, setHoverState] = useState<string | null>(null)
   const hoverRef = useRef<string | null>(null)
+  // every pointer move asks; only a change of component is worth a render
   const setHover = (id: string | null) => { if (hoverRef.current !== id) { hoverRef.current = id; setHoverState(id) } }
   const [picking, setPicking] = useState<string[]>([])
   const [splice, setSplice] = useState<string | null>(null)
   const [quick, setQuick] = useState<{ x: number; y: number; wx: number; wy: number; from: string } | null>(null)
+  // the last report of a carry, and the frame request of `follow`: a pointer resting at the edge reports nothing, so the view
+  // goes on moving, and the drag with it, from the last place it was known to be
   const lastPtr = useRef<Ptr | null>(null)
   const scrollRaf = useRef(0)
   const [ghost, setGhost] = useState<{ at: [number, number] } | null>(null)
@@ -127,20 +175,24 @@ export function Canvas() {
   const [menu, setMenu] = useState<MenuState | null>(null)
   const [panning, setPanning] = useState(false)
   const [orbiting, setOrbiting] = useState(false)
-  // touch: where each finger is, the two-finger gesture in progress, and the press-and-hold timer
+  // touch: where each finger is (px from the canvas's corner, keyed by pointer id), the two-finger gesture in progress, and the press-and-hold timer
   const fingers = useRef(new Map<number, Finger>())
   const gesture = useRef<Gesture | null>(null)
+  // when the first finger landed and when the second joined it: together soon enough they may tilt, and up again soon enough they were a tap
   const landed = useRef({ first: 0, pair: 0 })
+  // where a panning finger has just been, for the speed of a flick; and the last tap on bare ground, for a double tap
   const trail = useRef<Trail[]>([])
   const lastTap = useRef<{ t: number; x: number; y: number } | null>(null)
   // what a two-finger gesture is doing right now, shown as a small read-out while it lasts
   const [reading, setReading] = useState<'turn' | 'tilt' | null>(null)
   const press = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const [guides, setGuides] = useState<Guide[]>([])
+  // the guides now showing, spelt out as one string, so a move that changes none of them sets nothing
   const guideKey = useRef('')
   const linkFrom = useStore((s) => s.linkFrom)
-  // fingers need bigger handles than a mouse does
+  // fingers need bigger handles than a mouse does. Asked once, when the canvas mounts: it does not follow a mouse plugged in later
   const coarse = useMemo(() => typeof matchMedia !== 'undefined' && matchMedia('(pointer: coarse)').matches, [])
+  // when the canvas goes away: a hold that is still being timed and a view that is still following must not fire into nothing
   useEffect(() => () => { clearTimeout(press.current); cancelAnimationFrame(scrollRaf.current) }, [])
   // a connection waiting for its other end only makes sense while the connect tool is up
   useEffect(() => { if (tool !== 'connect' && useStore.getState().linkFrom) useStore.setState({ linkFrom: null }) }, [tool])
@@ -162,11 +214,14 @@ export function Canvas() {
     }))
   }, [lens, doc, pricing])
 
-  // ---- viewport size
+  // ---- viewport size: `cam` (in camera.ts) is told how big the canvas is and where it sits, and the diagram is brought into frame.
+  // Run again for each blueprint that is opened, which is why it hangs on `doc.id` though it never reads it: a new blueprint
+  // is fitted, without animation, and resizes after that leave the view the user has
   useEffect(() => {
     const el = ref.current!
     const ro = new ResizeObserver(() => {
       const r = el.getBoundingClientRect()
+      // still at the size `cam` starts with: nothing has been measured yet, so this is the first real size and worth a fit
       const first = cam.w === 1200 && cam.h === 800
       cam.w = r.width; cam.h = r.height; cam.left = r.left; cam.top = r.top
       if (first) fitView(undefined, false)
@@ -179,23 +234,33 @@ export function Canvas() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [doc.id])
 
+  /**
+   * Client px to ground cells: take off the canvas's corner, undo the pan and zoom, then undo the camera.
+   * The view is read from the store, not from this render, so it is right even inside a handler that has just changed it.
+   * The camera defaults to this render's; a listener that outlives the render must pass `projNow()`.
+   */
   const toWorld = (cx: number, cy: number, p: Proj = proj): [number, number] => {
     const r = ref.current!.getBoundingClientRect()
     const v = useStore.getState().view
     return unproject(p, (cx - r.left - v.x) / v.k, (cy - r.top - v.y) / v.k)
   }
+  /** The component under a client position. Asked of the page, because while the pointer is captured every event's target is the canvas itself. */
   const nodeAt = (cx: number, cy: number) => {
     const el = document.elementFromPoint(cx, cy)?.closest('[data-kind="node"]') as HTMLElement | null
     return el?.dataset.id ?? null
   }
 
-  // ---- wheel zoom / pan
+  // ---- wheel zoom / pan. Attached by hand and not through React's onWheel: the page must not scroll or zoom underneath, and
+  // only a listener that is not passive may prevent that
   useEffect(() => {
     const el = ref.current!
     const onWheel = (e: WheelEvent) => {
       e.preventDefault()
       const r = el.getBoundingClientRect()
       const { view } = useStore.getState()
+      // A wheel event does not say what sent it, so it is guessed. A mouse wheel counts in lines or pages, or in whole steps
+      // of 40 px or more, straight up and down; it zooms, eased. Anything else is a trackpad: two fingers sliding pan, and a pinch,
+      // which browsers report as a wheel with Ctrl held, zooms at once, with no easing
       const mouseWheel = e.deltaMode !== 0 || (e.deltaX === 0 && Math.abs(e.deltaY) >= 40 && Number.isInteger(e.deltaY))
       if (e.ctrlKey || e.metaKey || mouseWheel) {
         const dy = e.deltaMode === 1 ? e.deltaY * 30 : e.deltaY
@@ -219,7 +284,9 @@ export function Canvas() {
     return () => { window.removeEventListener('keydown', down); window.removeEventListener('keyup', up) }
   }, [])
 
-  // ---- Escape puts back whatever is in the hand, exactly as it was
+  // ---- Escape puts back whatever is in the hand, exactly as it was. Heard in the capture phase and stopped there, so that
+  // nothing else listening for Escape also acts on the press that cancelled a drag. Subscribed once: the handler reads only
+  // refs and the store, and `dropHand` only sets state and refs, so the first render's copy of it never goes stale
   useEffect(() => {
     const key = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return
@@ -236,7 +303,10 @@ export function Canvas() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // ---- placing from the palette (pointer-driven drag & drop)
+  // ---- placing from the palette (pointer-driven drag & drop). The press begins in the palette, outside the canvas, and the
+  // canvas's own pointer-down stands aside while a type is being placed: the window is listened to instead. Subscribed afresh only when
+  // `placing` changes. The handlers keep the helpers of the render that made them, which is safe because those read the
+  // view, the blueprint and the snapping from the store when called; the camera is the one thing they must ask for (`projNow`)
   useEffect(() => {
     if (!placing) { setGhost(null); setSplice(null); return }
     const over = (e: PointerEvent) => {
@@ -244,6 +314,7 @@ export function Canvas() {
       return e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom &&
         !!(document.elementFromPoint(e.clientX, e.clientY)?.closest('.canvas-svg'))
     }
+    // a new component stands on two cells by two, so its corner is one cell back from the pointer and its middle under it
     const at = (e: PointerEvent): [number, number] => {
       const [wx, wy] = toWorld(e.clientX, e.clientY, projNow())
       return [wx - 1, wy - 1]
@@ -284,6 +355,9 @@ export function Canvas() {
     const st = useStore.getState()
     const target = e.target as HTMLElement
     const touch = e.pointerType === 'touch'
+    // Captured, so the moves and the release come to the canvas even when the pointer has left it or is over a panel. The
+    // browser lets go of the capture itself when the pointer comes up or is cancelled, so nothing here releases it. The price:
+    // from the next event on, `e.target` is the canvas, and what is under the pointer has to be asked of the page (`nodeAt`)
     try { ref.current!.setPointerCapture(e.pointerId) } catch { /* a pointer that is already gone cannot be captured */ }
     if (touch) {
       const r = ref.current!.getBoundingClientRect()
@@ -296,7 +370,7 @@ export function Canvas() {
         const d = drag.current
         const idle = !d || d.mode === 'touch' || d.mode === 'dtap' || (d.mode === 'pan' && !d.moved)
         clearTimeout(press.current)
-        // a move in progress ends where it is: a second finger should not throw away a long carry
+        // a move in progress ends where it is: a second finger should not throw away a long carry. Any other drag is dropped unkept
         if (d?.mode === 'move' && d.active && liveRef.current && (d.lx || d.ly)) st.apply(() => liveRef.current!, d.cloned)
         drag.current = null
         lastTap.current = null
@@ -310,6 +384,8 @@ export function Canvas() {
       if (fingers.current.size >= 2) return
       landed.current.first = now
     }
+    // From here the order is the rule: the first case that fits takes the press. The scene marks what can be pressed with
+    // `data-kind` (node, edge, area, label) and `data-id`; the overlay marks its handles with `data-handle`
     const hitEl = target.closest('[data-kind], [data-handle]')
     // orbit: right-drag anywhere, alt-drag on empty ground, or any drag with the orbit tool
     if (e.button === 2 || (e.button === 0 && (st.tool === 'orbit' || (e.altKey && !hitEl)))) {
@@ -317,6 +393,7 @@ export function Canvas() {
       drag.current = { mode: 'orbit', sx: e.clientX, sy: e.clientY, moved: false, button: e.button, update: beginOrbit(e.clientX - r.left, e.clientY - r.top) }
       return
     }
+    // the middle button, or Space held: a pan whatever is under the pointer. `moved` from the start, so letting go never deselects
     if (e.button === 1 || space.current) {
       drag.current = { mode: 'pan', sx: e.clientX, sy: e.clientY, vx: st.view.x, vy: st.view.y, moved: true }
       setPanning(true)
@@ -417,6 +494,7 @@ export function Canvas() {
     drag.current = { mode: 'pan', sx: e.clientX, sy: e.clientY, vx: st.view.x, vy: st.view.y, moved: false }
   }
 
+  /** Show these guides in place of the ones showing, unless they are the same ones. True when there are now more than before, which is when a finger gets a tick. */
   const showGuides = (g: Guide[]) => {
     const key = g.map((x) => x.axis + x.at + ':' + x.from + ':' + x.to).join()
     if (key === guideKey.current) return false
@@ -469,7 +547,7 @@ export function Canvas() {
     const st = useStore.getState()
     if (d.mode === 'move') {
       if (!d.active) {
-        if (Math.hypot(p.x - d.sx, p.y - d.sy) < (p.touch ? TOUCH_SLOP : 4)) return
+        if (Math.hypot(p.x - d.sx, p.y - d.sy) < (p.touch ? TOUCH_SLOP : MOUSE_SLOP)) return
         d.active = true
         setMoving(true)
         // alt-drag clones the selection and moves the copies
@@ -488,6 +566,7 @@ export function Canvas() {
       if (dx === d.lx && dy === d.ly && liveRef.current) return
       d.lx = dx; d.ly = dy
       const ids = new Set(useStore.getState().selection)
+      // always the blueprint as it was picked up, moved the whole way: never the last frame moved a little further
       const next = moveItems(d.base, d.base, ids, dx, dy)
       // a line appears whenever what is being moved comes level with something else, with a tick under the finger. It only says so: nothing is moved to make it true
       if (showGuides(alignGuides(next.nodes, ids, level())) && p.touch) haptic(5)
@@ -520,7 +599,7 @@ export function Canvas() {
       setLive({ ...st.doc, nodes: st.doc.nodes.map((n) => (n.id === d.id ? { ...n, x, y, scale: size / 2 } : n)) })
     } else if (d.mode === 'seg') {
       if (!d.active) {
-        if (Math.hypot(p.x - d.sx, p.y - d.sy) < (p.touch ? TOUCH_SLOP : 4)) return
+        if (Math.hypot(p.x - d.sx, p.y - d.sy) < (p.touch ? TOUCH_SLOP : MOUSE_SLOP)) return
         d.active = true
         setMoving(true)
       }
@@ -624,6 +703,7 @@ export function Canvas() {
       }
     }
     const d = drag.current
+    // the cursor read-out, in cells: written straight into its element so a pointer move does not render the editor
     if (hud.el) {
       const [hx, hy] = toWorld(e.clientX, e.clientY)
       const n = (v: number) => (v < 0 ? '-' : '+') + String(Math.abs(Math.round(v))).padStart(3, '0')
@@ -662,13 +742,13 @@ export function Canvas() {
     }
     if (d.mode === 'pan') {
       const dx = e.clientX - d.sx, dy = e.clientY - d.sy
-      if (!d.moved && Math.hypot(dx, dy) < 4) return
+      if (!d.moved && Math.hypot(dx, dy) < MOUSE_SLOP) return
       if (!d.moved) { d.moved = true; setPanning(true) }
       if (e.pointerType === 'touch') track(trail.current, performance.now(), e.clientX, e.clientY)
       st.set({ view: { ...st.view, x: d.vx + dx, y: d.vy + dy } })
     } else if (d.mode === 'orbit') {
       const dx = e.clientX - d.sx, dy = e.clientY - d.sy
-      if (!d.moved && Math.hypot(dx, dy) < 4) return
+      if (!d.moved && Math.hypot(dx, dy) < MOUSE_SLOP) return
       if (!d.moved) { d.moved = true; setOrbiting(true) }
       d.update(dx, dy)
     } else if (d.mode === 'marquee') {
@@ -713,6 +793,10 @@ export function Canvas() {
     ]
   }
 
+  /**
+   * The end of a press, and what it turned out to be. Also the handler for pointer-cancel (the browser took the pointer
+   * away): that ends a drag in the same way, but is never a tap, a flick or a request for a menu, hence the checks on `e.type`.
+   */
   const onPointerUp = (e: React.PointerEvent) => {
     clearTimeout(press.current)
     if (e.pointerType === 'touch') {
@@ -746,6 +830,7 @@ export function Canvas() {
         return
       }
     }
+    // the drag is over whatever it was: forget it first, and take down everything that was only up while it lasted
     const d = drag.current
     drag.current = null
     cancelAnimationFrame(scrollRaf.current); scrollRaf.current = 0
@@ -755,7 +840,8 @@ export function Canvas() {
     if (!d) return
     const st = useStore.getState()
     if (d.mode === 'move') {
-      // written once, as one step, and it is the very thing that was on screen: nothing is rounded, pushed aside or eased afterwards
+      // written once, as one step, and it is the very thing that was on screen: nothing is rounded, pushed aside or eased afterwards.
+      // Read from the ref: the last move may not have been rendered yet. Copies made by this drag already have their undo step, so the move joins it
       const to = liveRef.current
       setLive(null)
       if (d.active && to && (d.lx || d.ly)) st.apply(() => to, d.cloned)
@@ -968,7 +1054,7 @@ export function Canvas() {
                 <path d={fp(n.x, n.y, 0.1, footOf(n))} fill="none" stroke={ACCENT} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" />
               </g>
             ))}
-            {/* where what is in the hand will come to rest */}
+            {/* from here on, marks for what is under way: a drop, a selection box, a hover, a connection waiting for its other end */}
             {/* the group it is about to join */}
             {into && <polygon className="drop-area" points={poly([pt(proj, into.x, into.y), pt(proj, into.x + into.w, into.y), pt(proj, into.x + into.w, into.y + into.d), pt(proj, into.x, into.y + into.d)])} fill={ACCENT} fillOpacity={0.06} stroke={ACCENT} strokeOpacity={0.8} strokeWidth={1.5 / view.k} strokeLinejoin="round" />}
             {/* what a selection box has caught so far */}
@@ -1218,5 +1304,3 @@ export function Canvas() {
     </div>
   )
 }
-
-export { planeMatrix }

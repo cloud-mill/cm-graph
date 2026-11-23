@@ -1,3 +1,9 @@
+/**
+ * Speed and stability, in the `performance` project: run after every other project has finished, each group in
+ * serial mode, because the timings mean nothing on a busy machine. The limits are floors for catching a regression in headless
+ * Chrome, not claims about real hardware. A failure means something has started to cost far more per frame, to
+ * redraw what did not change, or to leave listeners, DOM or memory behind.
+ */
 import { devices } from '@playwright/test'
 import { TRIO, expect, makeDoc, test } from './fixtures'
 
@@ -135,7 +141,7 @@ test.describe('performance and stability', () => {
   })
 
   test('carrying a connected component across a large blueprint keeps pace with the pointer', async ({ page, app }) => {
-    // 80 components and 110 connections; the one carried has four lines that re-route as it goes
+    // 80 components and 107 connections; the one carried has three lines that re-route as it goes
     const types = ['ec2', 'rds', 's3', 'lambda', 'alb', 'sqs', 'dynamodb', 'elasticache']
     const nodes = Array.from({ length: 80 }, (_, i) => ({ id: `n${i % 10}_${Math.floor(i / 10)}`, type: types[(i % 10 + Math.floor(i / 10)) % types.length], x: (i % 10) * 5, y: Math.floor(i / 10) * 5 }))
     const doc = makeDoc(nodes)

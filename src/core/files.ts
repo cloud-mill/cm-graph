@@ -7,6 +7,7 @@ import type { Doc, PricingModel } from './types'
  * which pull in React's server renderer and are only loaded when an image is
  * actually exported.
  */
+/** Hand the browser a file to save. Needs a document: it works by clicking a temporary link. */
 export function download(filename: string, data: Blob | string, mime = 'text/plain') {
   const blob = typeof data === 'string' ? new Blob([data], { type: mime }) : data
   const url = URL.createObjectURL(blob)
@@ -27,6 +28,7 @@ const csvCell = (v: string | number) => {
 
 const BASIS_WORD = { fixed: 'Published rate, provisioned capacity', usage: 'Published rate, usage you entered', estimate: 'Estimate' } as const
 
+/** The budget as CSV: one row per cost line of each component, then the account's free allowances, then the total. */
 export function budgetCsv(doc: Doc, pricing: PricingModel): string {
   const rows: (string | number)[][] = [['Component', 'Service', 'Category', 'Line item', 'Monthly (USD)', 'Yearly (USD)', 'Basis', 'Note']]
   const cost = docCost(doc, pricing)
@@ -40,4 +42,5 @@ export function budgetCsv(doc: Doc, pricing: PricingModel): string {
   return rows.map((r) => r.map(csvCell).join(',')).join('\n') + '\n'
 }
 
+/** A blueprint's name as a file name: lower case, letters and digits joined by hyphens, never empty. */
 export const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'blueprint'

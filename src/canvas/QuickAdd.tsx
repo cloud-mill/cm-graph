@@ -10,6 +10,7 @@ const USUAL = ['ec2', 'lambda', 'rds', 's3', 'alb', 'sqs', 'dynamodb']
  * A small search that opens where a connection was let go on empty ground:
  * pick a component and it is added there, already connected. Type to search
  * every cloud, arrows and Enter to choose, Escape to change your mind.
+ * `x`, `y` are px from the canvas's top-left corner. It adds nothing itself: `onPick` is given the chosen type.
  */
 export function QuickAdd({ x, y, onPick, onClose }: { x: number; y: number; onPick: (type: string) => void; onClose: () => void }) {
   const provider = useStore((s) => s.provider)
@@ -32,7 +33,7 @@ export function QuickAdd({ x, y, onPick, onClose }: { x: number; y: number; onPi
     return CATALOG_LIST.map((d) => [score(d), d] as const).filter(([s]) => s >= 0).sort((a, b) => b[0] - a[0]).slice(0, 7).map(([, d]) => d)
   }, [q, provider])
 
-  // away from it closes it, as does anything that takes the canvas somewhere else
+  // a press anywhere outside it closes it. Heard on the window in the capture phase, so it closes before whatever was pressed acts on the press
   useEffect(() => {
     const away = (e: PointerEvent) => { if (!box.current?.contains(e.target as Node)) onClose() }
     window.addEventListener('pointerdown', away, true)
@@ -45,6 +46,7 @@ export function QuickAdd({ x, y, onPick, onClose }: { x: number; y: number; onPi
     else if (e.key === 'ArrowUp') { e.preventDefault(); setAt((i) => Math.max(0, i - 1)) }
     else if (e.key === 'Enter') { e.preventDefault(); pick(items[Math.min(at, items.length - 1)]) }
     else if (e.key === 'Escape') { e.preventDefault(); onClose() }
+    // what is typed here stays here: the editor's shortcuts listen on the window and would act on the same keys
     e.stopPropagation()
   }
   const tag = (d: CompDef) => (d.provider === 'any' ? '' : PROVIDERS.find((p) => p.id === d.provider)?.short ?? '')

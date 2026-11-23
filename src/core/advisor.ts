@@ -1,3 +1,12 @@
+/**
+ * The advisor: a fixed set of well-architected rules run over a blueprint.
+ *
+ * It reads only what is drawn: component types (through their `role`, so the
+ * same rule covers every cloud), their settings, and which components the
+ * lines join. It knows nothing about areas, so "in a private subnet" is never
+ * checked, and it never changes the blueprint itself: a fix is a function the
+ * caller applies.
+ */
 import { EC2_FAMILY, RDS_CLASS, costOf, defOf, defaultProps, docCost, nodeName, providerOf, roleOf } from './catalog'
 import type { Doc, NodeT } from './types'
 
@@ -5,14 +14,17 @@ export type Severity = 'high' | 'medium' | 'low'
 export type Pillar = 'Reliability' | 'Security' | 'Cost' | 'Hygiene'
 
 export interface Finding {
+  /** the rule, then the component it is about (`multiaz:<node id>`), or the bare rule for a blueprint-wide finding. Stable across runs, so a finding can be recognised again after a fix. */
   id: string
   severity: Severity
   pillar: Pillar
   title: string
   detail: string
+  /** ids of the components involved, the subject first; empty for a blueprint-wide finding */
   nodes: string[]
   /** estimated monthly saving in USD, for cost findings */
   saving?: number
+  /** a one-click remedy. `apply` returns a new blueprint and leaves the one it is given untouched. */
   fix?: { label: string; apply: (doc: Doc) => Doc }
 }
 
@@ -21,6 +33,8 @@ const patch = (id: string, props: Record<string, any>) => (doc: Doc): Doc => ({
   nodes: doc.nodes.map((n) => (n.id === id ? { ...n, props: { ...n.props, ...props } } : n)),
 })
 
+// all three sets hold roles, not types. Clients are where outside traffic starts; DATA stores must not be
+// reached straight from one; ENTRY_ROLES are what counts as a public entry point when a client reaches it.
 const CLIENTS = new Set(['users', 'internet', 'mobile'])
 const DATA = new Set(['rds', 'aurora', 'newsql', 'dynamodb', 'docdb', 'graphdb', 'tsdb', 'elasticache', 'opensearch', 'redshift'])
 const ENTRY_ROLES = ['alb', 'apigw', 'cloudfront', 'ec2', 'paas', 'graphql']
@@ -28,13 +42,18 @@ const HA: Record<string, string> = { aws: 'Multi-AZ', gcp: 'high availability', 
 const ENTRY = new Set(ENTRY_ROLES)
 const is = (n: NodeT, role: string) => roleOf(n.type) === role
 
-/** Static analysis of a blueprint against a handful of well-architected rules. */
+/**
+ * Static analysis of a blueprint against a handful of well-architected rules.
+ * Findings come back most severe first, then by largest saving. The score starts at 100 and loses
+ * 14, 7 or 2.5 points per high, medium or low finding, never going below 0; an empty blueprint scores 100.
+ */
 export function analyze(doc: Doc): { findings: Finding[]; score: number } {
   const F: Finding[] = []
   const byId = new Map(doc.nodes.map((n) => [n.id, n]))
   const outs = new Map<string, NodeT[]>()
   const ins = new Map<string, NodeT[]>()
   for (const n of doc.nodes) { outs.set(n.id, []); ins.set(n.id, []) }
+  // who can reach whom: a line counts in its drawn direction, and both ways when it has an arrow at each end
   for (const e of doc.edges) {
     const a = byId.get(e.from), b = byId.get(e.to)
     if (!a || !b) continue
@@ -79,6 +98,7 @@ export function analyze(doc: Doc): { findings: Finding[]; score: number } {
         })
       } else {
         const vms = targets.filter((t) => is(t, 'ec2'))
+        // instances and container tasks are counted; any other kind of target is taken to be redundant already (2)
         const capacity = targets.reduce((s, t) => s + (is(t, 'ec2') ? t.props.count ?? 1 : is(t, 'ecs') ? t.props.tasks ?? 1 : 2), 0)
         if (vms.length && capacity < 2) {
           F.push({
@@ -172,6 +192,7 @@ export function analyze(doc: Doc): { findings: Finding[]; score: number } {
     })
   }
 
+  // the saving is whatever a 1-year commitment takes off the whole bill, so it only reflects components that have a commitment price
   const od = docCost(doc, 'ondemand').total
   const c1 = docCost(doc, 'commit1').total
   if (od - c1 > 150) {
@@ -188,5 +209,3 @@ export function analyze(doc: Doc): { findings: Finding[]; score: number } {
   F.sort((a, b) => order[a.severity] - order[b.severity] || (b.saving ?? 0) - (a.saving ?? 0))
   return { findings: F, score: doc.nodes.length ? score : 100 }
 }
-
-export { defOf }

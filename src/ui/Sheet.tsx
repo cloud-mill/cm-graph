@@ -4,7 +4,11 @@ import { animateView, chrome, fitView, headedTo, reveal } from '../canvas/camera
 import { useBackLayer } from '../core/nav'
 import { type View, useStore } from '../core/store'
 
-/** Frame the whole diagram and say where the view will end up. */
+/**
+ * Frame the whole diagram and say where the view will end up, or null when it is already there.
+ * `fitView` can only move the view, not say where it would: so it is asked to jump, the answer is
+ * read, the view is put back, and then it is animated there.
+ */
 function frameAll(): View | null {
   const before = useStore.getState().view
   fitView(undefined, false)
@@ -22,6 +26,12 @@ function frameAll(): View | null {
  *
  * Only the header drags the sheet. The content scrolls on its own, so a scroll
  * is never mistaken for a dismissal.
+ *
+ * It is a dialog by role but not a modal one: there is no scrim, focus is not
+ * moved into it or kept in it, and the canvas and dock stay usable. The phone's
+ * Back button closes it (`useBackLayer`). Whether it is open is the caller's
+ * state; the sheet owns only its height and the drag. While mounted it also owns
+ * `chrome` in canvas/camera, which is how the camera knows what part of the canvas is hidden.
  */
 export function Sheet({ label, title, onClose, children, startTall, roomy }: {
   label: string; title?: ReactNode; onClose: () => void; children: ReactNode; startTall?: boolean
@@ -30,12 +40,15 @@ export function Sheet({ label, title, onClose, children, startTall, roomy }: {
 }) {
   const [tall, setTall] = useState(!!startTall)
   const el = useRef<HTMLElement>(null)
+  // a ref, not state: it changes on every pointer move, and the sheet is moved by writing its transform directly
   const drag = useRef<{ y: number; dy: number; t: number; id: number; control: boolean; held: boolean } | null>(null)
 
-  // where the view was before the sheet moved it, and where the sheet put it
+  // where the view was before the sheet moved it, and where the sheet put it. `from` is kept from the first
+  // move, so a sheet that changes height twice still puts the view back where the user had it
   const moved = useRef<{ from: View; to: View } | null>(null)
 
-  // tell the camera how much of the canvas is covered, and bring the selection back into view
+  // tell the camera how much of the canvas is covered, and bring the selection back into view.
+  // Runs again when the height changes, since that changes what is covered
   useLayoutEffect(() => {
     const measure = () => {
       const r = el.current!.getBoundingClientRect()

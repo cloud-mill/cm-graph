@@ -1,3 +1,7 @@
+/**
+ * Runs before every unit and component test file (`setupFiles` in vitest.config.ts), in plain Node and in jsdom
+ * alike. Everything that needs a DOM is inside the check for one further down.
+ */
 import { afterEach, beforeEach } from 'vitest'
 
 /** In-memory Web Storage, for the Node environment and for a clean slate between tests. */
@@ -12,6 +16,7 @@ class MemoryStorage implements Storage {
 }
 
 const g = globalThis as any
+// only where there is no usable localStorage already (one with a working `clear`)
 if (typeof g.localStorage === 'undefined' || typeof g.localStorage.clear !== 'function') {
   Object.defineProperty(g, 'localStorage', { value: new MemoryStorage(), configurable: true, writable: true })
 }
@@ -19,6 +24,7 @@ if (typeof g.localStorage === 'undefined' || typeof g.localStorage.clear !== 'fu
 beforeEach(() => { localStorage.clear() })
 
 if (typeof window !== 'undefined' && typeof document !== 'undefined') {
+  // loaded here and not at the top, so tests in plain Node never import the DOM matchers or React Testing Library
   await import('@testing-library/jest-dom/vitest')
   const { cleanup } = await import('@testing-library/react')
 
@@ -49,6 +55,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   URL.createObjectURL ??= () => 'blob:test'
   URL.revokeObjectURL ??= () => {}
 
+  // unmount what the test rendered, and undo what the app writes outside React: the route and the theme
   afterEach(() => {
     cleanup()
     location.hash = ''

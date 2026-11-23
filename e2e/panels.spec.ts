@@ -1,3 +1,8 @@
+/**
+ * The right-hand panel on a desktop: the inspector for components, connections and mixed selections, the budget,
+ * the advisor, and the prices shown. A failure means an edit made in the panel is not reaching the blueprint, or
+ * a price no longer agrees with the published rate it is worked out from.
+ */
 import { TRIO, expect, makeDoc, test } from './fixtures'
 
 const row = (page: import('@playwright/test').Page, label: string) => page.locator('.panel.right .row').filter({ has: page.locator('.row-label', { hasText: new RegExp('^' + label + '$') }) })
@@ -285,7 +290,7 @@ test.describe('pricing on screen', () => {
     await expect(page.locator('.hud-cell.cost')).toContainText('$274')
     await page.getByRole('tab', { name: /Budget/ }).click()
     await expect(page.locator('.budget-center .big')).toHaveText('$274')
-    // and to the cent in the breakdown
+    // and the breakdown agrees
     await expect(page.locator('.basis-row.fixed .mono')).toHaveText('$274')
     expect((await app.settled()).nodes[0].props).toMatchObject({ size: 'xlarge', os: 'windows' })
   })

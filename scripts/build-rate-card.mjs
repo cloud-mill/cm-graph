@@ -4,6 +4,14 @@
  *
  *   node scripts/build-rate-card.mjs
  *
+ * Run it from anywhere, by hand, whenever the prices should be refreshed, then
+ * commit the JSON it rewrites. It takes no arguments and needs only network
+ * access and a Node with a global `fetch`. Progress goes to stderr. The file is
+ * written once, at the very end, so a run that fails part way leaves the old
+ * card in place. The reference prices in src/core/pricing/pricing.test.ts were
+ * looked up by hand, so a refresh that moves one of them fails that test until
+ * the expectation is brought up to date.
+ *
  * Source: https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/<service>/current/<region>/index.{json,csv}
  * (public, no account needed; documented at
  * https://docs.aws.amazon.com/awsaccountbilling/latest/aboutv2/using-the-aws-price-list-bulk-api.html)
@@ -21,7 +29,12 @@
  *
  * Reserved rates are standard-class, effective hourly: 1-year "No Upfront";
  * 3-year "No Upfront" where it is sold, otherwise "Partial Upfront" with the
- * upfront fee spread across the term's hours.
+ * upfront fee spread across the term's hours. EC2 is the exception: both of
+ * its terms are read as "No Upfront" only, and only for Linux.
+ *
+ * The lists below decide what is on the card and must be kept in step with
+ * the options offered in src/core/catalog.ts (REGIONS, EC2_FAMILY, RDS_CLASS
+ * and the node type lists): the app can only price what was fetched here.
  */
 import { writeFileSync } from 'node:fs'
 import { createInterface } from 'node:readline'
@@ -31,6 +44,7 @@ const REGIONS = ['us-east-1', 'us-west-2', 'eu-west-1', 'eu-central-1', 'ap-sout
 const EC2_FAMILIES = ['t3', 't4g', 't2', 'm4', 'm5', 'm6i', 'm7g', 'c5', 'c7g', 'r5', 'r7g', 'g5']
 const SIZES = ['nano', 'micro', 'small', 'medium', 'large', 'xlarge', '2xlarge', '4xlarge', '8xlarge']
 const RDS_CLASSES = ['t3', 't4g', 'm5', 'm7g', 'r5', 'r7g']
+// engine ids as the catalog names them, each with the test that picks its products out of the RDS offer file
 const RDS_ENGINES = {
   postgres: (a) => a.databaseEngine === 'PostgreSQL',
   mysql: (a) => a.databaseEngine === 'MySQL',
@@ -45,8 +59,10 @@ const SEARCH_NODES = ['t3.small.search', 'm6g.large.search', 'r6g.large.search',
 
 const BASE = 'https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws'
 const HOURS_PER_YEAR = 8760
+// eight significant figures: enough for the smallest per-request rates, and it drops binary floating-point noise
 const round = (n) => Number(Number(n).toPrecision(8))
 
+/** One service's whole offer file as JSON, for a region, or the global file when no region is given. Throws on any HTTP error. */
 async function offer(service, region) {
   const url = region ? `${BASE}/${service}/current/${region}/index.json` : `${BASE}/${service}/current/index.json`
   const res = await fetch(url)
@@ -79,7 +95,7 @@ function reserved(o, sku) {
 // the prefix is a region code only (USE1-, EU-, APS3-, us-east-1-): anything looser also catches other products,
 // such as S3 Tables or S3 Files, whose usage types merely end the same way
 const ut = (suffix) => new RegExp(`^(?:(?:[A-Z]{2,4}[0-9]?|[a-z]{2}-[a-z]+-[0-9])-)?${suffix}$`)
-/** the first paid tier of a rate that matches */
+/** the first paid tier of a rate that matches: the non-zero price with the lowest starting quantity, so free tiers are passed over. `undefined` when nothing matches. */
 function flat(o, test) {
   let best
   for (const r of onDemand(o)) if (r.usd > 0 && test(r) && (!best || r.begin < best.begin)) best = r
@@ -100,7 +116,7 @@ async function ec2(region) {
       if (line.startsWith('"SKU"')) { const h = cells(line); col = Object.fromEntries(h.map((n, i) => [n, i])) }
       continue
     }
-    // cheap pre-filter before the proper parse
+    // cheap pre-filter before the proper parse. The family list is written out again here and must match EC2_FAMILIES.
     if (!/NatGateway|EBS:VolumeUsage|"(?:t3|t4g|t2|m4|m5|m6i|m7g|c5|c7g|r5|r7g|g5)\.[a-z0-9]+"/.test(line)) continue
     const c = cells(line), g = (n) => c[col[n]]
     const usage = g('usageType'), price = Number(g('PricePerUnit'))
@@ -121,6 +137,7 @@ async function ec2(region) {
       if (g('LeaseContractLength') === '3yr') row[3] = round(price)
     }
   }
+  // a type with no Linux on-demand price in this region is not sold here: leave it off the card
   for (const [t, r] of Object.entries(out)) if (r[0] === undefined) delete out[t]
   return { ec2: out, flat: flatOut, published }
 }
@@ -150,6 +167,7 @@ async function rds(region) {
   return { rds: out, flat: f, published: o.publicationDate }
 }
 
+/** Hourly rows for the listed node types of ElastiCache, Redshift or OpenSearch. `usage` gives the usage type a node type is billed under; the offer is returned too, for the storage rates read from it afterwards. */
 async function nodes(service, region, list, usage, where = () => true) {
   const o = await offer(service, region)
   const out = {}
@@ -162,7 +180,7 @@ async function nodes(service, region, list, usage, where = () => true) {
   return { out, o }
 }
 
-/** [service, key, test] for everything charged at a single rate */
+/** [service, key, test] for everything charged at a single rate. `key` is the name the app asks for it by, in `flat()` in src/core/pricing/index.ts. */
 const FLAT = [
   ['AWSLambda', 'lambda.req', (r) => ut('Request').test(r.a.usagetype)],
   ['AWSLambda', 'lambda.gbs', (r) => ut('Lambda-GB-Second').test(r.a.usagetype)],
@@ -216,6 +234,8 @@ async function region(id) {
   Object.assign(card, { ec2: e.ec2, rds: r.rds, cache: c.out, redshift: w.out, search: s.out })
   Object.assign(card.flat, e.flat, r.flat, { 'search.gp3': flat(s.o, (x) => ut('ES:GP3-Storage').test(x.a.usagetype)), 'redshift.storage': flat(w.o, (x) => /RMS/.test(x.a.usagetype ?? '')) })
   Object.assign(published, { AmazonEC2: e.published, AmazonRDS: r.published, AmazonElastiCache: c.o.publicationDate, AmazonRedshift: w.o.publicationDate, AmazonES: s.o.publicationDate })
+  // a service whose offer file cannot be fetched for this region is skipped, not fatal: its rates are simply absent,
+  // and the app then prices them at the N. Virginia rate as an estimate. (EC2, RDS and the node services above do abort the run.)
   const offers = new Map()
   for (const [service, key, test] of FLAT) {
     if (!offers.has(service)) offers.set(service, await offer(service, id).catch(() => null))
@@ -234,6 +254,7 @@ for (const id of REGIONS) {
   process.stderr.write(`${id} … `)
   const { card, published } = await region(id)
   out.regions[id] = card
+  // one publication date per service is kept, N. Virginia's, as YYYY-MM-DD
   if (id === 'us-east-1') out.published = Object.fromEntries(Object.entries(published).map(([k, v]) => [k, String(v).slice(0, 10)]))
   process.stderr.write(`${Object.keys(card.ec2).length} instance types, ${Object.keys(card.flat).length} rates\n`)
 }

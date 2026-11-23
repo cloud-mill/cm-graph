@@ -8,9 +8,16 @@ import type { CostBasis, CostLine, PricingModel } from './types'
  * Every definition carries a `role`: the id of the canonical component it is
  * equivalent to. Roles are what the advisor, auto-layout and cloud translation
  * reason about, so a Cloud SQL instance is reviewed exactly like an RDS one.
+ *
+ * None of the prices here come from the generated AWS rate card: they are US
+ * list prices typed in below, each marked verified or indicative (see the
+ * note above the factories). `catalog.ts` appends these definitions to its own
+ * and, in `costOf`, marks their lines as estimates outside the US regions.
  */
 
+// hours in a month, the same convention as `HOURS` in ./pricing
 const HOURS = 730
+// these four helpers repeat the ones in `catalog.ts`, which imports this file at load and so cannot lend them
 const opts = (...v: (string | [string, string])[]) =>
   v.map((o) => (typeof o === 'string' ? { value: o, label: o } : { value: o[0], label: o[1] }))
 const num = (key: string, label: string, def: number, unit?: string, extra: Partial<PropDef> = {}): PropDef =>
@@ -31,13 +38,13 @@ type Raw = Omit<CompDef, 'color'> & { color?: string }
 // (cloud.google.com, Iowa) and the Azure Retail Prices API (prices.azure.com, East US).
 // Everything else is an estimate and is labelled as one.
 
-/** a reserved or committed-use discount, by pricing model */
+/** a reserved or committed-use discount, by pricing model, as a fraction off the on-demand price (0.37 is 37% off) */
 type Commit = Partial<Record<PricingModel, number>>
 const off = (c: Commit | undefined, q: Quote) => c?.[q.model] ?? 0
 const commitNote = (c: Commit | undefined, q: Quote, what: string) =>
   q.model === 'ondemand' ? undefined : off(c, q) ? `${what} of ${Math.round(off(c, q) * 100)}% applied.` : 'No commitment price is verified for this, so it stays on-demand.'
 
-/** hourly price: Linux, or [Linux, Windows] where the Windows price is published */
+/** USD per hour by machine type: Linux, or [Linux, Windows] where the Windows price is published */
 type Machines = Record<string, number | [number, number]>
 interface VmOpts { disk: number; diskName: string; diskVerified?: boolean; attr: string; commit?: (machine: string) => Commit | undefined; commitName: string; windows?: string }
 
@@ -50,6 +57,7 @@ const vm = (b: Base, machines: Machines, dflt: string, o: VmOpts): Raw => ({
     num('disk', 'Boot disk', 30, 'GB'),
   ],
   cost: (p, q) => {
+    // a machine type that is not in the table (a hand-edited file) is priced at a placeholder $0.10 an hour and marked as an estimate
     const m = machines[p.machine], linux = Array.isArray(m) ? m[0] : m ?? 0.1, win = Array.isArray(m) ? m[1] : undefined
     const windows = p.os === 'windows'
     const c = windows ? undefined : o.commit?.(p.machine)
@@ -65,6 +73,7 @@ const vm = (b: Base, machines: Machines, dflt: string, o: VmOpts): Raw => ({
   tfAttrs: (p) => [p.count > 1 && `count = ${p.count}`, `${o.attr} = "${p.machine}"`],
 })
 
+/** `reqRate` is USD per million invocations, `gbsRate` USD per GB-second. `meter` is the allowance key prefix: `.req` and `.gbs` are added to it. */
 const fn = (b: Base, reqRate: number, gbsRate: number, o: { meter: string; gbsVerified?: boolean; note?: string }): Raw => ({
   name: 'Function', category: 'compute', model: 'tile', glyph: 'lambda', tier: 3, role: 'lambda', keywords: 'serverless faas', ...b,
   props: [
@@ -83,6 +92,7 @@ const fn = (b: Base, reqRate: number, gbsRate: number, o: { meter: string; gbsVe
   summary: (p) => `${p.memory} MB · ${p.requests}M/mo`,
 })
 
+/** `vcpuH` and `gbH` are USD per vCPU-hour and per GB-hour. Always an estimate: these rates were not checked. */
 const containers = (b: Base, vcpuH: number, gbH: number, unit: string): Raw => ({
   name: 'Container service', category: 'compute', model: 'cluster', glyph: 'container', tier: 3, role: 'ecs', keywords: 'docker serverless containers', ...b,
   props: [
@@ -98,6 +108,7 @@ const containers = (b: Base, vcpuH: number, gbH: number, unit: string): Raw => (
   summary: (p) => `${p.tasks} × ${p.vcpu} vCPU`,
 })
 
+/** `plane` is the finished control-plane line; worker nodes are priced like virtual machines from the same table. */
 const k8s = (b: Base, machines: Machines, dflt: string, o: { plane: CostLine; commit?: (machine: string) => Commit | undefined; commitName: string }): Raw => ({
   name: 'Kubernetes cluster', category: 'compute', model: 'cluster', glyph: 'wheel', tier: 3, role: 'eks', color: '#5B6CF0', keywords: 'k8s kubernetes', ...b,
   props: [
@@ -128,7 +139,9 @@ const sql = (b: Base, tiers: [string, string, number, boolean?][], dflt: string,
   cost: (p, q) => {
     const t = tiers.find((x) => x[0] === p.tier), e = engines.find((x) => x[0] === p.engine)
     const verified = !!t?.[3] && !!e?.[3]
+    // a discount is only taken off a price that was itself verified
     const c = verified ? o.commit : undefined
+    // $0.14 an hour is a placeholder for a tier that is not in the table; it is never `verified`, so it shows as an estimate
     const h = (t?.[2] ?? 0.14) * (e?.[2] ?? 1) * (1 - off(c, q))
     const basis: CostBasis = verified ? 'fixed' : 'estimate'
     const note = [verified ? '' : 'Indicative rate for this tier or engine, not checked against the current price list.', commitNote(c, q, o.commitName)].filter(Boolean).join(' ') || undefined
@@ -144,7 +157,7 @@ const sql = (b: Base, tiers: [string, string, number, boolean?][], dflt: string,
   tfAttrs: (p) => [o.attr.includes('.') ? `${o.attr.split('.')[0]} {\n    ${o.attr.split('.')[1]} = "${p.tier}"\n  }` : `${o.attr} = "${p.tier}"`],
 })
 
-/** classes: [id, label, USD per GB-month, verified] */
+/** classes: [id, label, USD per GB-month, verified]; `reqRate` is USD per million read requests, `egressRate` USD per GB out */
 const obj = (b: Base, classes: [string, string, number, boolean?][], reqRate: number, egressRate: number, o: { reqVerified?: boolean } = {}): Raw => ({
   name: 'Object storage', category: 'storage', model: 'bucket', glyph: 'bucket', tier: 6, role: 's3', keywords: 'bucket blob files', ...b,
   props: [
@@ -169,12 +182,18 @@ const obj = (b: Base, classes: [string, string, number, boolean?][], reqRate: nu
 /** [label, unit, default, USD per unit per month, free-allowance key?, how many base units one unit is?] */
 type Meter = [string, string, number, number, string?, number?]
 interface Extra {
+  // `base` is a flat monthly fee in USD. `commit` is recorded on many rows but `svc` does not read it, so it has no effect on any figure.
   role?: string; tf?: string; tfAlso?: string[]; color?: string; base?: number; commit?: boolean; dlq?: boolean
   /** the rates were checked against the provider's own price list (see the note at the top of this file) */
   verified?: boolean
   note?: string
 }
 
+/**
+ * A component billed on simple meters. Each meter becomes a number setting stored as `m0`, `m1`, ... in
+ * the order given, and a cost line of quantity × rate. Because the keys are positional, `translateDoc`
+ * only carries a value across clouds when the labels match as well.
+ */
 function svc(provider: Provider, type: string, name: string, service: string, category: Category, model: ModelKind, glyph: string, tier: number, keywords: string, meters: Meter[], x: Extra = {}): Raw {
   const props: PropDef[] = meters.map((m, i) => num('m' + i, m[0], m[2], m[1] || undefined))
   if (x.dlq) props.push(tog('dlq', 'Dead-letter queue', false))
@@ -318,7 +337,7 @@ const AZVM: Machines = {
   Standard_B1s: [0.0104, 0.014], Standard_B2s: [0.0416, 0.0496], Standard_B2ms: [0.0832, 0.0912], Standard_D2s_v5: [0.096, 0.188], Standard_D4s_v5: [0.192, 0.376], Standard_D8s_v5: [0.384, 0.752],
   Standard_D2ps_v5: 0.077, Standard_D4ps_v5: 0.154, Standard_E4s_v5: [0.252, 0.436], Standard_F4s_v2: [0.169, 0.354], Standard_NC4as_T4_v3: [0.526, 0.71],
 }
-// reserved instances, effective hourly against pay-as-you-go: 38% and 60% on Dsv5, 41% and 60–62% on Esv5, Dpsv5 and NCasT4 (same API). B- and F-series list none.
+// reserved instances, effective hourly against pay-as-you-go: 38% and 60% on Dsv5, 41% and 60 to 62% on Esv5, Dpsv5 and NCasT4 (same API). B- and F-series list none.
 const AZ_RI = (m: string): Commit | undefined => (/^Standard_D\d+s_v5$/.test(m) ? { commit1: 0.38, commit3: 0.6 } : /^Standard_(E\d+s_v5|D\d+ps_v5|NC)/.test(m) ? { commit1: 0.41, commit3: 0.6 } : undefined)
 const A = (type: string, service: string, tf: string, more: Partial<Base> = {}): Base => ({ provider: 'azure', type: 'az-' + type, svc: service, tf, ...more })
 

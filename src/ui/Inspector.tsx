@@ -12,6 +12,19 @@ import { canReroute, isManual, isShaped, straightness } from '../core/shape'
 import { setPref } from '../core/storage'
 import { fitAreaToContents, straightenLinks, translateTo } from './actions'
 
+/*
+ * The Inspect tab: the properties of whatever is selected, or of the blueprint when nothing is.
+ * It holds no state: everything shown is derived from the store's document and selection on each render.
+ *
+ * Two ways of writing, chosen by how the control is used. Anything typed or stepped goes through
+ * `coalesce(key, ...)`, so a burst of changes to one field is one undo step; the key names the field
+ * and the thing it belongs to. A single choice (a segment, a swatch, a toggle) goes through `apply`
+ * or a `patch` action and is its own undo step.
+ *
+ * With several things selected, a control writes to all of them. Where their values differ it shows the
+ * first one's, or says the selection is mixed.
+ */
+
 /** what each kind of figure rests on, in a sentence */
 export const BASIS = {
   fixed: 'Published rate for capacity that is provisioned all month',
@@ -32,6 +45,7 @@ function PropField({ def, value, onChange }: { def: PropDef; value: any; onChang
   return <Row label={def.label}><NumberInput label={def.label} value={Number(value) || 0} onChange={onChange} min={def.min} max={def.max} step={def.step} unit={def.unit} /></Row>
 }
 
+/** One component, or several: their settings are only offered together when they are all the same type. */
 function NodeInspector({ nodes }: { nodes: NodeT[] }) {
   const s = useStore.getState()
   const doc = useStore((st) => st.doc)
@@ -412,6 +426,7 @@ function DocInspector() {
   )
 }
 
+/** Chooses the inspector for the selection. Anything without one (a mix of kinds, several areas or labels) gets a count and the actions that apply to anything. */
 export function Inspector() {
   const doc = useStore((s) => s.doc)
   const selection = useStore((s) => s.selection)

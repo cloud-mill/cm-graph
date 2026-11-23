@@ -1,3 +1,8 @@
+/**
+ * The camera and the view settings on a desktop: 3D and plan views, turning, orbiting, zooming, fitting, the
+ * minimap, and the toggles that change what the canvas shows. A failure means the view no longer goes where it
+ * is sent, or that looking around has started to change the blueprint (it must stay "Saved" throughout).
+ */
 import { TRIO, expect, test } from './fixtures'
 
 test.describe('camera and view', () => {

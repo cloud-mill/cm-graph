@@ -7,11 +7,21 @@ import { useSyncExternalStore } from 'react'
  * sideways. It switches the editor to its one-handed layout. Touch gestures on
  * the canvas are separate and follow the pointer that is actually used, so a
  * tablet or a touch laptop gets them too.
+ *
+ * So there are three separate tests, and they must not be confused:
+ * - phone layout: this media query, read through `isPhone` / `usePhone`, and
+ *   mirrored on <html> as `data-phone` for CSS;
+ * - finger-sized controls: `@media (pointer: coarse)` in styles.css only;
+ * - touch behaviour: `pointerType === 'touch'` on each pointer event, where it is handled.
+ *
+ * The 760px width is also known to styles.css, `narrow()` in Editor.tsx and
+ * `insets()` in canvas/camera.ts: change them together.
  */
 const PHONE = '(max-width: 760px), (max-height: 520px) and (pointer: coarse)'
 
 const mq = () => (typeof matchMedia === 'undefined' ? null : matchMedia(PHONE))
 
+/** Is the window phone-sized right now? A one-off reading: use it in event handlers, and `usePhone` for anything drawn. False where there is no `matchMedia`. */
 export const isPhone = () => !!mq()?.matches
 
 const subscribe = (cb: () => void) => {
@@ -20,6 +30,7 @@ const subscribe = (cb: () => void) => {
   return () => m?.removeEventListener?.('change', cb)
 }
 
+/** `isPhone`, kept current: the component re-renders when the window crosses into or out of phone size (a resize, a rotation). */
 export const usePhone = () => useSyncExternalStore(subscribe, isPhone, () => false)
 
 /** A short tick under the finger where the device can give one. Never throws, never required. */
@@ -33,6 +44,10 @@ export function haptic(ms = 8) {
  * Phones cover part of the page with the on-screen keyboard without telling the
  * layout; `--kb` is how much is covered, so sheets can sit on top of the
  * keyboard instead of under it. Also marks the document as a phone for CSS.
+ *
+ * Sets on `root`: `--kb` (CSS px covered by the keyboard, 0 when it is away),
+ * `data-kb` (present while it is up) and `data-phone`. Called once at start-up;
+ * returns the function that stops it.
  */
 export function watchViewport(root: HTMLElement = document.documentElement) {
   const vv = window.visualViewport
@@ -66,10 +81,15 @@ export function watchViewport(root: HTMLElement = document.documentElement) {
  * flicked. Here the view coasts under our own control, so that rule only loses
  * taps. If a finger goes down and up on the same control and no click arrives,
  * the click is delivered for it; if the browser's own click turns up late, it is dropped.
+ *
+ * Listens in the capture phase on the document, so it sees every tap before any
+ * component can stop it. Called once at start-up; returns the function that stops it.
  */
 export function sureTaps(doc: Document = document) {
   const CONTROL = 'button, a[href], [role="button"]'
   const at = (e: Event) => (e.target instanceof Element ? e.target.closest(CONTROL) : null)
+  // `down`: the control a finger is on. `wait`: our click, held back 90ms to let the browser's own arrive first.
+  // `made`: the click we delivered, so the browser's late one can be recognised. `ours`: true while ours is being dispatched
   let down: { el: Element; x: number; y: number; t: number } | null = null
   let wait: ReturnType<typeof setTimeout> | undefined
   let made: { el: Element; t: number } | null = null
@@ -90,6 +110,7 @@ export function sureTaps(doc: Document = document) {
   const onCancel = () => { down = null }
   const onClick = (e: MouseEvent) => {
     if (ours) return
+    // the browser did click after all: ours is not needed
     clearTimeout(wait)
     // the browser's click, arriving after ours already did the job
     if (made && at(e) === made.el && performance.now() - made.t < 600) { e.stopPropagation(); e.preventDefault() }

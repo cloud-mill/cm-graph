@@ -1,6 +1,13 @@
 import { type Proj, f, pt } from './iso'
 import { type NodeT, centerOf } from './types'
 
+/**
+ * Drawing a route: from the ground points `core/router` decides on to SVG path data, arrowheads and caption
+ * positions. Nothing here chooses where a line goes. Inputs are in cells on the ground; path strings are in
+ * scene pixels, through the projection they are given.
+ */
+
+/** A point on the ground, in cells. */
 export type W = [number, number]
 
 const len = (a: W, b: W) => Math.hypot(b[0] - a[0], b[1] - a[1])
@@ -9,7 +16,11 @@ const toward = (a: W, b: W, dist: number): W => {
   return [a[0] + ((b[0] - a[0]) / l) * dist, a[1] + ((b[1] - a[1]) / l) * dist]
 }
 
-/** Orthogonal ground-plane route between two node centres (world coords). */
+/**
+ * Orthogonal ground-plane route between two node centres (world coords).
+ * It knows nothing of sides, ports or obstacles. Nothing in the app calls it, only tests: connections are
+ * routed by `core/router`.
+ */
 export function route(a: Pick<NodeT, 'x' | 'y' | 'scale'>, b: Pick<NodeT, 'x' | 'y' | 'scale'>): W[] {
   const A: W = centerOf(a)
   const B: W = centerOf(b)
@@ -36,7 +47,10 @@ export function route(a: Pick<NodeT, 'x' | 'y' | 'scale'>, b: Pick<NodeT, 'x' | 
   return pts
 }
 
-/** SVG path for a world polyline with rounded corners, projected. */
+/**
+ * SVG path for a world polyline with rounded corners, projected. The trims shorten each end along its own run, and
+ * they and `radius` are in cells. A corner is rounded by no more than half the shorter run that meets there.
+ */
 export function pathOf(p: Proj, pts: W[], trimStart = 0, trimEnd = 0, radius = 0.32): string {
   const w = pts.map((q) => [...q] as W)
   const n = w.length
@@ -77,7 +91,7 @@ export function captionAnchor(r: { pts: W[]; shape: 'ortho' | 'direct' | 'curved
   return { at: [(a[0] + 3 * b[0] + 3 * c[0] + d[0]) / 8, (a[1] + 3 * b[1] + 3 * c[1] + d[1]) / 8], dir: Math.abs(d[0] - a[0]) >= Math.abs(d[1] - a[1]) ? 'x' : 'y' }
 }
 
-/** Arrowhead triangle lying on the ground at `tip`, pointing away from `from`. */
+/** Arrowhead triangle lying on the ground at `tip`, pointing away from `from`. World points, `size` (its length) in cells. */
 export function arrowAt(tip: W, from: W, size = 0.4): W[] {
   const l = len(from, tip) || 1
   const u: W = [(tip[0] - from[0]) / l, (tip[1] - from[1]) / l]

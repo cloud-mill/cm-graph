@@ -169,7 +169,7 @@ test.describe('what is on screen when the pointer is let go is what stays', () =
 test.describe('nothing that happens afterwards changes it', () => {
   test('zoom, pan, turn, select, deselect, an unrelated edit, reload, undo and redo: the geometry in the blueprint is the same after every one', async ({ page, app }) => {
     await open(page, app)
-    // put things in deliberately awkward places first: a component off the grid, a line shaped by hand, a group and a label moved
+    // put things in deliberately awkward places first: two components carried off the grid (the diagram already has a line shaped by hand)
     await carry(page, await middle(page, 'a'), 37, 23); await release(page)
     await carry(page, await middle(page, 'd'), -11, 46); await release(page)
     const made = await geometry(app), drawn = await scene(page)
@@ -187,7 +187,7 @@ test.describe('nothing that happens afterwards changes it', () => {
     await same('after the isometric view and back')
     const m = await middle(page, 'b'); await page.mouse.click(m.x, m.y); await page.keyboard.press('Escape')
     await same('after selecting and deselecting')
-    // unrelated edits: a rename, and a new component dropped right in the middle of the diagram
+    // an unrelated edit: a rename
     await page.mouse.click(m.x, m.y)
     await page.locator('.title-input input, input.title-input').first().fill('renamed'); await page.keyboard.press('Enter'); await page.keyboard.press('Escape')
     await same('after renaming another component')

@@ -19,18 +19,25 @@ import { type Doc, type EdgeT, type NodeT, type Side, footOf } from './types'
  *  - A line can also be drawn direct (one straight line, at any angle) or curved.
  *
  * Everything here is pure and deterministic: the same diagram always gives the
- * same lines, so nothing jumps about between redraws.
+ * same lines, so nothing jumps about between redraws. (`findPath` remembers
+ * answers it has given, but only ever to give the same answer again.)
+ *
+ * This module decides where lines go, in cells on the ground. Turning a route
+ * into an SVG path is `core/linePath`; reshaping one by hand is `core/shape`.
  */
 
+/** A point on the ground, in cells. */
 export type W = [number, number]
 
+/** One connection as it is to be drawn. */
 export interface Routed {
+  /** ground points in cells, from the port on the first component to the port on the second */
   pts: W[]
   /** for each run pts[i] → pts[i+1]: which stretch between waypoints it belongs to (0 = before the first waypoint) */
   leg: number[]
   fromSide: Side
   toSide: Side
-  /** following a shape the user gave it, not one the router chose */
+  /** following a shape the user gave it (a track, or an older file's points), not one the router chose. False when a track could not be followed and the router stood in */
   manual: boolean
   /** right-angled runs through `pts`; one straight line between two points; or a curve whose `pts` are its start, two control points and end */
   shape: 'ortho' | 'direct' | 'curved'
@@ -40,18 +47,24 @@ interface Rect { x0: number; y0: number; x1: number; y1: number }
 type Box = Pick<NodeT, 'x' | 'y' | 'scale'>
 
 const DIR: Record<Side, W> = { n: [0, -1], s: [0, 1], e: [1, 0], w: [-1, 0] }
-/** how far a line runs straight out of a port before it may turn */
+/** how far a line runs straight out of a port before it may turn, in cells */
 export const STUB = 0.5
-/** the room a route keeps from components it passes */
+/** the room a route keeps from components it passes, in cells */
 const CLEAR = 0.3
+/** what one turn costs an automatic route, in cells of extra length: it goes about this much further to save one */
 const BEND = 1.6
 
 const rectOf = (n: Box): Rect => { const s = footOf(n); return { x0: n.x, y0: n.y, x1: n.x + s, y1: n.y + s } }
 const mid = (r: Rect): W => [(r.x0 + r.x1) / 2, (r.y0 + r.y1) / 2]
 const horizontal = (s: Side) => s === 'e' || s === 'w'
+// every coordinate a route is made of is kept to a thousandth of a cell, so two that should be equal compare equal
 const r3 = (v: number) => Math.round(v * 1000) / 1000
 
-/** The side of `r` that faces the point `t`. Neighbours side by side use left/right, stacked ones use top/bottom. */
+/**
+ * The side of `r` that faces the point `t`. When the other component's rectangle is given, neighbours side by side
+ * use left/right and stacked ones use top/bottom, however far off-centre they are; otherwise it is the side towards
+ * `t` along whichever axis `t` is further from the middle of `r`.
+ */
 export function facing(r: Rect, t: W, other?: Rect): Side {
   const [cx, cy] = mid(r), dx = t[0] - cx, dy = t[1] - cy
   if (other) {
@@ -95,8 +108,14 @@ let cache = new Map<string, W[]>(), aged = new Map<string, W[]>()
  * Shortest right-angled path from `s` (heading `sd`) to `t` (arriving along `td`)
  * that keeps clear of `blocks`. `lane` shifts the preferred middle channel so
  * parallel lines between the same two components do not lie on top of each other.
+ *
+ * `sd` and `td` are unit steps along an axis, `td` being the way the line is
+ * travelling as it arrives. The result starts at `s` and ends at `t`. The search
+ * is A* over a sparse grid: the lines through the two ends, the middle channel,
+ * and one line `STUB` outside each side of every nearby component.
  */
 export function findPath(s: W, sd: W, t: W, td: W, blocks: Rect[], lane = 0): W[] {
+  // only components that reach within three cells of the box round the two ends are looked at: it keeps the search and the cache key small
   const lo: W = [Math.min(s[0], t[0]) - 3, Math.min(s[1], t[1]) - 3], hi: W = [Math.max(s[0], t[0]) + 3, Math.max(s[1], t[1]) + 3]
   const near = blocks.filter((b) => b.x1 > lo[0] && b.x0 < hi[0] && b.y1 > lo[1] && b.y0 < hi[1])
   // the same arrangement anywhere on the ground has the same route, so it is remembered relative to where it starts:
@@ -193,15 +212,22 @@ export function findPath(s: W, sd: W, t: W, td: W, blocks: Rect[], lane = 0): W[
 
 // ---- whole diagram ---------------------------------------------------------------------
 
+/**
+ * One end of a connection while the diagram is being routed.
+ *  - `toward`: where the line is heading, as a coordinate along the side. Ends sharing a side are ordered by it.
+ *  - `port`: where the line touches the side. `out`: the point `STUB` straight out from there, where path finding starts.
+ *  - `at`: set when the end already has a place (the user put it there, or its plan stands), in cells from the middle of the side.
+ *  - `lane`: this end's turn among those sharing the side, centred on 0. `mates`: how many share it. `list`: all of them, in order.
+ */
 interface End { edge: string; node: string; side: Side; toward: number; port: W; out: W; lane: number; at?: number; mates: number; list: End[] }
 
-/** how close to a corner of its component a line may leave a side */
+/** how close to a corner of its component a line may leave a side, in cells */
 export const EDGE = 0.15
-/** the least a shaped line runs out of a side before it turns */
+/** the least a shaped line runs out of a side before it turns, in cells */
 export const MIN_OUT = 0.3
 /** how far from the middle of a side, as a share of the side, the router slides a port of its own accord to save a line two turns */
 const SLIDE = 0.3
-/** the room two ports on one side keep between them */
+/** the room two ports on one side keep between them when one is slid, in cells */
 const APART = 0.2
 
 const centreOn = (r: Rect, s: Side) => (horizontal(s) ? (r.y0 + r.y1) / 2 : (r.x0 + r.x1) / 2)
@@ -255,7 +281,12 @@ function tracked(a: End, b: End, ra: Rect, rb: Rect, runs: number[]): W[] | null
   return pts
 }
 
-/** What a plan was made for. While this still describes the connection and its two components, the plan stands. */
+/**
+ * What a plan was made for. While this still describes the connection and its two components, the plan stands.
+ * It covers which two components the line joins, where each stands and how big it is, and anything the user pinned
+ * (a side, or a place along one). It leaves out everything else on purpose: other components, other connections and
+ * the line's own look do not make a plan stale, so a path is not re-planned because of something that happened elsewhere.
+ */
 export function planKey(e: EdgeT, a: Box, b: Box): string {
   return [e.from, a.x, a.y, footOf(a), e.to, b.x, b.y, footOf(b), e.fromSide ?? '', e.toSide ?? '', e.fromAt ?? '', e.toAt ?? ''].join(',')
 }
@@ -267,6 +298,9 @@ export const routerOwns = (e: EdgeT) => !e.shape && !e.runs && !e.via?.length
  * not touched, so a path once planned stays as it is until one of its own two components moves or changes size.
  * This is what makes automatic routing something that happens once, when it is called for, and not a process that
  * keeps running behind the user's back.
+ *
+ * Returns the same `doc` when no plan is missing or stale, and the same connection objects for lines it leaves alone.
+ * Lines planned in the same pass are routed together, and an end whose plan stands keeps its place on its side.
  */
 export function withPlans(doc: Doc): Doc {
   const byId = new Map(doc.nodes.map((n) => [n.id, n]))
@@ -282,7 +316,14 @@ export function withPlans(doc: Doc): Doc {
   }
 }
 
-/** Routes for every connection in the diagram, keyed by connection id. */
+/**
+ * Routes for every connection in the diagram, keyed by connection id. A connection with a missing end, or from a
+ * component to itself, has no route.
+ *
+ * This is what draws, and it reads plans without writing them: a line whose plan still stands is drawn exactly as
+ * planned, and one whose plan is stale or missing is routed here and now. That is how a line follows a component
+ * while it is being dragged, before `withPlans` stores the new path on release.
+ */
 export function routeAll(nodes: NodeT[], edges: EdgeT[]): Map<string, Routed> {
   const byId = new Map(nodes.map((n) => [n.id, n]))
   const rects = new Map(nodes.map((n) => [n.id, rectOf(n)]))
@@ -380,6 +421,8 @@ export function routeAll(nodes: NodeT[], edges: EdgeT[]): Map<string, Routed> {
   const lane = new Map<string, number>()
   for (const ids of pairs.values()) ids.forEach((id, i) => lane.set(id, i - (ids.length - 1) / 2))
 
+  // 5. the path of each line, by the first of these that applies: direct, a plan that stands, curved, straight (step 3),
+  //    its own track, a path found now, or an older file's points. A track that can no longer be followed falls through to a found path
   const out = new Map<string, Routed>()
   for (const e of live) {
     const ra = rects.get(e.from)!, rb = rects.get(e.to)!
@@ -447,6 +490,7 @@ export function routeAll(nodes: NodeT[], edges: EdgeT[]): Map<string, Routed> {
  * A line with nothing standing on it is preferred; when there is none, the one nearest the middle is given
  * with `clear` false, because whether to pass under something is for whoever asked to decide.
  * `apart` means the two do not overlap on either axis, so no such run exists.
+ * `fromAt` and `toAt` are in cells from the middle of each side, ready to be stored on the connection.
  */
 export function straightBetween(a: NodeT, b: NodeT, nodes: NodeT[]): { fromSide: Side; toSide: Side; fromAt: number; toAt: number; clear: boolean } | 'apart' {
   const ra = rectOf(a), rb = rectOf(b), [ax, ay] = mid(ra), [bx, by] = mid(rb)
@@ -483,7 +527,8 @@ export function routePair(a: NodeT, b: NodeT, nodes: NodeT[], pin: Partial<Pick<
 /**
  * A preview route from a component to a loose point on the ground: what a
  * connection being drawn looks like before it has found its other end. It
- * leaves by the side facing the point and bends round whatever is in the way.
+ * leaves by the side facing the point (or `side`, when given) and makes one elbow.
+ * It does not avoid anything: `nodes` is accepted and ignored.
  */
 export function routeToPoint(a: NodeT, p: W, nodes: NodeT[], side?: Side): W[] {
   const r = rectOf(a), s = side ?? facing(r, p)
@@ -502,7 +547,7 @@ export function nearestSide(n: Box, p: W): Side {
   return Math.abs(dx) >= Math.abs(dy) ? (dx >= 0 ? 'e' : 'w') : dy >= 0 ? 's' : 'n'
 }
 
-/** Total length of a route, and the point a fraction `t` of the way along it. */
+/** The point a fraction `t` (0 to 1) of the way along a right-angled route, with the axis and index of the run it falls on. */
 export function along(pts: W[], t: number): { at: W; dir: 'x' | 'y'; run: number } {
   const lens = pts.slice(1).map((p, i) => Math.abs(p[0] - pts[i][0]) + Math.abs(p[1] - pts[i][1]))
   let want = lens.reduce((a, b) => a + b, 0) * t

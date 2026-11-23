@@ -2,7 +2,18 @@ import { ISO_PITCH, ISO_YAW, MAX_PITCH, MIN_PITCH, type Proj, easeInOut, makeCam
 import { type View, useStore } from '../core/store'
 import { sceneBounds } from './Scene'
 
-/** Canvas viewport size in CSS px, kept current by <Canvas/>. */
+/**
+ * The camera: where the view is (`view`: pan in px and zoom), which way it looks (`yaw`, `pitch`, in degrees), and every
+ * animation that moves either. All of it lives in the store; this module only writes it, a frame at a time.
+ *
+ * Positions taken and returned here are px from the canvas's top-left corner unless they are ground cells. A ground point
+ * `g` is drawn at `pt(proj, g) * view.k + view`, so keeping a point still under a finger or the cursor while the zoom or the
+ * angle changes means solving that for the pan: `setCam`, `zoomBy` and `smoothZoom` all do exactly this.
+ *
+ * The animations (glide, view, orbit, eased zoom) each hold one frame request in a module variable. There is one canvas, so
+ * one of each is enough. Starting one cancels some of the others; `holdStill` stops them all.
+ */
+/** Canvas viewport size in CSS px and its corner in client px, kept current by <Canvas/>. Until it has been measured it holds a stand-in, 1200 by 800. */
 export const cam = { w: 1200, h: 800, left: 0, top: 0 }
 
 /** Live cursor read-out; the canvas writes straight to this element to avoid re-rendering on every move. */
@@ -11,7 +22,7 @@ export const hud: { el: HTMLElement | null } = { el: null }
 /** Canvas covered by a phone sheet, kept current by <Sheet/>: from the bottom edge upright, from the right edge sideways. */
 export const chrome = { bottom: 0, right: 0 }
 
-/** Space taken by the floating panels on each side of the canvas. */
+/** Space taken by the floating panels on each side of the canvas, in px. Fits, centring and edge-following all keep to what is left. */
 export function insets() {
   const s = useStore.getState()
   const narrow = cam.w < 760 || cam.h < 520
@@ -25,6 +36,7 @@ export function center(): [number, number] {
   return [i.l + (cam.w - i.l - i.r) / 2, i.t + (cam.h - i.t - i.b) / 2]
 }
 
+/** The projection for the camera angle in the store right now, for code that runs outside a render and so has no `proj` of its own. */
 export const projNow = (): Proj => {
   const s = useStore.getState()
   return makeCam(s.yaw, s.pitch)
@@ -79,6 +91,7 @@ let raf = 0
 let heading: View | null = null
 /** Where a view animation in flight will end, or null when the view is at rest (or under a finger). */
 export const headedTo = () => heading
+/** Ease the view (pan and zoom) to `to`. Takes over from a view animation, a glide or a turn already in flight. */
 export function animateView(to: View, ms = 420) {
   cancelAnimationFrame(raf)
   heading = to
@@ -98,7 +111,10 @@ export function animateView(to: View, ms = 420) {
   raf = requestAnimationFrame(step)
 }
 
-/** Frame the whole diagram, or just the given nodes, from the current camera angle. */
+/**
+ * Frame the whole diagram, or just the given nodes, from the current camera angle, in the part of the canvas the panels
+ * leave clear. `maxK` is the most it will zoom in to do so, so a small diagram is not blown up to fill the screen.
+ */
 export function fitView(ids?: string[], animate = true, maxK = 1.25) {
   // a fit requested mid-turn waits for the camera to settle, so the turn is never cut short
   if (orbitActive && animate) { pendingFit = [ids, maxK]; return }
@@ -114,6 +130,10 @@ export function fitView(ids?: string[], animate = true, maxK = 1.25) {
   else useStore.setState({ view: to })
 }
 
+/**
+ * The view zoomed by `factor` about canvas position (cx, cy), which keeps what is under that position where it is.
+ * Only works it out: the caller sets it, or animates to it. The zoom stays within 0.15 to 4.
+ */
 export function zoomBy(factor: number, cx = center()[0], cy = center()[1]) {
   const { view } = useStore.getState()
   const k = Math.max(0.15, Math.min(4, view.k * factor))
@@ -158,6 +178,7 @@ export function beginOrbit(sx = center()[0], sy = center()[1]) {
 }
 
 let orbitRaf = 0
+// an animated turn is in flight, and the fit that asked to run once it has landed (`fitView` puts it here)
 let orbitActive = false
 let pendingFit: [string[] | undefined, number] | null = null
 /** Animate to a camera angle along the shortest turn, pivoting on the viewport centre. */
@@ -192,7 +213,9 @@ export function turn(deg: number) {
   orbitTo(target, s.pitch, 420)
 }
 
+/** Back to the home isometric angle. */
 export const viewHome = () => orbitTo(ISO_YAW, ISO_PITCH)
+/** Straight down, squared up to the nearest quarter turn. */
 export const viewTop = () => orbitTo(Math.round(useStore.getState().yaw / 90) * 90, 90)
 /** Plan view (true) or the home isometric view (false). */
 export const setFlat = (flat: boolean) => (flat ? orbitTo(0, 90) : viewHome())
@@ -235,6 +258,7 @@ export function inSight() {
 
 // ---- eased wheel zoom ---------------------------------------------------------
 let zoomRaf = 0
+// the zoom the notches so far add up to: each new one builds on this, not on wherever the easing has got to
 let zoomTarget = 0
 let zoomAt: [number, number] = [0, 0]
 /** Wheel notches glide to their target instead of jumping; the point under the cursor stays put. */

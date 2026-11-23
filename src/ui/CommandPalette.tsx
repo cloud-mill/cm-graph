@@ -21,11 +21,20 @@ interface Cmd {
   run: () => void
 }
 
+/**
+ * Search over everything that can be done: actions, components to add, and components already on
+ * the canvas to jump to. On a phone it is also the menu for whatever has no room on screen.
+ *
+ * Focus stays in the search field throughout: the arrows move a highlight through the list, and Enter
+ * runs the highlighted row. The query and the highlight are local; they go when it closes.
+ */
 export function CommandPalette({ onClose }: { onClose: () => void }) {
   useBackLayer(true, onClose)
   const [q, setQ] = useState('')
   const [idx, setIdx] = useState(0)
   const list = useRef<HTMLDivElement>(null)
+  // built once, from the store as it is when the palette opens (so "Hide grid" or "Show grid" is right).
+  // It cannot go stale: running anything closes the palette
   const all = useMemo<Cmd[]>(() => {
     const st = useStore.getState()
     const actions: Cmd[] = [
@@ -67,12 +76,15 @@ export function CommandPalette({ onClose }: { onClose: () => void }) {
 
   const results = useMemo(() => {
     const t = q.trim().toLowerCase()
+    // nothing typed: a short menu of the first actions and components, not the whole list
     if (!t) return all.filter((c) => c.group === 'Actions').slice(0, 9).concat(all.filter((c) => c.group === 'Add component').slice(0, 5))
     const words = t.split(/\s+/)
     return all
       .map((c) => {
         const hay = (c.label + ' ' + (c.hint ?? '')).toLowerCase()
         if (!words.every((w) => hay.includes(w))) return null
+        // every word must be somewhere in the label or the hint. The name starting with the query ranks first, then
+        // containing it, then any other match; what is already on the canvas goes just ahead of others of its rank
         const score = (c.label.toLowerCase().startsWith(t) ? 0 : c.label.toLowerCase().includes(t) ? 1 : 2) + (c.group === 'Jump to' ? -0.5 : 0)
         return { c, score }
       })
@@ -85,6 +97,7 @@ export function CommandPalette({ onClose }: { onClose: () => void }) {
   useEffect(() => setIdx(0), [q])
   useEffect(() => { list.current?.querySelector('.on')?.scrollIntoView({ block: 'nearest' }) }, [idx])
 
+  // close first: several commands open a dialog, and closing afterwards would close that one instead
   const run = (c?: Cmd) => { if (!c) return; onClose(); c.run() }
   let lastGroup = ''
   return (

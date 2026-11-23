@@ -1,3 +1,12 @@
+/**
+ * Everyday editing with a mouse and keyboard: selecting, moving, copying, deleting, connecting, areas, labels,
+ * resizing, the context menu and the library. A failure means a basic editing action, its saved result or its
+ * undo step has changed.
+ *
+ * Where a position is asserted as whole cells, it is because the drag started on a whole cell and went a whole
+ * number of cells, not because anything snaps: snapping is off by default and a drop is kept as put, to a
+ * thousandth of a cell.
+ */
 import { TRIO, expect, test } from './fixtures'
 
 test.describe('canvas editing', () => {

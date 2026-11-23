@@ -1,3 +1,9 @@
+/**
+ * Accessibility on the desktop layout: axe's automated WCAG 2.1 A and AA rules on the dashboard, the editor, its
+ * panels and its dialogs, in both themes, and by hand the things axe cannot judge (every control has a name, focus
+ * can be seen, status messages are announced, reduced motion is respected).
+ * A failure means someone using a keyboard or a screen reader has lost something, though the page may look right.
+ */
 import AxeBuilder from '@axe-core/playwright'
 import { TRIO, expect, test } from './fixtures'
 

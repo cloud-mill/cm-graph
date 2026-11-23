@@ -1,9 +1,20 @@
 import { type Doc, MAX_SCALE, MIN_SCALE } from './types'
 import { uid } from './types'
 
+/**
+ * Persistence: blueprints, their named versions and preferences in `localStorage`, and share links.
+ * There is no server. Keys, all under the prefix below: `index` (the list the dashboard shows), `doc:<id>`,
+ * `snaps:<id>` and `pref:<name>`.
+ *
+ * Storage can be full, blocked or hand-edited, so reading and writing it never throws: a read that fails gives the
+ * fallback, and a write says whether it worked. A blueprint read from storage, a file or a link is passed through
+ * `coerceDoc` before the editor sees it; named versions are not.
+ */
+
 // the storage prefix predates the CloudMill Graph name; it stays so existing saved blueprints keep loading
 const K = 'stratum:'
 
+/** A blueprint's entry in the index: enough to list it without reading the blueprint itself. `nodes` is a count. */
 export interface DocMeta {
   id: string
   name: string
@@ -11,6 +22,7 @@ export interface DocMeta {
   nodes: number
 }
 
+/** A named version of a blueprint: a whole copy of it as it was at time `at` (ms since the epoch). */
 export interface Snapshot {
   id: string
   name: string
@@ -45,6 +57,8 @@ export const listDocs = (): DocMeta[] => readIndex().sort((a, b) => b.updatedAt 
 /**
  * A stored blueprint, repaired on the way in: storage can hold files written by
  * older versions or edited by hand, and the editor must never open a broken one.
+ * Null when there is nothing stored under that id, or what is there is not a blueprint.
+ * The id is the storage key, whatever the file itself says.
  */
 export function loadDoc(id: string): Doc | null {
   const raw = read<any>('doc:' + id, null)
@@ -54,6 +68,7 @@ export function loadDoc(id: string): Doc | null {
   return { ...doc, id, name: typeof raw.name === 'string' ? raw.name : 'Untitled blueprint', createdAt: t(raw.createdAt), updatedAt: t(raw.updatedAt) }
 }
 
+/** Store a blueprint and bring its index entry up to date. False when the blueprint itself could not be written. */
 export function saveDoc(doc: Doc) {
   const ok = write('doc:' + doc.id, doc)
   // a blueprint that could not be stored keeps its last good entry rather than gaining one that points at nothing
@@ -80,6 +95,7 @@ export function duplicateDoc(id: string): Doc | null {
   return copy
 }
 
+/** A blueprint's named versions, newest first. Only the 20 newest are kept. They are checked far more lightly than a blueprint is on load. */
 export const listSnapshots = (docId: string): Snapshot[] => {
   const v = read<unknown>('snaps:' + docId, [])
   return Array.isArray(v) ? v.filter((s) => s && s.doc && Array.isArray(s.doc.nodes)) : []
@@ -96,7 +112,17 @@ export function removeSnapshot(docId: string, id: string) {
 export const getPref = <T,>(key: string, fallback: T) => read<T>('pref:' + key, fallback)
 export const setPref = (key: string, v: unknown) => write('pref:' + key, v)
 
-/** Validate and normalise untrusted JSON into a Doc (imports, share links). */
+/**
+ * Validate and normalise untrusted JSON into a Doc (imports, share links, and whatever is in storage).
+ * Null only when it is not a blueprint at all (no `nodes` list). Otherwise it repairs and never refuses, because
+ * the rest of the app assumes what this guarantees:
+ *  - every field has the right type, with a default where it was missing or wrong;
+ *  - ids are unique across components, connections, areas and labels;
+ *  - every connection joins two different components that exist;
+ *  - component sizes, line widths, label sizes and the lengths of stored paths are within bounds.
+ * It does not check a component's `type` against the catalog, look inside `props`, or limit how many items there are.
+ * The result always has a new id and new timestamps: a caller that knows better (`loadDoc`) puts the real ones back.
+ */
 export function coerceDoc(raw: any): Doc | null {
   if (!raw || typeof raw !== 'object' || !Array.isArray(raw.nodes)) return null
   const s = (v: any, d = '') => (typeof v === 'string' ? v : d)
@@ -158,11 +184,14 @@ export function coerceDoc(raw: any): Doc | null {
 
 // ---- share links: deflate + base64url in the URL fragment -------------------
 
+// The whole blueprint travels in the link itself, so sharing needs no server and the payload is only as private as the link.
+
 async function pipe(data: Uint8Array, stream: TransformStream<any, any>) {
   const out = new Response(new Blob([data as BlobPart]).stream().pipeThrough(stream))
   return new Uint8Array(await out.arrayBuffer())
 }
 
+/** The payload of a share link. The blueprint's id and timestamps are left out: whoever opens the link gets a copy of their own. */
 export async function encodeShare(doc: Doc): Promise<string> {
   const { id, createdAt, updatedAt, ...rest } = doc
   const bytes = await pipe(new TextEncoder().encode(JSON.stringify(rest)), new CompressionStream('deflate-raw'))
@@ -171,6 +200,7 @@ export async function encodeShare(doc: Doc): Promise<string> {
   return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
 }
 
+/** The blueprint in a share link's payload, validated; null when the payload is damaged or is not a blueprint. */
 export async function decodeShare(payload: string): Promise<Doc | null> {
   try {
     const bin = atob(payload.replace(/-/g, '+').replace(/_/g, '/'))

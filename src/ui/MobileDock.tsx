@@ -9,6 +9,7 @@ import { straightness } from '../core/shape'
 import { fitAreaToContents, straightenLinks, wrapSelectionInArea } from './actions'
 import { haptic } from './device'
 
+/** One button of the dock: an icon over its name, with a tick under the finger when pressed. */
 function Slot({ label, onClick, children, on, danger, primary }: { label: string; onClick: () => void; children: React.ReactNode; on?: boolean; danger?: boolean; primary?: boolean }) {
   return (
     <button className={'dock-btn' + (on ? ' on' : '') + (danger ? ' danger' : '') + (primary ? ' primary' : '')} aria-label={label} aria-pressed={on} onClick={() => { haptic(4); onClick() }}>
@@ -28,6 +29,9 @@ const HINTS: Record<string, string> = {
  * The phone's control strip, in the thumb's reach. It is one bar with three
  * faces: tools when nothing is selected, a prompt while a tool is in use, and
  * the actions for whatever is selected. Nothing else on the screen needs both hands.
+ *
+ * It keeps no state: which face shows follows the store's tool and selection, and
+ * opening the library or the inspector closes the other, since both are sheets.
  */
 export function MobileDock() {
   const doc = useStore((s) => s.doc)

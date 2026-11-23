@@ -1,5 +1,12 @@
 import { type NodeT, centerOf } from './types'
 
+/**
+ * What to mark on the canvas while components are being moved: where they have come level with others, and
+ * where they are evenly spaced. These only report what is already true of the positions they are given. They
+ * move nothing, so they are the same whether snapping is on or off. All values are in cells on the ground.
+ */
+
+/** One alignment line: at `at` on `axis`, running from `from` to `to` along the other axis. */
 export interface Guide {
   /** `x` guides run along the y axis at a fixed x, and the other way round */
   axis: 'x' | 'y'
@@ -8,17 +15,14 @@ export interface Guide {
   to: number
 }
 
-/**
- * Alignment guides for components being moved: one line for every row or
- * column of the grid on which a moving component's centre lines up with a
- * resting one. Each line spans everything on it, so it reads as "these are in line".
- */
+/** One gap between two neighbours along `axis`, from `from` to `to`. */
 export interface Gap { axis: 'x' | 'y'; /** where the gap sits across the axis */ at: number; from: number; to: number }
 
 /**
  * Equal-spacing marks. When what is being moved sits exactly as far from its
  * neighbour on one side as on the other, or continues the rhythm its
  * neighbours already keep, the matching gaps are returned so they can be marked.
+ * Everything moving is treated as one block, and gaps are measured between footprints, not centres.
  */
 export function spacingGaps(nodes: NodeT[], moving: Set<string>): Gap[] {
   const mv = nodes.filter((n) => moving.has(n.id)), still = nodes.filter((n) => !moving.has(n.id))
@@ -43,6 +47,12 @@ export function spacingGaps(nodes: NodeT[], moving: Set<string>): Gap[] {
   return out
 }
 
+/**
+ * Alignment guides for components being moved: one line for every row or
+ * column on which a moving component's centre lines up with a resting one,
+ * to within `tolerance` cells. Each line spans everything on it, so it reads
+ * as "these are in line". Moving components are never aligned with each other.
+ */
 export function alignGuides(nodes: NodeT[], moving: Set<string>, tolerance = 0.01): Guide[] {
   const still = nodes.filter((n) => !moving.has(n.id))
   const out = new Map<string, Guide>()

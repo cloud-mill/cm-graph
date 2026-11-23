@@ -1,17 +1,41 @@
+/**
+ * Terraform in and out.
+ *
+ * Import is a text scan, not an HCL parser, and nothing in the pasted source
+ * is ever evaluated. It reads `resource "type" "name" { ... }` blocks only:
+ * modules, data sources, variables, locals and outputs are not looked at.
+ * Settings are read from literal values on the attribute's own line: a
+ * variable or an expression is not resolved, `for_each` is not expanded and
+ * heredocs are not understood, so such a component mostly keeps its defaults.
+ * Resource types are looked up with own-key checks, because the source is
+ * untrusted and a type may be called `constructor`. Connections are inferred
+ * from references between blocks, which says two resources are related, not
+ * that traffic flows.
+ *
+ * Export writes a starting point, not a deployable configuration: it refers to
+ * variables, roles and data sources it does not declare, and it writes no
+ * connections and no areas other than VPCs. Names are escaped on the way out.
+ */
 import { CATALOG_LIST, EC2_FAMILY, RDS_CLASS, REGIONS, SIZE_MULT, defOf, defaultProps, nodeName, roleOf } from './catalog'
 import { autoLayout } from './layout'
 import { type Doc, type NodeT, emptyDoc, uid } from './types'
 import { guessKind, kindInfo } from './links'
 
+/** One `resource` block as scanned. */
 interface Res {
+  /** `type.name`, the form other blocks refer to it by */
   key: string
   type: string
   name: string
+  /** the text between the block's braces, comments removed */
   body: string
+  /** `key = value` lines anywhere in the body, nested blocks included, values as written (quotes kept). The first of a repeated key wins. */
   attrs: Record<string, string>
+  /** every other resource the body mentions as `type.name`, each once, wherever it appears, strings included */
   refs: string[]
 }
 
+// Terraform resource type to component type, for the core AWS set; several resource types can import as one component
 const TYPE_MAP: Record<string, string> = {
   aws_instance: 'ec2', aws_autoscaling_group: 'ec2', aws_spot_instance_request: 'ec2',
   aws_db_instance: 'rds', aws_rds_cluster: 'rds',
@@ -37,17 +61,26 @@ for (const d of CATALOG_LIST) for (const t of [d.tf, ...(d.tfAlso ?? [])]) if (t
 /** Component a Terraform resource type maps to. Own keys only, so a resource called `constructor` is simply unknown. */
 const typeFor = (t: string): string | undefined => (Object.hasOwn(TYPE_MAP, t) ? TYPE_MAP[t] : undefined)
 
+// The four ways a resource type is treated. One in TYPE_MAP becomes a component. NETWORK becomes a VPC area.
+// STRUCTURAL and IGNORED are dropped without comment (STRUCTURAL ones are still followed to find which
+// network a component sits in). Anything else is reported as skipped, and is also treated as a "connector"
+// whose references can join two components (a listener, an attachment, a mapping).
 const NETWORK = /^(aws_vpc|google_compute_network|azurerm_virtual_network)$/
 // resources that describe placement, not traffic
 const STRUCTURAL = /^(aws_(subnet|security_group|db_subnet_group|elasticache_subnet_group|route_table|route|network_acl|eip|vpc_)|google_compute_(subnetwork|firewall|router$|route$|address|global_address|network_peering)|google_vpc_access_connector|azurerm_(subnet|network_security_group|network_interface|public_ip|route_table|route$|virtual_network_peering))/
 const IGNORED = /^(aws_(iam_|kms_|cloudwatch_log|cloudwatch_metric|acm_certificate_validation|key_pair|ami|s3_bucket_(policy|acl|versioning|public|server|lifecycle|ownership))|google_(project|service_account|kms_|storage_bucket_iam|[a-z0-9_]+_iam_)|azurerm_(resource_group|role_|key_vault_(secret|key|access_policy)|service_plan|storage_account_network_rules|monitor_(metric|action)))/
+// a reference to another resource: `aws_lb.web`, with or without an attribute after it
 const REF = /\b((?:aws|google|azurerm)_[a-z0-9_]+)\.([A-Za-z_][\w-]*)/
 
+/** Removes block comments, whole-line `#` and `//` comments, and a trailing `#` comment that has no quote after it. A `//` after code on the same line is left in place. */
 function stripComments(src: string) {
   return src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*(#|\/\/).*$/gm, '').replace(/\s+#[^"\n]*$/gm, '')
 }
 
-/** Extract `resource "type" "name" { ... }` blocks with brace matching. */
+/**
+ * Extract `resource "type" "name" { ... }` blocks with brace matching.
+ * Braces inside double-quoted strings do not count. An unterminated block takes what is left of the input.
+ */
 export function parseResources(source: string): Res[] {
   const src = stripComments(source)
   const out: Res[] = []
@@ -82,9 +115,15 @@ const int = (v?: string) => {
   return isNaN(n) ? undefined : n
 }
 
+/**
+ * The settings that can be read off a resource. Only keys that were actually found are returned, so the caller
+ * can lay them over the defaults. Select values are taken only when the component offers them, so an unknown
+ * instance family, size, machine or tier leaves the default in place.
+ */
 function propsFor(r: Res, type: string): Record<string, any> {
   const a = r.attrs
   const p: Record<string, any> = {}
+  // NOTE: `in` also accepts names inherited from Object.prototype (`constructor`, `toString`), unlike the own-key checks elsewhere in this file
   const splitType = (v: string | undefined, table: Record<string, unknown>) => {
     const parts = (str(v) ?? '').replace(/^db\./, '').split('.')
     if (parts.length === 2 && parts[0] in table && parts[1] in SIZE_MULT) { p.family = parts[0]; p.size = parts[1] }
@@ -138,12 +177,19 @@ function propsFor(r: Res, type: string): Record<string, any> {
 
 export interface ImportResult {
   doc: Doc
+  /** how many `resource` blocks were found */
   resources: number
+  /** how many of them became components */
   mapped: number
+  /** resource types that were not recognised, each once. Networking and plumbing that is dropped on purpose is not listed. */
   skipped: string[]
 }
 
-/** Build a laid-out blueprint from Terraform HCL source. */
+/**
+ * Build a laid-out blueprint from Terraform HCL source. Source with no recognisable resource gives an
+ * empty blueprint. Every line is marked `imported` (read from a reference)
+ * or `inferred` (the synthetic Users client), and its kind is a guess from what it joins.
+ */
 export function importTerraform(source: string, name = 'Imported from Terraform'): ImportResult {
   const res = parseResources(source)
   const byKey = new Map(res.map((r) => [r.key, r]))
@@ -164,6 +210,9 @@ export function importTerraform(source: string, name = 'Imported from Terraform'
   }
 
   // --- edges
+  // Until they are finished (see the map over doc.edges below) the lines hold the two components themselves in
+  // `from` and `to`, not their ids, hence the casts. Direction follows the request path: the lower tier points at
+  // the higher, and between equals the one holding the reference points at the one it refers to.
   const tier = (n: NodeT) => defOf(n.type).tier
   const pairs = new Set<string>()
   const link = (a: NodeT, b: NodeT, referrerFirst = true) => {
@@ -210,6 +259,7 @@ export function importTerraform(source: string, name = 'Imported from Terraform'
     const m = v?.match(REF)
     return m ? nodeOf.get(m[1] + '.' + m[2]) : undefined
   }
+  // these are drawn exactly as stated, without the tier ordering `link` applies
   for (const r of res) {
     const dir = Object.hasOwn(DIRECTED, r.type) ? DIRECTED[r.type] : undefined
     if (!dir) continue
@@ -221,6 +271,7 @@ export function importTerraform(source: string, name = 'Imported from Terraform'
     pairs.add(k)
     doc.edges.push({ id: uid(), from, to, style: 'solid', arrow: 'end', width: 2, origin: 'imported' } as any)
   }
+  // every remaining group of connectors that refer to one another is walked once, collecting the components at its edges
   for (const r of res) {
     if (!isConnector(r) || seen.has(r.key)) continue
     const users: NodeT[] = []
@@ -241,6 +292,8 @@ export function importTerraform(source: string, name = 'Imported from Terraform'
     if (users.length && targets.length) {
       for (const u of users) for (const t of targets) link(u, t)
     } else {
+      // only one side is known, so there is no direction to read: join the components, but only across tiers,
+      // because two of the same tier that share a supporting resource (a parameter group) are not talking to each other
       const comp = users.length ? users : targets
       for (let i = 0; i < comp.length; i++) for (let j = i + 1; j < comp.length; j++) if (tier(comp[i]) !== tier(comp[j])) link(comp[i], comp[j])
     }
@@ -259,6 +312,8 @@ export function importTerraform(source: string, name = 'Imported from Terraform'
 
   // --- VPC membership via structural references
   const membership = new Map<string, string[]>()
+  // the network a resource sits in: the first one reached by following references through subnets, groups and the like.
+  // The depth limit also stops a cycle of references from recursing for ever.
   const vpcOf = (key: string, depth = 0): string | undefined => {
     const r = byKey.get(key)
     if (!r || depth > 3) return
@@ -307,7 +362,11 @@ function namer() {
   }
 }
 
-/** Generate a Terraform starting point from a blueprint. */
+/**
+ * Generate a Terraform starting point from a blueprint: provider blocks for the clouds in use (AWS when
+ * neither Google Cloud nor Azure is), a network per VPC area on the main cloud, then one resource, or one comment, per component.
+ * Component and blueprint names go through `ident`, `quoted` or `oneLine`. Setting values are written as stored.
+ */
 export function exportTerraform(doc: Doc): string {
   const unique = namer(), uniqueNet = namer()
   const region = REGIONS.find((r) => r.id === doc.region) ?? REGIONS[0]

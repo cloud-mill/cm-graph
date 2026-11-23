@@ -8,16 +8,32 @@ import { planKey, withPlans } from './router'
 import { getPref, saveDoc, setPref } from './storage'
 import { type AreaT, type Doc, type EdgeT, type LabelT, type LinkKind, type NodeT, type PricingModel, type Side, emptyDoc, uid } from './types'
 
+/**
+ * The editor's one store: the open blueprint with its undo history, and the interface state around it (selection,
+ * tool, camera, panels, preferences, toasts).
+ *
+ * The blueprint only changes through `apply` (and `load`, `undo`, `redo`); every editing action below is a thin
+ * wrapper round it. A document in the store is immutable: a change is a new `Doc`, and anything untouched keeps
+ * its identity, which is what the canvas relies on to redraw only what changed.
+ *
+ * Not held here: the live document drawn during a drag (the canvas keeps that and commits it with `apply` on
+ * release), and anything in browser storage beyond the autosave at the bottom of this file.
+ */
 export type Tool = 'select' | 'connect' | 'area' | 'text' | 'orbit'
 export type Panel = 'inspect' | 'budget' | 'advisor'
 export type Lens = 'none' | 'cost'
+/** Pan and zoom: scene pixels are scaled by `k`, then moved by (x, y) screen pixels. */
 export interface View { x: number; y: number; k: number }
 export interface Toast { id: string; text: string; kind?: 'ok' | 'warn' }
 
 interface State {
+  /** the blueprint as committed. Every line the router owns carries a plan that stands (see `apply`) */
   doc: Doc
+  /** undo steps, oldest first, at most `HISTORY` of them; whole documents, which is cheap because they share what did not change */
   past: Doc[]
+  /** redo steps, nearest first; emptied by any new undo step */
   future: Doc[]
+  /** ids of anything selected: components, connections, areas and labels share one id space */
   selection: string[]
   tool: Tool
   /** component type being dragged in from the palette */
@@ -46,9 +62,11 @@ interface State {
   theme: 'dark' | 'light'
   pricing: PricingModel
   toasts: Toast[]
+  /** false from an edit until the autosave that follows it has been written */
   saved: boolean
   /** the last autosave could not be written (storage full or blocked) */
   saveFailed: boolean
+  /** a counter, not a value: adding one asks the inspector to put the cursor in the name field of what is selected */
   focusName: number
   /** floating panels */
   showLib: boolean
@@ -57,17 +75,32 @@ interface State {
   fresh: string | null
   modal: null | 'export' | 'import' | 'shortcuts' | 'command' | 'history' | 'share' | 'gestures'
 
+  /** Open a blueprint: it replaces the document, clears history and selection, and plans any line that has no plan yet (older files) */
   load: (doc: Doc) => void
-  /** Apply a change. Non-transient changes create an undo step. */
+  /**
+   * The one way the blueprint is edited. `fn` gets the current document and returns the next; returning the same
+   * object means "nothing changed" and nothing happens, no undo step included. Otherwise the result is passed
+   * through `withPlans` (so every line the router owns leaves here with a path that stands), stamped with a new
+   * `updatedAt`, and stored as exactly one undo step, with redo emptied.
+   *
+   * `transient` stores the change without an undo step of its own, so it becomes part of the step before it:
+   * for the later parts of something the user sees as one action. It does not empty redo.
+   */
   apply: (fn: (d: Doc) => Doc, transient?: boolean) => void
+  /** Make an undo step of the document as it is now, without changing it, so that transient changes after it undo back to here */
   checkpoint: () => void
+  /** Undo and redo put a stored document back as it was, plans included: nothing is planned again */
   undo: () => void
   redo: () => void
+  /** `additive` toggles each id in or out of the selection instead of replacing it */
   select: (ids: string[], additive?: boolean) => void
+  /** Set interface state directly. Not for `doc`: that would skip planning, history and the unsaved mark */
   set: (p: Partial<State>) => void
   toast: (text: string, kind?: Toast['kind']) => void
 
+  /** (x, y) is the corner of the footprint, in cells. Returns the new id */
   addNode: (type: string, x: number, y: number) => string
+  /** null when nothing was added: an end is missing, both ends are the same, or the two are already connected (either way round) */
   addEdge: (from: string, to: string) => string | null
   /** add a component and connect it from `from` (or, with `into`, drop it into the middle of that connection): one undo step */
   addLinked: (type: string, x: number, y: number, link: { from?: string; into?: string }) => string
@@ -102,17 +135,24 @@ interface State {
   patchEdge: (ids: string[], p: Partial<EdgeT>) => void
   patchArea: (id: string, p: Partial<AreaT>) => void
   patchLabel: (id: string, p: Partial<LabelT>) => void
+  /** removing a component removes the connections at it too */
   remove: (ids: string[]) => void
+  /** copies are offset by (dx, dy) cells; connections come along only when both their ends are copied */
   duplicate: (ids: string[], dx?: number, dy?: number) => void
+  /** copy and paste use a clipboard private to this tab, not the system one */
   copy: () => void
   paste: () => void
+  /** move the selection by (dx, dy) cells */
   nudge: (dx: number, dy: number) => void
   setTheme: (t: 'dark' | 'light') => void
 }
 
+// to a thousandth of a cell; the `+ 0` turns -0 into 0, so a position never reads or compares as minus zero
 const r3 = (v: number) => Math.round(v * 1000) / 1000 + 0
 let clipboard: { nodes: NodeT[]; edges: EdgeT[]; areas: AreaT[]; labels: LabelT[] } | null = null
+// how many times the clipboard has been pasted, so each paste lands two cells further on and not on top of the last
 let pasteCount = 0
+/** the most undo steps kept; older ones fall off the far end */
 const HISTORY = 120
 
 /** `web-1` copied next to `web-1` and `web-2` becomes `web-3`; other names are left alone. */
@@ -175,6 +215,7 @@ export const useStore = create<State>((set, get) => ({
       : { doc: touch(next), past: [...past.slice(-(HISTORY - 1)), doc], future: [], saved: false })
   },
   checkpoint: () => set((s) => ({ past: [...s.past.slice(-(HISTORY - 1)), s.doc], future: [] })),
+  // undo and redo count as edits to be saved: the document gets a new `updatedAt` (so it is a new object, not the one in history)
   undo: () => {
     const { past, doc, future } = get()
     if (!past.length) return
@@ -229,6 +270,7 @@ export const useStore = create<State>((set, get) => ({
   },
   addLinked: (type, x, y, link) => {
     const id = get().addNode(type, x, y)
+    // transient: the connection joins the undo step `addNode` has just made
     get().apply((d) => {
       const made = d.nodes.find((n) => n.id === id)!
       if (link.into) {
@@ -381,10 +423,6 @@ export const useStore = create<State>((set, get) => ({
   },
 }))
 
-/**
- * Move selected items by a delta measured from `base` (the doc at drag start).
- * Moving an area carries the nodes, labels and areas that sit inside it.
- */
 /** What is selected stays selected through undo and redo, as long as it still exists: stepping back mid-edit should not drop what you were editing. */
 function stillThere(doc: Doc, selection: string[]): string[] {
   if (!selection.length) return selection
@@ -402,6 +440,15 @@ export function reended(e: EdgeT, end: 'from' | 'to', node: string, side?: Side)
   return { ...rest, from: end === 'from' ? node : e.from, to: end === 'to' ? node : e.to, [end === 'from' ? 'fromSide' : 'toSide']: side }
 }
 
+/**
+ * Move selected items by a delta measured from `base` (the doc at drag start).
+ * Moving an area carries the nodes, labels and areas that sit inside it.
+ *
+ * (dx, dy) is the whole movement so far, in cells, not a step since the last call: positions are always worked
+ * out from `base`, so a long drag cannot drift, and what an area carries is decided once, by where things stood
+ * at the start. `doc` is the document to write the positions into, which may already differ from `base` in other ways.
+ * Pure: the canvas uses it for the live document during a drag, and `nudge` for a committed move.
+ */
 export function moveItems(doc: Doc, base: Doc, sel: Set<string>, dx: number, dy: number): Doc {
   if (!dx && !dy && doc === base) return doc
   const carried = new Set(sel)
@@ -429,8 +476,12 @@ export function moveItems(doc: Doc, base: Doc, sel: Set<string>, dx: number, dy:
 }
 
 // ---- autosave ---------------------------------------------------------------
+// Any change of `doc` identity schedules a write to browser storage 450 ms after the last one. The subscription
+// lives for the life of the module; `active` is what turns it on and off, so nothing is written while no blueprint
+// is open or while one is being loaded.
 let timer: ReturnType<typeof setTimeout> | undefined
 let active = false
+/** Turn autosave on or off. A write still waiting when it is turned off is not made while it stays off: call `flushSave` first. */
 export function enableAutosave(on: boolean) {
   active = on
 }
@@ -446,6 +497,7 @@ useStore.subscribe((s, prev) => {
     useStore.setState({ saveFailed: true })
   }, 450)
 })
+/** Write the document now instead of waiting, for when the page or the editor is about to go. Does nothing while autosave is off, and does not update `saved`. */
 export function flushSave() {
   clearTimeout(timer)
   if (active) saveDoc(useStore.getState().doc)
@@ -464,6 +516,10 @@ export function kindOf(doc: Doc, id: string): 'node' | 'edge' | 'area' | 'label'
 let lastKey = ''
 let lastAt = 0
 let lastDoc: Doc | null = null
+/**
+ * `apply`, for edits that arrive as a stream (typing in a field, dragging a slider). Edits with the same `key` less
+ * than 1.2 s apart become one undo step; `key` should name the field and the item, so different fields never merge.
+ */
 export function coalesce(key: string, fn: (d: Doc) => Doc) {
   const now = Date.now()
   // only fold into the previous step if nothing else (an undo, another edit, a load) happened in between

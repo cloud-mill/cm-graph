@@ -4,6 +4,19 @@ import { useStore } from './core/store'
 import { Dashboard } from './ui/Dashboard'
 import { Editor } from './ui/Editor'
 
+/*
+ * The application shell: picks a screen from the address, and nothing else.
+ *
+ *   #/            the dashboard
+ *   #/d/<id>      the editor, on the blueprint stored under that id
+ *   #/s/<payload> a shared link: the whole blueprint is in the payload
+ *
+ * The address is the only routing state. Moving between pages goes through
+ * `navigate` in core/nav, which is also where browser history is handled.
+ */
+
+// `navigate` changes the address with pushState, which fires no event of its own, and sends a
+// `hashchange` by hand; so this one listener hears both its moves and the browser's
 const onHash = (cb: () => void) => { window.addEventListener('hashchange', cb); return () => window.removeEventListener('hashchange', cb) }
 /**
  * The address, read straight from the browser. Subscribing this way re-reads it
@@ -33,6 +46,7 @@ class Boundary extends Component<{ children: ReactNode }, { error: Error | null 
   }
 }
 
+/** Rendered outside the error boundary, so a message can still be shown over a screen that has crashed. */
 function Toasts() {
   const toasts = useStore((s) => s.toasts)
   return (
@@ -47,7 +61,8 @@ export default function App() {
   const theme = useStore((s) => s.theme)
   useEffect(() => { document.documentElement.dataset.theme = theme }, [theme])
 
-  // shared links: decode into a fresh local copy, then open it
+  // shared links: decode into a fresh local copy, then open it. The address is replaced, not added to, so Back
+  // never returns to the link and makes a second copy. `live` drops a result that arrives after the address has moved on
   useEffect(() => {
     const m = hash.match(/^#\/s\/(.+)$/)
     if (!m) return
@@ -63,6 +78,8 @@ export default function App() {
   }, [hash])
 
   const doc = hash.match(/^#\/d\/([\w-]+)/)
+  // The boundary is keyed by the kind of screen ('#/d/', '#/s/' or '#/'), so leaving a crashed screen for another kind
+  // clears the failure. The editor is keyed by blueprint id, so opening another one starts it from nothing.
   return (
     <>
       <Boundary key={hash.slice(0, 4)}>

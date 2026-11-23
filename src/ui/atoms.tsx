@@ -4,6 +4,13 @@ import { Check, ChevronsUpDown, X } from 'lucide-react'
 import { useBackLayer } from '../core/nav'
 import { useStore } from '../core/store'
 
+/*
+ * The small controls every panel and dialog is built from. They hold no application state: each is
+ * given a value and reports a change, and only keeps what belongs to the control itself (a half-typed
+ * number, an open list). The one exception is the focus request further down, which listens to the store.
+ */
+
+/** A row of mutually exclusive choices, announced as a radio group. */
 export function Segmented<T extends string>({ value, options, onChange, size }: {
   value: T
   options: { value: T; label: ReactNode; title?: string; disabled?: boolean }[]
@@ -21,15 +28,17 @@ export function Segmented<T extends string>({ value, options, onChange, size }: 
   )
 }
 
-/** Keyboard activation for elements that act as buttons: Enter and Space, as a real button has. */
+/** Keyboard activation for elements that act as buttons: Enter and Space, as a real button has. Keys pressed on a real control nested inside are left to that control. */
 export const onActivate = (run: () => void) => (e: React.KeyboardEvent) => {
   if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); run() }
 }
 
+/** Decides how shortcuts are written, not how they work: the handlers accept Cmd and Ctrl alike. */
 export const isMac = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform)
 /** Shortcut labels are written with Mac symbols; everywhere else they read as words. */
 export const keys = (s: string) => isMac ? s : s.replace(/⇧⌘/g, 'Ctrl+Shift+').replace(/⌘/g, 'Ctrl+').replace(/⌥/g, 'Alt').replace(/⇧/g, 'Shift').replace(/⌫/g, 'Del')
 
+/** An icon-only button. `title` is its accessible name and its tooltip, which is a real element (not the `title` attribute) so the shortcut can be shown as a keycap. */
 export function IconBtn({ title, onClick, active, disabled, children, kbd }: {
   title: string; onClick?: () => void; active?: boolean; disabled?: boolean; children: ReactNode; kbd?: string
 }) {
@@ -41,6 +50,14 @@ export function IconBtn({ title, onClick, active, disabled, children, kbd }: {
   )
 }
 
+/**
+ * A dialog over a scrim. It closes on Escape, on a press on the scrim itself, on its close button and
+ * on the phone's Back button. Escape is heard in the capture phase and stopped there, so nothing
+ * underneath (a field's own Escape, the editor's "cancel") also acts on the same key.
+ *
+ * It does not move focus into itself, keep Tab inside, or put focus back when it closes; a dialog
+ * that needs a field focused does that itself.
+ */
 export function Modal({ title, subtitle, onClose, children, width = 560, footer }: {
   title: string; subtitle?: string; onClose: () => void; children: ReactNode; width?: number; footer?: ReactNode
 }) {
@@ -71,6 +88,16 @@ export function Modal({ title, subtitle, onClose, children, width = 560, footer 
   )
 }
 
+// ---- focus on request -----------------------------------------------------------
+// "Rename this" can be asked from the canvas, a menu or the keyboard, and the field that should take
+// focus may not exist yet (the inspector may be about to show a different thing). So the request is
+// a counter in the store, `focusName`: whoever wants a rename adds one to it, and the name field of
+// whatever the inspector shows next is given it as `autoFocusKey`. Between the request and the field
+// taking focus, the editor's shortcut handler passes typed characters to `typeAhead` instead of
+// running them as shortcuts, so "select, Enter, type" never loses its first letters.
+// This is module state because the field that answers is not the component that was asked.
+
+// the last request honoured: a name field that mounts later with the same number does not take focus again
 let handledFocus = 0
 let focusAskedAt = -Infinity
 /** True for a moment after a field was asked to take focus, so typing meant for it is not read as shortcuts. */
@@ -81,7 +108,11 @@ export const typeAhead = (ch: string) => { typedAhead += ch }
 // the request is noted the instant it is made, before React has rendered the field
 useStore.subscribe((s, prev) => { if (s.focusName !== prev.focusName) { focusAskedAt = performance.now(); typedAhead = '' } })
 
-/** Text input that keeps local state while typing so external updates don't fight the caret. */
+/**
+ * A plain controlled text field: every keystroke is reported, and Escape or (on one line) Enter
+ * leaves the field. `autoFocusKey` is the store's `focusName`: when it is a number not yet honoured,
+ * the field takes focus, selects its text and enters whatever was typed ahead.
+ */
 export function TextInput({ value, onChange, placeholder, className, autoFocusKey, multiline, mono, label, list, inputMode }: {
   value: string; onChange: (v: string) => void; placeholder?: string; className?: string; autoFocusKey?: number; multiline?: boolean; mono?: boolean; label: string
   /** id of a list of suggestions */
@@ -107,6 +138,11 @@ export function TextInput({ value, onChange, placeholder, className, autoFocusKe
   return multiline ? <textarea rows={3} {...props} /> : <input {...props} list={list} inputMode={inputMode} />
 }
 
+/**
+ * A number field that keeps its own text while it has focus, so a value half typed ("", "1.") is not
+ * rewritten under the caret. Every keystroke that parses is reported at once, clamped to `min`..`max`;
+ * the up and down arrows step by `step` (ten times that with Shift). On blur it shows the value it was given.
+ */
 export function NumberInput({ value, onChange, min = 0, max = 1e7, step = 1, unit, label }: {
   value: number; onChange: (v: number) => void; min?: number; max?: number; step?: number; unit?: string; label: string
 }) {
@@ -139,6 +175,7 @@ export function NumberInput({ value, onChange, min = 0, max = 1e7, step = 1, uni
   )
 }
 
+/** The colours offered for components, areas, labels and connections. */
 export const SWATCHES = ['#F2903A', '#E8A33D', '#3DB87F', '#2BB5D4', '#4F7FF2', '#8F6FF2', '#E85C9C', '#E5574F', '#8792A8', '#566178']
 
 export function Swatches({ value, onChange, allowReset, mixed }: { value?: string; onChange: (c: string | undefined) => void; allowReset?: boolean; /** the selection has several colours, so none is marked */ mixed?: boolean }) {
@@ -165,7 +202,7 @@ export function Toggle({ value, onChange, label }: { value: boolean; onChange: (
   return <button role="switch" aria-checked={value} aria-label={label} className={'toggle' + (value ? ' on' : '')} onClick={(e) => { e.preventDefault(); onChange(!value) }}><i /></button>
 }
 
-/** Eases a displayed number towards its target, so totals tick instead of snapping. */
+/** Eases a displayed number towards its target, so totals tick instead of snapping. A new target met mid-way starts from the number showing, not from the old target. */
 export function useTween(value: number, ms = 420) {
   const [v, setV] = useState(value)
   const from = useRef(value)
@@ -192,6 +229,11 @@ export function useTween(value: number, ms = 420) {
  * A dropdown drawn by the app rather than the operating system, so it looks the
  * same everywhere and matches both themes. Behaves like a native select:
  * arrows, Home/End, Enter, Escape and typing a letter all work.
+ *
+ * Focus never leaves the button: the list is announced through `aria-activedescendant`. The list is
+ * drawn on the body and placed by hand in window coordinates, so the scrolling panel the field sits
+ * in cannot clip it; in return it closes when anything outside it scrolls, since it would be left behind.
+ * On a phone, Back closes it.
  */
 export function Select<T extends string>({ value, options, onChange, label, className }: {
   value: T; options: { value: T; label: string }[]; onChange: (v: T) => void; label?: string; className?: string
@@ -216,7 +258,8 @@ export function Select<T extends string>({ value, options, onChange, label, clas
     trigger.current?.focus()
   }
 
-  // place the list under the field, or above it when there is more room there
+  // place the list under the field, or above it when there is more room there. A layout effect, so it is
+  // placed before it is first painted; the same effect owns the window listeners that close or re-place it
   useLayoutEffect(() => {
     if (!open) return
     const place = () => {
@@ -274,7 +317,8 @@ export function Select<T extends string>({ value, options, onChange, label, clas
       {open && pos && createPortal(
         <div ref={list} id={id} className="select-list" role="listbox" aria-label={label} style={pos}>
           {options.map((o, i) => (
-            // keys are handled by the combobox button, which keeps focus while the list is open
+            // keys are handled by the combobox button, which keeps focus while the list is open.
+            // Only a pointer that really moved takes the highlight: a row sliding under a resting pointer as the list scrolls does not
             // oxlint-disable-next-line jsx-a11y/click-events-have-key-events
             <div key={o.value} id={`${id}-${i}`} role="option" tabIndex={-1} aria-selected={o.value === value} data-active={i === active}
               className={'select-item' + (i === active ? ' active' : '')} onPointerMove={(e) => { if ((e.movementX || e.movementY) && i !== active) setActive(i) }} onClick={() => pick(i)}>

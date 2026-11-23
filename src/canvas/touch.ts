@@ -16,7 +16,9 @@ import type { View } from '../core/store'
  *    Once a gesture is a tilt it is only a tilt.
  */
 
+/** Where a finger is, in px from the canvas's top-left corner. */
 export interface Finger { x: number; y: number }
+/** The whole camera: pan (px) and zoom, and the angle in degrees. Passed in and handed back, never read from the store here. */
 export interface Camera { view: View; yaw: number; pitch: number }
 
 export interface Gesture {
@@ -43,12 +45,15 @@ export interface Gesture {
   travel: number
 }
 
+/** How far out and how far in the view may zoom. */
 export const MIN_K = 0.15, MAX_K = 4
 /** a twist must pass this many degrees, and sweep this far under the fingers, before it turns the camera */
 export const TWIST_START = 7
 const TWIST_ARC = 14
 /** once a pinch is clearly zooming, turning needs to be this much more deliberate, and the other way round */
 const ZOOM_GUARD = 2.2
+// both are changes in the distance between the fingers, as the log of a ratio (0.12 is about an eighth wider or narrower):
+// how far from where the pair began before it is clearly a zoom, and how far from where a turn began before a turn zooms as well
 const ZOOM_COMMIT = 0.12
 const ZOOM_AFTER_TURN = 0.14
 /** fingers closer together than this give a shaky angle, so their twist counts for less */
@@ -103,6 +108,7 @@ function looksLikeTilt(g: Gesture, a: Finger, b: Finger): boolean | null {
 /**
  * Take the camera from where the fingers were to where they are now.
  * `centre` is the middle of the visible canvas: a tilt hinges there, so the diagram stays in frame.
+ * Returns the new camera for the caller to set, and updates `g` in place: where the fingers now are, and what the gesture has become.
  */
 export function gestureMove(g: Gesture, a: Finger, b: Finger, c: Camera, centre: [number, number]): Camera {
   g.travel = Math.max(g.travel, Math.hypot(a.x - g.a0.x, a.y - g.a0.y), Math.hypot(b.x - g.b0.x, b.y - g.b0.y))
@@ -158,6 +164,7 @@ export const isTwoFingerTap = (g: Gesture, heldMs: number) => g.travel < DECIDE 
 /** Recent positions of a finger, for the speed it was moving at when it let go. */
 export interface Trail { t: number; x: number; y: number }
 
+/** Note where the finger is now (`t` in ms), and forget where it was more than 120 ms ago: only the last moments say how fast it left. */
 export function track(trail: Trail[], t: number, x: number, y: number) {
   trail.push({ t, x, y })
   while (trail.length > 2 && t - trail[0].t > 120) trail.shift()

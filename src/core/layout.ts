@@ -2,10 +2,17 @@ import { defOf } from './catalog'
 import { isShaped, unshaped } from './shape'
 import { type AreaT, type Doc, type NodeT, centerOf, footOf } from './types'
 
+/**
+ * Arranging things for the user: area membership, lining up, spacing out, and the whole-diagram auto-layout.
+ * Each function takes a document and returns a new one (or the same one when nothing would change), and is
+ * only ever run because the user asked for it. Positions are in cells.
+ */
+
+/** A component belongs to an area when the centre of its footprint is inside it or on its border. Areas keep no list of members. */
 export const inArea = (a: AreaT, n: Pick<NodeT, 'x' | 'y' | 'scale'>) =>
   centerOf(n)[0] >= a.x && centerOf(n)[0] <= a.x + a.w && centerOf(n)[1] >= a.y && centerOf(n)[1] <= a.y + a.d
 
-/** Resize an area to wrap the given nodes (and optionally child rects). */
+/** Resize an area to wrap the given nodes (and optionally child rects), `pad` cells clear all round with half a cell more on the -y side. */
 export function fitArea(a: AreaT, nodes: Pick<NodeT, 'x' | 'y' | 'scale'>[], pad = 1, extra: { x: number; y: number; w: number; d: number }[] = []): AreaT {
   if (!nodes.length && !extra.length) return a
   let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity
@@ -14,26 +21,17 @@ export function fitArea(a: AreaT, nodes: Pick<NodeT, 'x' | 'y' | 'scale'>[], pad
   return { ...a, x: x0 - pad, y: y0 - pad - 0.5, w: x1 - x0 + pad * 2, d: y1 - y0 + pad * 2 + 0.5 }
 }
 
-const PX = 6 // column pitch
-const PY = 5 // row pitch
+const PX = 6 // column pitch, in cells
+const PY = 5 // row pitch, in cells
 const FREE = '~'
 
-/**
- * Layered (Sugiyama-style) layout that understands areas.
- *
- * Columns follow the request path (longest-path ranking). Rows are grouped
- * into lanes: every innermost area gets its own band of rows, sibling areas
- * are stacked next to each other, and components outside any area either stay
- * inline with their neighbours or step aside when their column runs through an
- * area. Areas are then re-wrapped around their members.
- */
 /** Which way a set of components mostly runs: along x (a row) or along y (a column). */
 const runOf = (nodes: Pick<NodeT, 'x' | 'y' | 'scale'>[]) => {
   const cx = nodes.map((n) => n.x + (n.scale ?? 1)), cy = nodes.map((n) => n.y + (n.scale ?? 1))
   return Math.max(...cx) - Math.min(...cx) >= Math.max(...cy) - Math.min(...cy) ? 'x' : 'y'
 }
 
-/** the least room left between two components that are put in a line */
+/** the least room left between two components that are put in a line, in cells */
 const MIN_GAP = 1
 
 /** Put the chosen components in one straight line: a row if they mostly run sideways, a column if they are stacked. */
@@ -69,6 +67,19 @@ export function spaceEvenly(doc: Doc, ids: string[]): Doc {
   return { ...doc, nodes: doc.nodes.map((n) => (place.has(n.id) ? { ...n, [run]: place.get(n.id)! } : n)) }
 }
 
+/**
+ * Layered (Sugiyama-style) layout that understands areas.
+ *
+ * Columns follow the request path (longest-path ranking). Rows are grouped
+ * into lanes: every innermost area gets its own band of rows, sibling areas
+ * are stacked next to each other, and components outside any area either stay
+ * inline with their neighbours or step aside when their column runs through an
+ * area. Areas are then re-wrapped around their members.
+ *
+ * Every component is given a new place, laid out from the origin, and every hand-shaped
+ * connection is handed back to the router. `membership` (area id to component ids) says
+ * who belongs to which area when positions cannot: an import, where nothing has a place yet.
+ */
 export function autoLayout(doc: Doc, membership?: Map<string, string[]>): Doc {
   const nodes = doc.nodes
   if (!nodes.length) return doc

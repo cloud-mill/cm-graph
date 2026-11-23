@@ -1,3 +1,8 @@
+/**
+ * The dialogs of the desktop editor: export (the files really are downloaded and read back), import and what it
+ * refuses, share links, version history, the shortcut sheet, the command palette, and the browser's Back button
+ * closing them. A failure means work cannot get out of, or into, the app the way the dialog promises.
+ */
 import { TRIO, expect, test } from './fixtures'
 
 const read = async (dl: import('@playwright/test').Download) => Buffer.concat(await (await dl.createReadStream()).toArray())

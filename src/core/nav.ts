@@ -19,21 +19,35 @@ import { useEffect, useLayoutEffect, useRef } from 'react'
  * There is only ever one guard, however many layers are open, and it is put
  * down or picked up after the current burst of changes has settled. Switching
  * from one sheet to another therefore costs history nothing.
+ *
+ * What this module owns: every call on `history` in the app, the `popstate`
+ * listener, and the stack of open layers. What it does not: deciding which page
+ * an address shows. That is `App`, which listens for `hashchange` (and, for the
+ * share-link redirect and the error screen, sets `location` itself). Pages are
+ * hash addresses (`#/` is the dashboard).
+ *
+ * The state is module-level, not React state: there is one browser history
+ * however many components are mounted.
  */
 
+/** Something open on top of the page. `close` is what Back calls to take it away. */
 interface Layer { close: () => void }
+/** What this module keeps in `history.state`: whether the entry is the guard, and the page this one was opened from. */
 interface Mark { guard?: boolean; from?: string }
 
+/** open layers, bottom first */
 const layers: Layer[] = []
 /** the guard is the current history entry */
 let guarded = false
 /** our own history.back() calls that have not come round as popstate yet */
 let stepping = 0
+/** a `settle` is already queued for the end of this burst */
 let settling = false
 
 const mark = (): Mark => (history.state && typeof history.state === 'object' ? history.state : {}) as Mark
 const page = (hash: string) => (hash === '' || hash === '#' ? '#/' : hash)
 
+/** Bring history into line with the layers: put the guard down if something is open and it is not there, step off it if nothing is and it is. */
 function settle() {
   settling = false
   // wait for our own step back to land before deciding anything else
@@ -41,13 +55,17 @@ function settle() {
   if (layers.length && !guarded) { history.pushState({ ...mark(), guard: true }, ''); guarded = true }
   else if (!layers.length && guarded) { guarded = false; stepping++; history.back() }
 }
+// in a microtask, so that closing one layer and opening another in the same turn is seen as one change, and the guard is left alone
 function soon() {
   if (settling) return
   settling = true
   queueMicrotask(settle)
 }
 
-/** Put a layer on top. Returns the function that takes it off again (closing it from the screen). */
+/**
+ * Put a layer on top. Returns the function that takes it off again (closing it from the screen).
+ * `close` is called only when Back takes the layer, never by the returned function; calling that afterwards is harmless.
+ */
 export function openLayer(close: () => void): () => void {
   const layer = { close }
   layers.push(layer)
@@ -125,7 +143,10 @@ export function watchHistory() {
 
 /** While `open` is true, Back closes this instead of leaving the page. */
 export function useBackLayer(open: boolean, close: () => void) {
+  // The latest `close` is kept in a ref so the effect below depends on `open` alone. A caller may pass a new function on
+  // every render, and with `close` as a dependency each such render would take the layer off and put it back on.
   const ref = useRef(close)
   useLayoutEffect(() => { ref.current = close })
+  // the cleanup is the function `openLayer` returned: it takes the layer off when `open` goes false or the component unmounts
   useEffect(() => { if (open) return openLayer(() => ref.current()) }, [open])
 }

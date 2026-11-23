@@ -9,6 +9,15 @@ import { addAtCenter } from './actions'
 import { Select, keys } from './atoms'
 import { haptic, isPhone, usePhone } from './device'
 
+/*
+ * The component library: the left panel on a desktop, the contents of a sheet on a phone. The search
+ * text and the category are local, so they start again each time it opens; the cloud being shown and
+ * the component being dragged out (`placing`) are in the store, because the canvas needs them too.
+ *
+ * Adding differs by pointer. A mouse press on a tile starts a drag that the canvas finishes; a double
+ * click drops the component in view. A finger scrolls the list, so a tap adds, and on a phone closes the sheet.
+ */
+
 /** Which cloud the library shows. On a phone it sits in the sheet's header, so it is its own piece. */
 export function CloudSeg() {
   const provider = useStore((s) => s.provider)
@@ -29,6 +38,8 @@ export function CloudSeg() {
 // library opens is what used to make it stutter, so a tile draws its picture when
 // it is about to scroll into sight, and a tile that has not changed is not redrawn.
 
+// one observer shared by every tile. A tile is told once, when it first comes within 320px of the
+// screen above or below, and is then no longer watched: a picture once drawn stays drawn
 type Near = (near: boolean) => void
 const watching = new WeakMap<Element, Near>()
 let watcher: IntersectionObserver | null = null
@@ -101,7 +112,7 @@ export function Palette() {
   }, [dq, cat, provider, mine])
   const tag = (p: string) => PROVIDERS.find((x) => x.id === p)?.short
 
-  // "/" jumps to the library search from anywhere on the canvas
+  // "/" jumps to the library search from anywhere on the canvas. The listener lives with the panel, so the key does nothing while the library is closed
   useEffect(() => {
     const key = (e: KeyboardEvent) => {
       if (e.key !== '/' || /INPUT|TEXTAREA|SELECT/.test((e.target as HTMLElement)?.tagName ?? '')) return

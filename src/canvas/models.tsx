@@ -62,7 +62,9 @@ function rightQuad(c: Ctx, x1: number, y: number, z: number, u0: number, v0: num
   )
 }
 
+// straight pieces in a full circle
 const SEG = 28
+/** Points round a circle on the ground at height `z`, or round the arc between two angles (radians, measured on the ground from +x). */
 function ring(c: Ctx, cx: number, cy: number, z: number, r: number, from = 0, to = Math.PI * 2, n = SEG): Pt[] {
   const out: Pt[] = []
   for (let i = 0; i <= n; i++) {

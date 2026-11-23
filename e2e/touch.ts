@@ -3,15 +3,24 @@ import type { CDPSession, Page } from '@playwright/test'
 export interface P { x: number; y: number }
 
 /**
- * Real fingers for tests. In Chrome the touches go through the browser's own
- * input pipeline (the same path a phone's screen takes), so gesture conflicts
- * with scrolling and zooming are exercised for real. Other engines have no such
- * hook, so there the pointer events are dispatched on the page directly.
+ * Fingers for tests. Every position is in screen pixels.
+ *
+ * With `real` (Chromium only) the touches go through the browser's own input pipeline, over the DevTools
+ * protocol: the same path a phone's screen takes. Gesture conflicts with scrolling and zooming are exercised for
+ * real, the browser turns a tap into a click itself, and positions arrive in whole pixels as a finger's do.
+ *
+ * Other engines have no such hook, so there the pointer events are made in the page and dispatched directly.
+ * That reaches the app's own pointer handling and nothing else: the browser does not scroll, zoom or click in
+ * answer to them. Tests that need any of that skip themselves unless the browser is Chromium.
  */
 export class Fingers {
   private cdp?: CDPSession
   constructor(readonly page: Page, readonly real: boolean) {}
 
+  /**
+   * One change to the fingers on the glass. `points` is every finger that is down after it, in the order they came
+   * down (a finger is known by its place in the list). `touchEnd` takes an empty list and lifts them all.
+   */
   private async send(type: 'touchStart' | 'touchMove' | 'touchEnd', points: P[]) {
     if (this.real) {
       this.cdp ??= await this.page.context().newCDPSession(this.page)
@@ -24,7 +33,9 @@ export class Fingers {
       const kind = t === 'touchStart' ? 'pointerdown' : t === 'touchMove' ? 'pointermove' : 'pointerup'
       const list: P[] = t === 'touchEnd' ? w.__held : (pts as P[])
       list.forEach((p: P, i: number) => {
+        // a finger that is already down is not pressed again when another joins it
         if (t === 'touchStart' && w.__held[i]) return
+        // moves and the lift go to whatever was under the finger when it came down, as a browser sends them for touch
         const el = t === 'touchStart' ? document.elementFromPoint(p.x, p.y) : w.__target?.[i]
         w.__target ??= []
         if (t === 'touchStart') w.__target[i] = el
@@ -35,13 +46,17 @@ export class Fingers {
     }, [type, points] as const)
   }
 
+  /** Down and straight up in one place. The fallback asks for the click itself, since pointer events made in the page do not raise one. */
   async tap(p: P) {
     await this.send('touchStart', [p])
     await this.send('touchEnd', [])
     if (!this.real) await this.page.evaluate((q) => (document.elementFromPoint(q.x, q.y) as HTMLElement | null)?.click(), p)
   }
 
-  /** One finger from `from` to `to`. `hold` rests it first, long enough to count as press-and-hold. */
+  /**
+   * One finger from `from` to `to`, a move every 12 ms. `hold` rests it first for that many ms: longer than the
+   * app's `HOLD_MS` (420) counts as press-and-hold. `flick` lifts it while it is still moving.
+   */
   async drag(from: P, to: P, o: { hold?: number; steps?: number; flick?: boolean } = {}) {
     const steps = o.steps ?? 8
     await this.send('touchStart', [from])
@@ -51,10 +66,12 @@ export class Fingers {
       await this.page.waitForTimeout(12)
     }
     // a finger that pauses before lifting leaves the view where it is; one that does not is a flick
+    // (the app only lets the view coast when the lift comes within 60 ms of the last move)
     if (!o.flick) await this.page.waitForTimeout(110)
     await this.send('touchEnd', [])
   }
 
+  /** A finger down at `p` for `ms`, then up, without moving. */
   async press(p: P, ms: number) {
     await this.send('touchStart', [p])
     await this.page.waitForTimeout(ms)
@@ -62,8 +79,8 @@ export class Fingers {
   }
 
   /**
-   * Two fingers. They start `from` apart around `at`, and end `to` apart around
-   * `at + shift`, turned by `twist` degrees along the way.
+   * Two fingers. They start `from` pixels apart around `at`, and end `to` pixels apart around `at + shift`, turned
+   * by `twist` degrees along the way (positive is clockwise on screen). They come down one after the other.
    */
   async pinch(at: P, from: number, to: number, o: { shift?: P; twist?: number; steps?: number } = {}) {
     const steps = o.steps ?? 10, shift = o.shift ?? { x: 0, y: 0 }, twist = ((o.twist ?? 0) * Math.PI) / 180
@@ -97,6 +114,7 @@ export class Fingers {
 
   /** Put one finger down and leave it there; follow with `move` and `lift`. */
   async down(p: P) { await this.send('touchStart', [p]) }
+  /** Lifts every finger that is down, not just one. */
   async lift() { await this.send('touchEnd', []) }
   async move(p: P) { await this.send('touchMove', [p]) }
 }

@@ -14,6 +14,12 @@ import { ImportDialog } from './Dialogs'
 import { Logo } from './Editor'
 import { onActivate } from './atoms'
 
+/*
+ * The first screen: an introduction to the product, the templates, and the blueprints stored in this
+ * browser. It reads storage directly and uses the store only for the theme; opening anything saves it
+ * as a blueprint first and then goes to the editor, which loads it by id.
+ */
+
 const ago = (t: number) => {
   const s = (Date.now() - t) / 1000
   if (s < 60) return 'just now'
@@ -23,11 +29,13 @@ const ago = (t: number) => {
   return new Date(t).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
 }
 
+/** Store a new blueprint and go to it. The editor loads from storage by id, so it has to be saved before the address changes. */
 function open(doc: Doc) {
   saveDoc(doc)
   go('#/d/' + doc.id)
 }
 
+/** The reader has asked for less motion: previews are then drawn once and left alone. */
 const still = () => typeof matchMedia !== 'undefined' && matchMedia('(prefers-reduced-motion: reduce)').matches
 
 /**
@@ -41,8 +49,8 @@ function LivePreview({ doc, theme, auto, labels = false, flow = false, onYaw }: 
   const hover = useRef(false)
   const lean = useRef(0)
   const wrap = useRef<SVGSVGElement>(null)
-  // frame once from the home view so the picture does not breathe as it turns
   const shown = useMemo(() => ({ ...doc, labels: [] }), [doc])
+  // frame once from the home view so the picture does not breathe as it turns
   const b = useMemo(() => {
     if (!auto) return sceneBounds(shown, ISO, 30)
     // the hero turns, so frame the whole sweep rather than one pose
@@ -75,6 +83,7 @@ function LivePreview({ doc, theme, auto, labels = false, flow = false, onYaw }: 
     card?.addEventListener('pointerenter', on)
     card?.addEventListener('pointerleave', off)
     return () => { cancelAnimationFrame(raf); card?.removeEventListener('pointerenter', on); card?.removeEventListener('pointerleave', off) }
+    // `onYaw` is left out on purpose: callers pass a new function each render, and restarting the loop would restart the orbit
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [auto])
   const proj = useMemo(() => makeCam(cam.yaw, cam.pitch), [cam])
@@ -85,6 +94,7 @@ function LivePreview({ doc, theme, auto, labels = false, flow = false, onYaw }: 
   )
 }
 
+/** A stored blueprint's card. Deleting takes two presses: the second button appears focused, and goes away if focus leaves it. */
 function DocCard({ meta, theme, onChange }: { meta: DocMeta; theme: 'dark' | 'light'; onChange: () => void }) {
   const doc = useMemo(() => loadDoc(meta.id), [meta.id, meta.updatedAt])
   const [confirm, setConfirm] = useState(false)

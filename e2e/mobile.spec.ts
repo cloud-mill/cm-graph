@@ -1,3 +1,10 @@
+/**
+ * The phone layout, on every phone project: the dock and sheets, the canvas gestures (tap, pan, pinch, twist, tilt,
+ * flick, press and hold), building a diagram by touch, and what happens when the phone is turned or the keyboard
+ * comes up. A failure means the editor cannot be used with fingers on that screen size.
+ *
+ * A finger is reported in whole pixels, so what it carries is checked with `near`, not for an exact position.
+ */
 import AxeBuilder from '@axe-core/playwright'
 import { TRIO, expect, makeDoc, test as base } from './fixtures'
 import { Fingers } from './touch'
@@ -209,7 +216,7 @@ test.describe('phone: canvas gestures', () => {
     }
     // the blueprint itself is untouched: turning is a view change
     await expect(page.locator('.save-dot')).toHaveAttribute('aria-label', 'Saved')
-    // editing still lands on the right cells from the new angle
+    // editing still goes where it is aimed from the new angle
     await fingers.tap(await app.world(1, 1))
     const from = await app.world(1, 1), d = await app.cells(1, 2)
     await fingers.drag(from, { x: from.x + d.x, y: from.y + d.y })
@@ -375,7 +382,6 @@ test.describe('phone: building a diagram', () => {
     await expect(dock(page).getByRole('status')).toHaveText('Now tap what assets connects to')
     await fingers.tap(await app.world(1, 1))
     await expect(app.edges()).toHaveCount(1)
-    await dock(page).getByRole('button', { name: 'Connect' }).isVisible()
     // the same pair again is refused, politely
     await page.getByRole('button', { name: 'Deselect' }).tap()
     await dock(page).getByRole('button', { name: 'Connect' }).tap()

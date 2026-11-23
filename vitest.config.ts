@@ -8,6 +8,7 @@ export default defineConfig({
   test: {
     include: ['src/**/*.test.{ts,tsx}'],
     setupFiles: ['src/test/setup.ts'],
+    // spies and mocks are put back after every test. Stubbed globals are not: tests that stub one unstub it themselves
     restoreMocks: true,
     coverage: {
       provider: 'v8',

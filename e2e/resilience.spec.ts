@@ -1,3 +1,8 @@
+/**
+ * Keeping work safe when things go wrong: autosave across reloads and navigation, unknown addresses, storage that
+ * is corrupted, damaged or full, a second tab, hurried input, and the crash screen. A failure means work can be
+ * lost, or one bad blueprint can take the whole app down.
+ */
 import { TRIO, expect, makeDoc, test } from './fixtures'
 
 test.describe('persistence and failure handling', () => {

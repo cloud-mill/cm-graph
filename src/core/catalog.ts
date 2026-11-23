@@ -1,7 +1,22 @@
+/**
+ * The component catalog: what can be placed on a blueprint, the settings each
+ * component has, and how those settings turn into monthly cost lines.
+ *
+ * The core AWS components are defined here and priced from the generated rate
+ * card in `./pricing`, region by region. Google Cloud, Azure and the long tail
+ * of AWS are defined in `./clouds` and appended at load. This file also owns
+ * cross-cloud equivalents (`equivalent`, `translateDoc`) and the two functions
+ * everything else prices through: `costOf` for one component and `docCost`
+ * for a blueprint.
+ *
+ * Lookups never fail: an unknown type resolves to the generic `block`, and a
+ * setting a saved component lacks takes its default.
+ */
 import { CLOUD_DEFS } from './clouds'
 import { HOURS, type Quote, type Rate, credits, ec2Rate, fixed, flat, nodeRate, rdsRate, usage } from './pricing'
 import type { CostBasis, CostLine, Doc, NodeT, PricingModel } from './types'
 
+/** The 3D shape a component is drawn as. */
 export type ModelKind =
   | 'tower' | 'rack' | 'slab' | 'tile' | 'cylinder' | 'bucket'
   | 'stack' | 'cluster' | 'people' | 'globe' | 'disc' | 'gate'
@@ -16,6 +31,7 @@ export const PROVIDERS: { id: Exclude<Provider, 'any'>; name: string; short: str
   { id: 'azure', name: 'Microsoft Azure', short: 'Azure', color: '#2F9BEF' },
 ]
 
+/** One setting of a component, as the inspector edits it. `key` is the name it is stored under in `NodeT.props`. */
 export interface PropDef {
   key: string
   label: string
@@ -40,6 +56,7 @@ export interface CompDef {
   /** Terraform resource type, with aliases that import as the same component */
   tf?: string
   tfAlso?: string[]
+  /** extra attribute lines for the exported Terraform block; falsy entries are dropped */
   tfAttrs?: (p: Record<string, any>) => (string | false | undefined)[]
   category: Category
   model: ModelKind
@@ -48,7 +65,7 @@ export interface CompDef {
   /** rough request-path rank, used by auto-layout and edge direction heuristics */
   tier: number
   props: PropDef[]
-  /** list-price cost lines for these settings, in the region and pricing model asked for */
+  /** list-price cost lines for these settings, in the region and pricing model asked for. Absent means the component is never billed. Call it through `costOf`, which fills in defaults first. */
   cost?: (p: Record<string, any>, q: Quote) => CostLine[]
   summary?: (p: Record<string, any>) => string
   keywords?: string
@@ -69,6 +86,7 @@ export const CATEGORIES: { id: Category; name: string; color: string }[] = [
 const CAT = Object.fromEntries(CATEGORIES.map((c) => [c.id, c.color])) as Record<Category, string>
 
 export { HOURS }
+// `opts`, `num`, `sel` and `tog` below are repeated in `clouds.ts`: this file imports that one at load, so it cannot import them back
 const opts = (...v: (string | [string, string])[]) =>
   v.map((o) => (typeof o === 'string' ? { value: o, label: o } : { value: o[0], label: o[1] }))
 
@@ -108,6 +126,7 @@ const SEARCH_NODE = ['t3.small.search', 'm6g.large.search', 'r6g.large.search', 
 const S3_KEY: Record<string, string> = { standard: 's3.standard', 'infrequent-access': 's3.ia', 'glacier-instant': 's3.gir', 'deep-archive': 's3.gda' }
 const EBS_TYPE = ['gp3', 'io2', 'st1', 'sc1']
 
+/** `count` things billed by the hour, all month. */
 const perHour = (label: string, count: number, rate: Rate | undefined, note?: string) => fixed(label, count, rate, HOURS, note)
 
 /** The nearest size that is actually sold, scaled by vCPU count: a stand-in, and labelled as one. */
@@ -117,6 +136,7 @@ function standIn(size: string, sold: (size: string) => Rate | undefined, name: (
   const base = near ? sold(near) : undefined
   return base && { usd: (base.usd * want) / SIZE_MULT[near], local: false, note: `${vendor} does not sell ${name(size)}. This is ${name(near)} scaled by size, as a stand-in.` }
 }
+/** An EC2 hourly rate that always tries to answer: the exact type, else Linux standing in for an unsold Windows, else the nearest size scaled. Every stand-in is non-local, so its line is an estimate. `undefined` only for a family the card does not have. */
 function ec2Price(q: Quote, family: string, size: string, windows: boolean): Rate | undefined {
   const type = `${family}.${size}`
   const exact = ec2Rate(q, type, windows)
@@ -128,6 +148,7 @@ function ec2Price(q: Quote, family: string, size: string, windows: boolean): Rat
   return standIn(size, (x) => ec2Rate(q, `${family}.${x}`), (x) => `${family}.${x}`)
 }
 const ENGINE_NAME: Record<string, string> = { postgres: 'PostgreSQL', mysql: 'MySQL', mariadb: 'MariaDB', aurora: 'Aurora', sqlserver: 'SQL Server Standard' }
+/** The same for RDS: the exact engine and class, else the nearest size of that engine scaled, else PostgreSQL on the same class. */
 function rdsPrice(q: Quote, engine: string, cls: string): Rate | undefined {
   const exact = rdsRate(q, engine, cls)
   if (exact) return engine === 'sqlserver' ? { ...exact, note: [exact.note, 'SQL Server Standard, licence included.'].filter(Boolean).join(' ') } : exact
@@ -150,14 +171,16 @@ export const REGIONS: { id: string; name: string; gcp: string; azure: string }[]
   { id: 'ap-northeast-1', name: 'Asia Pacific (Tokyo)', gcp: 'asia-northeast1', azure: 'japaneast' },
   { id: 'sa-east-1', name: 'South America (São Paulo)', gcp: 'southamerica-east1', azure: 'brazilsouth' },
 ]
+// anywhere else, a line priced from a US list price held in the catalog (not from the rate card) is marked as an estimate
 const US_REGIONS = new Set(['us-east-1', 'us-west-2'])
 
 /**
- * Commitment discounts for lines that are not on the AWS rate card, by cloud.
- * Google: resource-based committed use discounts for E2 and N2 machines (37% / 55%),
- * read from the Compute Engine pricing tables. Azure: reserved D-series v5 (see the
- * rate notes in `clouds.ts`). AWS lines off the card are not discounted at all,
- * because no reserved price was verified for them.
+ * Blanket commitment discounts by cloud, for lines that are not on the AWS rate card.
+ * `costOf` applies one only to a line that carries `commit: true`, and no cost
+ * function in the catalog sets that flag, so today this table changes no figure.
+ * The discounts that do apply are per machine type: published reserved rates on
+ * the rate card for AWS, and the `Commit` tables in `clouds.ts` (`GCE_CUD`, `AZ_RI`,
+ * Cloud SQL) for Google Cloud and Azure.
  */
 export const COMMIT_DISCOUNT: Record<Provider, Record<PricingModel, number>> = {
   aws: { ondemand: 0, commit1: 0, commit3: 0 },
@@ -172,6 +195,7 @@ const sel = (key: string, label: string, def: string, o: { value: string; label:
   ({ key, label, type: 'select', default: def, options: o, ...extra })
 const tog = (key: string, label: string, def = false): PropDef => ({ key, label, type: 'toggle', default: def })
 
+/** A definition in this file: AWS unless it is in the `external` category, which is cloud-neutral, and coloured by its category unless it says otherwise. */
 const def = (d: Omit<CompDef, 'color' | 'provider'> & { color?: string; provider?: Provider }): CompDef =>
   ({ provider: d.category === 'external' ? 'any' : 'aws', ...d, color: d.color ?? CAT[d.category] })
 
@@ -311,6 +335,7 @@ const DEFS: CompDef[] = [
       num('egress', 'Data transfer out', 50, 'GB'),
     ],
     cost: (p, q) => [
+      // the generated card has no `s3.gda` rate in any region, so Deep Archive is the one rate typed in here, and it is marked as an estimate
       fixed(`${p.storage} GB ${p.class}`, p.storage, flat(q, S3_KEY[p.class] ?? 's3.standard') ?? (p.class === 'deep-archive' ? { usd: 0.00099, local: false, note: 'Rate from the S3 pricing page; the price file loaded has no row for it.' } : undefined), 1, p.storage > 51200 ? 'Priced at the first-50-TB rate; storage beyond that is slightly cheaper.' : undefined),
       usage(`${p.requests}M GET requests`, p.requests * 1e6, flat(q, 's3.get')),
       usage(`${p.egress} GB to the internet`, p.egress, flat(q, 'egress'), 'aws.egress'),
@@ -532,7 +557,11 @@ const DEFS: CompDef[] = [
   }),
 ]
 
-/** the components priced from the AWS rate card, region by region; everything else carries a US list price */
+/**
+ * Everything defined in this file, captured before `clouds.ts` is appended: the components priced from the
+ * AWS rate card, region by region, plus the cloud-neutral ones. `costOf` returns their lines untouched.
+ * Everything else carries a US list price.
+ */
 const ON_CARD = new Set(DEFS.map((d) => d.type))
 for (const d of CLOUD_DEFS) DEFS.push({ ...d, color: d.color ?? CAT[d.category] })
 // keep each category together, clouds in a fixed order
@@ -540,8 +569,9 @@ const P_ORDER: Record<Provider, number> = { aws: 0, gcp: 1, azure: 2, any: 3 }
 DEFS.sort((a, b) => P_ORDER[a.provider] - P_ORDER[b.provider])
 
 export const CATALOG: Record<string, CompDef> = Object.fromEntries(DEFS.map((d) => [d.type, d]))
+/** Every definition, AWS first, then Google Cloud, Azure and the cloud-neutral ones, in the order they are defined within each. */
 export const CATALOG_LIST = DEFS
-export const FOOT = 2 // every component occupies a 2×2 footprint
+export const FOOT = 2 // every component occupies a 2×2 footprint, in cells, before its own `scale`
 
 // own keys only: a type called `constructor` or `toString` (from a hand-edited file) must not resolve to Object's members
 export const defOf = (type: string): CompDef => (Object.hasOwn(CATALOG, type) ? CATALOG[type] : CATALOG.block)
@@ -555,7 +585,7 @@ const NEAREST: Record<string, string> = {
   archive: 's3', graphql: 'apigw', scheduler: 'eventbridge', airflow: 'workflow', query: 'redshift', iot: 'sns', ddos: 'waf',
 }
 
-/** The first-choice component for a role in a given cloud, if that cloud has one. */
+/** The first-choice component for a role in a given cloud: the first one defined with that role, or with the nearest role that cloud does have. Cloud-neutral components are their own equivalent. `undefined` when there is no reasonable counterpart. */
 export function equivalent(type: string, provider: Provider): CompDef | undefined {
   const d = defOf(type)
   if (d.provider === 'any' || d.provider === provider) return d
@@ -569,7 +599,13 @@ export function equivalent(type: string, provider: Provider): CompDef | undefine
   return undefined
 }
 
-/** Re-home a blueprint on another cloud, carrying over every setting the two components share. */
+/**
+ * Re-home a blueprint on another cloud, carrying over every setting the two components share.
+ * A setting is shared when both sides have the same key and kind of control, and for a select, when
+ * the target offers the value. The metered keys `m0`, `m1`, ... are positional, so they are carried
+ * only when the labels match too. `moved` counts components that changed type, `kept` those on
+ * another cloud with no equivalent, which stay as they are. The input is not modified.
+ */
 export function translateDoc(doc: Doc, provider: Exclude<Provider, 'any'>): { doc: Doc; moved: number; kept: number } {
   let moved = 0, kept = 0
   const nodes = doc.nodes.map((n) => {
@@ -598,6 +634,7 @@ export function docProviders(doc: Doc): Exclude<Provider, 'any'>[] {
   return [...count.entries()].sort((a, b) => b[1] - a[1]).map((e) => e[0]) as Exclude<Provider, 'any'>[]
 }
 
+/** A fresh object holding every setting of a component type at its default. */
 export function defaultProps(type: string): Record<string, any> {
   return Object.fromEntries(defOf(type).props.map((p) => [p.key, p.default]))
 }
@@ -612,6 +649,12 @@ export interface NodeCost {
   monthly: number
 }
 
+/**
+ * The monthly list-price lines of one component, in USD, before any free allowance.
+ * Missing settings take their defaults. Lines of rate-card components are final as built. The others
+ * (Google Cloud, Azure, the AWS long tail) are priced from US list prices, so outside the US regions
+ * they are all marked as estimates, at the same amount: nothing is scaled by region.
+ */
 export function costOf(n: NodeT, region: string, model: PricingModel = 'ondemand'): NodeCost {
   const d = defOf(n.type)
   if (!d.cost) return { lines: [], monthly: 0 }
@@ -632,6 +675,8 @@ export function costOf(n: NodeT, region: string, model: PricingModel = 'ondemand
       if (abroad && d.provider !== 'any') notes.push('Priced at US rates: regional prices for this service are not loaded.')
       return { ...l, monthly, basis: abroad && d.provider !== 'any' ? 'estimate' : basis, note: notes.filter(Boolean).join(' ') || undefined }
     })
+    // lines that come to nothing are dropped, except one saying a price is missing, which must stay visible.
+    // The text matched here is the note written by `fixed` and `usage` in ./pricing.
     .filter((l) => l.monthly > 0.0001 || (l.basis === 'estimate' && l.monthly === 0 && /No published price/.test(l.note ?? '')))
   return { lines, monthly: lines.reduce((s, l) => s + l.monthly, 0) }
 }
@@ -649,6 +694,11 @@ export interface DocCost {
   total: number
 }
 
+/**
+ * What a whole blueprint costs a month in its own region. Each component is priced on its own at list price,
+ * then the account-wide free allowances are worked out once over every line together and taken off the total.
+ * So `perNode`, `byCategory` and `byBasis` all add up to `list`, not to `total`.
+ */
 export function docCost(doc: Doc, model: PricingModel = 'ondemand'): DocCost {
   const perNode = new Map<string, NodeCost>()
   const byCategory = new Map<Category, number>()
@@ -668,6 +718,7 @@ export function docCost(doc: Doc, model: PricingModel = 'ondemand'): DocCost {
   return { perNode, byCategory, byBasis, list, credits: free, total: Math.max(0, list - off) }
 }
 
+/** A USD amount for display: cents below $100, whole dollars above, billions always abbreviated, and anything from $10,000 too when `compact`. Anything that is not a finite number reads `$0.00`. */
 export function money(v: number, compact = false): string {
   if (!Number.isFinite(v)) return '$0.00'
   if (v < 0) return '-' + money(-v, compact)

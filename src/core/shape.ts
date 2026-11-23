@@ -15,8 +15,22 @@ import { type Doc, type EdgeT, type NodeT, type Side, centerOf, footOf } from '.
  *  - Moving one in the middle moves just that run; its neighbours stretch.
  *  - Pulling an end run past the corner of its component makes it step out and round.
  *  - A run moved level with the next one along merges with it, and the turn between them is gone.
+ *
+ * Everything here is a pure function from a track (or a document) to a new one; committing the result is the
+ * store's business. All coordinates are in cells on the ground.
  */
 
+/**
+ * A line's track: the sides it leaves and arrives by, and where each of its runs lies.
+ *
+ * A run is known by one number, its fixed coordinate: the y of a run that travels along x, the x of one along y.
+ * The first run's coordinate is the middle of side `fromSide` plus `fromAt`, the last one's the middle of `toSide`
+ * plus `toAt` (so 0 is the middle of the side, and the sign follows the ground axes), and `runs` holds those
+ * between, in order. Runs alternate between the two axes, the first travelling straight out of its side.
+ *
+ * Functions here that take a run index count every run, the two end runs included: 0 is the first, `runs[i]` is
+ * run `i + 1`, and `runs.length + 1` is the last. See `coordsOf`.
+ */
 export interface Track { fromSide: Side; toSide: Side; fromAt: number; toAt: number; runs: number[] }
 
 const horizontal = (s: Side) => s === 'e' || s === 'w'
@@ -33,6 +47,7 @@ const facingEachOther = (t: Track) => ({ e: 'w', w: 'e', n: 's', s: 'n' } as con
  * The track a drawn line is following, read off the line itself, and which run each of its
  * stretches belongs to. Works for any right-angled line: one the router planned, one already
  * shaped, or one from an older file that goes through points.
+ * `seg[i]` is the run index of the stretch from `pts[i]` to `pts[i + 1]`. Null for a direct or curved line.
  */
 export function trackOf(r: Routed, a: NodeT, b: NodeT): { track: Track; seg: number[] } | null {
   if (r.shape !== 'ortho' || r.pts.length < 2) return null
@@ -50,7 +65,7 @@ export function trackOf(r: Routed, a: NodeT, b: NodeT): { track: Track; seg: num
   }
 }
 
-/** Every run's coordinate, the two end runs included. */
+/** Every run's coordinate, the two end runs included: the array a run index points into. */
 export const coordsOf = (t: Track, a: NodeT, b: NodeT) => [centreOn(a, t.fromSide) + t.fromAt, ...t.runs, centreOn(b, t.toSide) + t.toAt]
 
 /** The band a single straight run between two facing sides can lie in, or null when they do not overlap. */
@@ -305,7 +320,7 @@ export const unshaped = (e: EdgeT, keepShape = true): EdgeT => {
   return keepShape && shape ? { ...rest, shape } : rest
 }
 
-/** Its path is the user's: the router follows it rather than planning one. */
+/** Its path is the user's: the router follows it rather than planning one. Narrower than `isShaped`, which also counts a pinned end. */
 export const isManual = (e: EdgeT) => !!(e.runs || e.via?.length)
 
 /**
@@ -355,7 +370,7 @@ export function bendAt(doc: Doc, id: string, at: [number, number]): Doc {
   return replaced(doc, withTrack(d.e, addBend(d.track, d.a, d.b, d.seg[i], Math.max(lo + 0.5, Math.min(hi - 0.5, at[along])))))
 }
 
-/** Take the turn at point `corner` of a connection's drawn line out of it. */
+/** Take the turn at point `corner` of a connection's drawn line out of it. `corner` is an index into the route's `pts`, not a run index. */
 export function unbend(doc: Doc, id: string, corner: number): Doc {
   const d = drawn(doc, id)
   if (!d || corner < 1 || corner > d.r.pts.length - 2 || d.seg[corner - 1] === d.seg[corner]) return doc
@@ -366,6 +381,7 @@ export function unbend(doc: Doc, id: string, corner: number): Doc {
 /** There is something to hand back to the router: a path the user gave it, or one planned earlier that could be planned again. */
 export const canReroute = (e: EdgeT) => isShaped(e) || !!e.plan
 
+/** The user has said something about where this line goes: a path of its own, or just a pinned side or place for an end. */
 export const isShaped = (e: EdgeT) => !!(e.via?.length || e.runs || e.fromSide || e.toSide || e.fromAt !== undefined || e.toAt !== undefined)
 
 /** A shaped connection moved bodily by (dx, dy), as when both its components are carried together. */

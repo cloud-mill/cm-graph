@@ -1,3 +1,8 @@
+/**
+ * Layout at six window sizes from 320 to 1920 pixels wide, with a mouse: nothing spills off screen, the controls
+ * stay reachable, and the layout changes between phone and desktop as the window does. Runs in the `responsive`
+ * project, and each group here sets its own viewport. Touch input is covered by the phone specs.
+ */
 import { TRIO, expect, test } from './fixtures'
 
 const SIZES = [

@@ -12,7 +12,18 @@ import type { Doc } from '../core/types'
 import { Modal, Segmented, Toggle, keys } from './atoms'
 import { shareUrl } from './actions'
 
+/*
+ * The editor's dialogs. Which one is open is the store's `modal`; each is mounted only while open, so
+ * everything typed or chosen in one is local state that starts fresh the next time. They read the
+ * store's settings (theme, camera) without subscribing to them, and write to the blueprint only through `apply`.
+ */
+
+/**
+ * A still picture of a blueprint, drawn by the same renderer as the canvas and framed to fit its box.
+ * `cam` (yaw and pitch in degrees) wins over `flat`; with neither it is the home isometric view.
+ */
 export function Preview({ doc, flat, cam, theme, labels = true }: { doc: Doc; flat?: boolean; cam?: { yaw: number; pitch: number }; theme: 'dark' | 'light'; labels?: boolean }) {
+  // keyed on the two angles, not on `cam`: callers pass a new object on every render
   const proj = useMemo(() => (cam ? makeCam(cam.yaw, cam.pitch) : makeProj(flat ? 1 : 0)), [flat, cam?.yaw, cam?.pitch])
   const b = useMemo(() => sceneBounds(doc, proj, 40), [doc, proj])
   return (
@@ -36,7 +47,8 @@ export function ExportDialog({ onClose }: { onClose: () => void }) {
   const s = useStore.getState()
   const [format, setFormat] = useState<Format>('png')
   const [theme, setTheme] = useState<'dark' | 'light'>(s.theme)
-  // 'cur' exports exactly what the orbit camera is showing
+  // 'cur' exports exactly what the orbit camera is showing. It is the starting choice when the camera is
+  // anywhere but the home view (yaw 45, pitch 35.264) or the plan view
   const custom = !s.flat && (Math.abs(s.yaw - 45) > 0.5 || Math.abs(s.pitch - 35.264) > 0.5)
   const [viewMode, setViewMode] = useState<'3d' | '2d' | 'cur'>(custom ? 'cur' : s.flat ? '2d' : '3d')
   const flat = viewMode === '2d'
@@ -54,8 +66,8 @@ export function ExportDialog({ onClose }: { onClose: () => void }) {
     try {
       const o = { flat, cam: camOpt, theme, background: bg, labels }
       // the image renderer is fetched the first time an image is exported
-      if (format === 'png') download(name + '.png', await (await import('../core/exporters')).pngBlob(doc, o, Number(scale)))
-      else if (format === 'svg') download(name + '.svg', (await import('../core/exporters')).svgString(doc, o).svg, 'image/svg+xml')
+      if (format === 'png') download(name + '.png', await (await import('../canvas/exporters')).pngBlob(doc, o, Number(scale)))
+      else if (format === 'svg') download(name + '.svg', (await import('../canvas/exporters')).svgString(doc, o).svg, 'image/svg+xml')
       else if (format === 'tf') download('main.tf', code)
       else if (format === 'json') download(name + '.cloudmill.json', code, 'application/json')
       else download(name + '-budget.csv', code, 'text/csv')
@@ -100,6 +112,12 @@ export function ExportDialog({ onClose }: { onClose: () => void }) {
   )
 }
 
+/**
+ * Terraform or blueprint JSON in, a diagram out. What is pasted is parsed on every change and shown,
+ * so nothing is applied unseen. With `onDoc` (the dashboard) the result is handed over to become a new
+ * blueprint; without it, it replaces the contents of the open one as a single undo step, keeping its
+ * name and region.
+ */
 export function ImportDialog({ onClose, onDoc }: { onClose: () => void; onDoc?: (d: Doc) => void }) {
   const s = useStore.getState()
   const [mode, setMode] = useState<'tf' | 'json'>('tf')
@@ -196,6 +214,8 @@ export function ShareDialog({ onClose }: { onClose: () => void }) {
   )
 }
 
+// The cheat sheet. It is written by hand, not generated: the keys themselves are handled in `useShortcuts`
+// (Editor.tsx) and the pointer gestures in canvas/Canvas.tsx, so a change there needs a change here
 const KEYS: [string, [string, string][]][] = [
   ['Tools', [['V', 'Select'], ['C', 'Connect components'], ['A', 'Draw an area'], ['T', 'Add a text label'], ['Esc', 'Cancel / deselect']]],
   ['Panels', [['[', 'Show / hide library'], [']', 'Show / hide inspector'], ['\\', 'Show / hide both'], ['/', 'Search the library'], ['↵', 'Rename the selection']]],
@@ -221,6 +241,10 @@ export function ShortcutsDialog({ onClose }: { onClose: () => void }) {
   )
 }
 
+/**
+ * Named versions of the open blueprint. The list is a local copy of what is in storage, re-read after
+ * each save or delete here. Restoring replaces the contents and region as one undo step, so it can be undone.
+ */
 export function HistoryDialog({ onClose }: { onClose: () => void }) {
   const doc = useStore((s) => s.doc)
   const s = useStore.getState()

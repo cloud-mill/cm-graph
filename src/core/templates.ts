@@ -1,7 +1,13 @@
+/**
+ * The starter templates, and the small builder they are written with.
+ * Each template is a function that draws a blueprint from scratch, so every
+ * use gets its own ids. Positions are hand-placed: nothing here runs layout.
+ */
 import { defaultProps, translateDoc } from './catalog'
 import { guessKind, kindInfo } from './links'
 import { type AreaKind, type Doc, type EdgeT, emptyDoc, uid } from './types'
 
+/** Builds a blueprint a piece at a time. Positions, and an area's width and depth, are in cells on the ground plane; `n` returns the new component's id for `e` to join. */
 export class Builder {
   doc: Doc
   constructor(name: string) {
@@ -164,6 +170,7 @@ function microservices() {
   return b.doc
 }
 
+/** An AWS template re-homed on another cloud, under a new name. Components with no equivalent there stay as they are. */
 const on = (cloud: 'gcp' | 'azure', doc: Doc, name: string): Doc => ({ ...translateDoc(doc, cloud).doc, name })
 
 export interface Template {
@@ -171,6 +178,7 @@ export interface Template {
   name: string
   blurb: string
   tags: string[]
+  /** draws the blueprint afresh: a new document with new ids on every call */
   make: () => Doc
 }
 

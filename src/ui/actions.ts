@@ -6,8 +6,16 @@ import { autoLayout, fitArea, inArea } from '../core/layout'
 import { addSnapshot, encodeShare } from '../core/storage'
 import { useStore } from '../core/store'
 
+/*
+ * Commands that more than one place offers: the toolbar, the context menu, the command palette, the
+ * phone dock, the inspector and the keyboard all call these, so each does the same thing and says the
+ * same thing wherever it is asked for. They are plain functions, not hooks: each reads the store at
+ * the moment it runs. Changes to the blueprint go through `apply`, so each is one undo step.
+ */
+
 const S = () => useStore.getState()
 
+/** Lay the whole blueprint out afresh and bring it into frame. Lines shaped by hand go back to the router, since the places they were shaped for are gone. Does nothing on an empty blueprint. */
 export function tidy() {
   const s = S()
   if (!s.doc.nodes.length) return
@@ -16,7 +24,7 @@ export function tidy() {
   s.toast('Layout tidied')
 }
 
-/** Swap every component for its equivalent on another cloud. One undo step. */
+/** Swap every component for its equivalent on another cloud, and turn the library to that cloud. One undo step. */
 export function translateTo(provider: 'aws' | 'gcp' | 'azure') {
   const s = S()
   const r = translateDoc(s.doc, provider)
@@ -32,7 +40,11 @@ export function selectAll() {
   S().select([...d.nodes, ...d.areas, ...d.labels].map((x) => x.id))
 }
 
-/** Drop a component at the centre of the viewport, avoiding occupied cells. */
+/**
+ * Add a component at the middle of the canvas that is in view (clear of panels and sheets), on whole
+ * cells. If that spot is taken it tries others nearby, three cells apart in rows of four; after 40
+ * tries it goes where it is. Returns the new component's id.
+ */
 export function addAtCenter(type: string) {
   const s = S()
   const [wx, wy] = groundAt()
@@ -42,17 +54,20 @@ export function addAtCenter(type: string) {
   return s.addNode(type, x, y)
 }
 
+/** Keep a named copy of the blueprint as it is now in its version history. Unnamed, it is called by the date and time. */
 export function saveVersion(name?: string) {
   const s = S()
   addSnapshot(s.doc, name || 'Version ' + new Date().toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }))
   s.toast('Version saved')
 }
 
+/** A link that carries the whole blueprint in its fragment (`#/s/...`); opening it makes a copy, see App. */
 export async function shareUrl() {
   const payload = await encodeShare(S().doc)
   return `${location.origin}${location.pathname}#/s/${payload}`
 }
 
+/** Resize an area round the components inside it. Nothing changes, and no undo step is made, when it is empty. */
 export function fitAreaToContents(id: string) {
   S().apply((d) => {
     const a = d.areas.find((x) => x.id === id)
@@ -63,6 +78,7 @@ export function fitAreaToContents(id: string) {
   })
 }
 
+/** Draw a new group round the selected components (other selected things are ignored) and select it. */
 export function wrapSelectionInArea() {
   const s = S()
   const nodes = s.doc.nodes.filter((n) => s.selection.includes(n.id))
