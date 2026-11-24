@@ -105,16 +105,19 @@ test.describe('camera and view', () => {
     // the wheel zooms about the cursor: the point under it stays put
     const at = await app.world(1, 1)
     await page.mouse.move(at.x, at.y)
-    await page.mouse.wheel(0, -300)
+    await app.notches(-3)
     await expect.poll(() => zoom(page)).toBeGreaterThan(start + 20)
     await page.waitForTimeout(400)
     const after = await app.world(1, 1)
     expect(Math.abs(after.x - at.x)).toBeLessThan(2)
     expect(Math.abs(after.y - at.y)).toBeLessThan(2)
 
-    for (let i = 0; i < 12; i++) await page.mouse.wheel(0, -1200)
+    // the limits: the keyboard takes it most of the way, the wheel to the stop
+    for (let i = 0; i < 6; i++) { await page.keyboard.press('+'); await page.waitForTimeout(220) }
+    await app.notches(-6)
     await expect.poll(() => zoom(page)).toBe(400)
-    for (let i = 0; i < 16; i++) await page.mouse.wheel(0, 1200)
+    for (let i = 0; i < 13; i++) { await page.keyboard.press('-'); await page.waitForTimeout(220) }
+    await app.notches(6)
     await expect.poll(() => zoom(page)).toBe(15)
   })
 

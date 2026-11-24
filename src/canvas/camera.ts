@@ -1,6 +1,7 @@
 import { ISO_PITCH, ISO_YAW, MAX_PITCH, MIN_PITCH, type Proj, easeInOut, makeCam, normYaw, pt, unproject } from '../core/iso'
 import { type View, useStore } from '../core/store'
 import { sceneBounds } from './Scene'
+import { MAX_K, MIN_K } from './touch'
 
 /**
  * The camera: where the view is (`view`: pan in px and zoom), which way it looks (`yaw`, `pitch`, in degrees), and every
@@ -94,6 +95,8 @@ export const headedTo = () => heading
 /** Ease the view (pan and zoom) to `to`. Takes over from a view animation, a glide or a turn already in flight. */
 export function animateView(to: View, ms = 420) {
   cancelAnimationFrame(raf)
+  // a wheel zoom still easing would go on setting the view against this one
+  stopZoom()
   heading = to
   cancelAnimationFrame(glideRaf); glideRaf = 0
   cancelAnimationFrame(orbitRaf)
@@ -136,7 +139,7 @@ export function fitView(ids?: string[], animate = true, maxK = 1.25) {
  */
 export function zoomBy(factor: number, cx = center()[0], cy = center()[1]) {
   const { view } = useStore.getState()
-  const k = Math.max(0.15, Math.min(4, view.k * factor))
+  const k = Math.max(MIN_K, Math.min(MAX_K, view.k * factor))
   return { k, x: cx - ((cx - view.x) * k) / view.k, y: cy - ((cy - view.y) * k) / view.k }
 }
 
@@ -258,23 +261,43 @@ export function inSight() {
 
 // ---- eased wheel zoom ---------------------------------------------------------
 let zoomRaf = 0
+let zoomLast = 0
 // the zoom the notches so far add up to: each new one builds on this, not on wherever the easing has got to
 let zoomTarget = 0
 let zoomAt: [number, number] = [0, 0]
-/** Wheel notches glide to their target instead of jumping; the point under the cursor stays put. */
+/**
+ * How quickly an eased zoom closes on its target, as a time constant in ms. Two thirds of the way in the first two frames
+ * and there, to the eye, within a tenth of a second: long enough to read as movement, too short to trail the hand.
+ */
+const ZOOM_EASE_MS = 30
+/** Stop an eased wheel zoom where it is. For anything else that is about to set the view, so the two do not pull against each other. */
+export function stopZoom() {
+  cancelAnimationFrame(zoomRaf); zoomRaf = 0
+}
+/**
+ * Zoom by `factor` about canvas position (cx, cy), gliding there. For the separate notches of a mouse wheel: each notch
+ * adds to a target and the view closes on it quickly, so a notch reads as one small smooth step and several in a row as
+ * one movement. The point under the cursor stays put throughout. The easing works in the logarithm of the zoom and by
+ * elapsed time, so it feels the same at every zoom level and on every display, and it ends as soon as it has arrived:
+ * nothing coasts on after the wheel stops. A notch the other way turns it round at once.
+ */
 export function smoothZoom(factor: number, cx: number, cy: number) {
   heading = null
   const s = useStore.getState()
   cancelAnimationFrame(raf)
   if (!zoomRaf) zoomTarget = s.view.k
-  zoomTarget = Math.max(0.15, Math.min(4, zoomTarget * factor))
+  zoomTarget = Math.max(MIN_K, Math.min(MAX_K, zoomTarget * factor))
   zoomAt = [cx, cy]
   if (zoomRaf) return
-  const step = () => {
+  zoomLast = performance.now()
+  const step = (now: number) => {
     const { view } = useStore.getState()
-    const diff = zoomTarget - view.k
-    const done = Math.abs(diff) < view.k * 0.002
-    const k = done ? zoomTarget : view.k + diff * 0.24
+    const dt = Math.max(0, Math.min(64, now - zoomLast))
+    zoomLast = now
+    const gap = Math.log(zoomTarget / view.k)
+    // within a twentieth of a percent it is there
+    const done = Math.abs(gap) < 0.0005
+    const k = done ? zoomTarget : view.k * Math.exp(gap * (1 - Math.exp(-dt / ZOOM_EASE_MS)))
     useStore.setState({ view: { k, x: zoomAt[0] - ((zoomAt[0] - view.x) * k) / view.k, y: zoomAt[1] - ((zoomAt[1] - view.y) * k) / view.k } })
     zoomRaf = done ? 0 : requestAnimationFrame(step)
   }

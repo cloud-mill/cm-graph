@@ -185,6 +185,14 @@ export class App {
     await this.click(await this.world(at[0], at[1]), opts)
   }
 
+  /**
+   * Turn the mouse wheel `n` notches where the pointer is: negative away from the user, which zooms in. Chrome reports
+   * every wheel event sent this way as exactly one notch, whatever distance is given, so several notches are several events.
+   */
+  async notches(n: number) {
+    for (let i = 0; i < Math.abs(n); i++) await this.page.mouse.wheel(0, n < 0 ? -100 : 100)
+  }
+
   selBar(): Locator { return this.page.locator('.sel-bar') }
   /** Ctrl with a key. The app takes Ctrl or Cmd for its shortcuts, so this works whatever the platform. */
   mod(key: string) { return this.page.keyboard.press('Control+' + key) }

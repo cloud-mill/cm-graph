@@ -4,18 +4,19 @@ import { MAX_PITCH, MIN_PITCH, type Proj, U, f, makeCam, mix, normYaw, poly, pt,
 import { costOf, defOf, defaultProps, docCost, money, nodeName } from '../core/catalog'
 import { traceFlow } from '../core/links'
 import { routeAll, routeToPoint } from '../core/router'
-import { arrowAt, lineOf, pathOf } from '../core/linePath'
+import { arrowAt, drawingOf, lineOf, pathOf } from '../core/linePath'
 import { type Track, alignRun, coordsOf, dragRun, isManual, nearestRun, simplify, snapRun, straightness, trackOf, withTrack } from '../core/shape'
 import { SIDES, doorNear, magnet, portsOf, reachTo } from '../core/snap'
 import { inArea, lineUp, spaceEvenly } from '../core/layout'
 import { type View, kindOf, moveItems, useStore, reended } from '../core/store'
 import { type AreaT, type Doc, type NodeT, type Side, MAX_SCALE, MIN_SCALE, centerOf, footOf, type EdgeT } from '../core/types'
-import { Scene, THEMES, brackets, useRoutes } from './Scene'
+import { EdgeCaption, Scene, THEMES, brackets, useRoutes } from './Scene'
 import { Model } from './models'
-import { animateView, beginOrbit, cam, center, fitView, flushFrame, glide, holdStill, hud, insets, onFrame, projNow, smoothZoom, zoomBy } from './camera'
+import { animateView, beginOrbit, cam, center, fitView, flushFrame, glide, holdStill, hud, insets, onFrame, projNow, smoothZoom, stopZoom, zoomBy } from './camera'
 import { type Finger, type Gesture, MAX_K, MIN_K, type Trail, fling, gestureMove, gestureRebase, gestureStart, isTwoFingerTap, track } from './touch'
 import { type Gap, type Guide, alignGuides, spacingGaps } from '../core/guides'
 import { QuickAdd } from './QuickAdd'
+import { readWheel } from './wheel'
 import { haptic } from '../ui/device'
 import { straightenLinks, wrapSelectionInArea } from '../ui/actions'
 import { ContextMenu, type MenuState } from '../ui/ContextMenu'
@@ -258,17 +259,12 @@ export function Canvas() {
       e.preventDefault()
       const r = el.getBoundingClientRect()
       const { view } = useStore.getState()
-      // A wheel event does not say what sent it, so it is guessed. A mouse wheel counts in lines or pages, or in whole steps
-      // of 40 px or more, straight up and down; it zooms, eased. Anything else is a trackpad: two fingers sliding pan, and a pinch,
-      // which browsers report as a wheel with Ctrl held, zooms at once, with no easing
-      const mouseWheel = e.deltaMode !== 0 || (e.deltaX === 0 && Math.abs(e.deltaY) >= 40 && Number.isInteger(e.deltaY))
-      if (e.ctrlKey || e.metaKey || mouseWheel) {
-        const dy = e.deltaMode === 1 ? e.deltaY * 30 : e.deltaY
-        if (mouseWheel) smoothZoom(Math.exp(-dy * 0.0022), e.clientX - r.left, e.clientY - r.top)
-        else useStore.setState({ view: zoomBy(Math.exp(-dy * 0.012), e.clientX - r.left, e.clientY - r.top) })
-      } else {
-        useStore.setState({ view: { ...view, x: view.x - e.deltaX, y: view.y - e.deltaY } })
-      }
+      // what the event means (a wheel's notches, a pinch, or two fingers sliding) is worked out in wheel.ts, which knows how
+      // differently the same movement is reported from one system to the next
+      const act = readWheel(e), cx = e.clientX - r.left, cy = e.clientY - r.top
+      if (act.kind === 'pan') useStore.setState({ view: { ...view, x: view.x + act.dx, y: view.y + act.dy } })
+      else if (act.eased) smoothZoom(act.factor, cx, cy)
+      else { stopZoom(); useStore.setState({ view: zoomBy(act.factor, cx, cy) }) }
     }
     el.addEventListener('wheel', onWheel, { passive: false })
     return () => el.removeEventListener('wheel', onWheel)
@@ -1032,9 +1028,6 @@ export function Canvas() {
           <pattern id="grid-major" x={-U * 2} y={-U * 2} width={U * 4} height={U * 4} patternUnits="userSpaceOnUse">
             <circle cx={U * 2} cy={U * 2} r={1.9} fill={theme.gridMajor} />
           </pattern>
-          <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
-            <feGaussianBlur stdDeviation="3.5" />
-          </filter>
         </defs>
         <g transform={`translate(${f(view.x)} ${f(view.y)}) scale(${view.k})`}>
           {showGrid && (
@@ -1093,7 +1086,9 @@ export function Canvas() {
               const a = byId.get(e.from), b = byId.get(e.to), r = routes.get(e.id)
               // while one of its ends is in the hand, the line is drawn where it is going, not where it was
               if (!a || !b || !r || wire?.relink?.id === e.id) return null
-              const d = lineOf(proj, r)
+              // the highlight is the scene's own drawing of this line, asked for again: the same path and the same arrowheads,
+              // so it lies exactly on the line it lights up and never reshapes it
+              const { line: d, heads } = drawingOf(proj, r, e.arrow)
               const editing = selection.length === 1 && tool === 'select'
               const P = (q: [number, number]) => pt(proj, q[0], q[1])
               // fingers get a generous invisible target around each small visible handle
@@ -1103,8 +1098,13 @@ export function Canvas() {
               return (
                 <g key={e.id} className={'edge-sel' + (held ? ' held' : '')}>
                   <g pointerEvents="none">
-                    <path d={d} fill="none" stroke={ACCENT} strokeWidth={e.width + 5} strokeOpacity={0.35} strokeLinecap="round" filter="url(#glow)" />
+                    {/* a soft halo in three plain strokes that fade outwards, then the line itself. No blur filter: a filter's box is sized from the
+                        path's bounds, which have no height on a level line, so a blurred glow came out clipped or lopsided there */}
+                    {[[11, 0.045], [7, 0.07], [3.5, 0.13]].map(([wide, op]) => <path key={wide} d={d} fill="none" stroke={ACCENT} strokeWidth={e.width + wide} strokeOpacity={op} strokeLinecap="round" strokeLinejoin="round" />)}
                     <path d={d} fill="none" stroke={ACCENT} strokeWidth={e.width} strokeLinecap="round" strokeLinejoin="round" />
+                    {heads.map((h, i) => <polygon key={i} points={poly(h.map((q) => pt(proj, q[0], q[1])))} fill={ACCENT} stroke={ACCENT} strokeWidth={1} strokeLinejoin="round" />)}
+                    {/* a caption that sits on a curve is drawn again over the highlight, so the line does not run through the words */}
+                    {r.shape === 'curved' && <EdgeCaption e={e} r={r} proj={proj} theme={theme} />}
                     {/* both ends of the selected connection are marked, so it is plain what it joins */}
                     {[a, b].map((n) => <path key={n.id} d={fp(n.x, n.y, 0.12, footOf(n))} fill="none" stroke={ACCENT} strokeWidth={2} strokeOpacity={0.8} strokeLinecap="round" strokeLinejoin="round" />)}
                   </g>

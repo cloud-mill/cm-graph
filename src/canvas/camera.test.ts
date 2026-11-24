@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ISO_PITCH, ISO_YAW, MAX_PITCH, MIN_PITCH, makeCam, pt } from '../core/iso'
 import { useStore } from '../core/store'
 import { docOf, node, resetStore } from '../test/helpers'
-import { ORBIT_SPEED, flushFrame, glide, holdStill, inSight, isTurned, onFrame, recover, animateView, beginOrbit, cam, center, chrome, fitView, groundAt, insets, orbitTo, projNow, setFlat, smoothZoom, turn, viewHome, viewTop, zoomBy } from './camera'
+import { ORBIT_SPEED, stopZoom, flushFrame, glide, holdStill, inSight, isTurned, onFrame, recover, animateView, beginOrbit, cam, center, chrome, fitView, groundAt, insets, orbitTo, projNow, setFlat, smoothZoom, turn, viewHome, viewTop, zoomBy } from './camera'
 import { sceneBounds } from './Scene'
 
 const S = () => useStore.getState()
@@ -89,6 +89,23 @@ describe('zoom', () => {
     smoothZoom(1e-9, 0, 0)
     run(3000)
     expect(S().view.k).toBe(0.15)
+  })
+  it('an eased zoom has arrived within a fifth of a second, and takes the same share of the way in the same time at any zoom', () => {
+    const after = (from: number, ms: number) => { useStore.setState({ view: { x: 0, y: 0, k: from } }); smoothZoom(1.1, 300, 200); run(ms); const k = S().view.k; run(2000); return Math.log(k / from) / Math.log(1.1) }
+    expect(after(1, 200)).toBeGreaterThan(0.97)
+    const near = after(0.3, 48), far = after(3, 48)
+    expect(near).toBeGreaterThan(0.4)
+    expect(near).toBeLessThan(0.9)
+    expect(far).toBeCloseTo(near, 6)
+  })
+  it('an eased zoom gives way to a view animation, and can be stopped where it is', () => {
+    smoothZoom(2, 300, 200); run(16)
+    animateView({ x: 5, y: 6, k: 0.5 }, 100); run(400)
+    expect(S().view).toEqual({ x: 5, y: 6, k: 0.5 })
+    smoothZoom(2, 300, 200); run(16); stopZoom()
+    const k = S().view.k
+    run(500)
+    expect(S().view.k).toBe(k)
   })
   it('animates the view to a target and can be redirected mid-flight', () => {
     animateView({ x: 100, y: 0, k: 2 }, 400)

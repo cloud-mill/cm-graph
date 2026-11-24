@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { FLAT, ISO, U } from './iso'
-import { type W, arrowAt, captionAnchor, curveOf, labelAnchor, lineOf, pathOf, route } from './linePath'
+import { HEAD, HEAD_TRIM, type Piece, type W, arrowAt, captionAnchor, curveOf, drawingOf, labelAnchor, lineOf, pathData, pathOf, piecesOf, pointFrom, route, shortened } from './linePath'
 
 const at = (x: number, y: number, scale?: number) => ({ x, y, scale })
 
@@ -122,9 +122,16 @@ describe('curves and the line of a routed connection', () => {
     expect(d).toMatch(/^M[^LQ]+C[^LQ]+$/)
     expect(d.startsWith('M0 0C')).toBe(true)
   })
-  it('is shortened along its own direction at either end, to leave room for an arrowhead', () => {
-    expect(curveOf(FLAT, curve, 0.5, 0)).toBe(curveOf(FLAT, [[0.5, 0], ...curve.slice(1)]))
-    expect(curveOf(FLAT, curve, 0, 0.5)).toBe(curveOf(FLAT, [...curve.slice(0, 3), [7.5, 4]]))
+  it('shortened at an end, it is still the same curve: only less of it is drawn', () => {
+    // the old way moved the end point back, which redrew the whole sweep; a line and its highlight then parted company
+    const whole = sample([curve]), cut = shortened([curve], 0.5, 0.5)
+    expect(cut).toHaveLength(1)
+    for (const q of sample(cut)) expect(nearest(whole, q)).toBeLessThan(0.03) // the samples are 0.045 apart; moving the end point strayed by ten times that
+    // half a cell has gone from each end, measured along the curve
+    expect(Math.hypot(cut[0][0][0], cut[0][0][1])).toBeCloseTo(0.5, 1)
+    expect(Math.hypot(cut[0][3][0] - 8, cut[0][3][1] - 4)).toBeCloseTo(0.5, 1)
+    expect(curveOf(FLAT, curve, 0.5, 0.5)).toBe(pathData(FLAT, cut))
+    expect(curveOf(FLAT, curve, 0, 0)).toBe(curveOf(FLAT, curve))
   })
   it('given anything but four points it is drawn as a plain line', () => {
     expect(curveOf(FLAT, [[0, 0], [4, 0]])).toBe(pathOf(FLAT, [[0, 0], [4, 0]]))
@@ -135,9 +142,89 @@ describe('curves and the line of a routed connection', () => {
     // a direct line at an angle is one stroke from end to end
     expect(lineOf(FLAT, { pts: [[0, 0], [6, 3]], shape: 'direct' })).toMatch(/^M0 0L[\d.]+ [\d.]+$/)
   })
-  it('a caption sits halfway round a curve, reading along whichever way it mostly goes', () => {
-    expect(captionAnchor({ pts: curve, shape: 'curved' })).toEqual({ at: [4, 2], dir: 'x' })
+  it('a caption sits on a curve halfway along it, reading along whichever way the curve is going there', () => {
+    const c = captionAnchor({ pts: curve, shape: 'curved' })
+    expect(c).toMatchObject({ dir: 'x', on: true })
+    expect(c.at[0]).toBeCloseTo(4, 2); expect(c.at[1]).toBeCloseTo(2, 2)
     expect(captionAnchor({ pts: [[0, 0], [0, 2], [1, 6], [1, 8]], shape: 'curved' }).dir).toBe('y')
     expect(captionAnchor({ pts: [[0, 0], [8, 0], [8, 2]], shape: 'ortho' })).toEqual(labelAnchor([[0, 0], [8, 0], [8, 2]]))
+  })
+})
+
+/** points along a row of pieces, close together, for comparing one path with another */
+function sample(pieces: Piece[]): W[] {
+  const out: W[] = []
+  for (const q of pieces) for (let i = 0; i <= 200; i++) {
+    const t = i / 200
+    let row = q
+    while (row.length > 1) row = row.slice(1).map((b, k) => [row[k][0] + (b[0] - row[k][0]) * t, row[k][1] + (b[1] - row[k][1]) * t] as W)
+    out.push(row[0])
+  }
+  return out
+}
+const nearest = (path: W[], q: W) => Math.min(...path.map((p) => Math.hypot(p[0] - q[0], p[1] - q[1])))
+
+describe('one geometry for every layer of a line', () => {
+  const bends: W[] = [[0, 0], [4, 0], [4, 0.5], [8, 0.5], [8, 6]]
+  it('a right-angled line is straight stretches joined by rounded corners, and two corners on a short run meet in its middle', () => {
+    const pieces = piecesOf(bends)
+    expect(pieces.map((q) => q.length)).toEqual([2, 3, 2, 3, 2, 3, 2])
+    // the run between the first two corners is half a cell: each corner takes a quarter, and nothing straight is left of it
+    expect(pieces[1][2]).toEqual([4, 0.25])
+    expect(pieces[3][0]).toEqual([4, 0.25])
+    expect(pathData(FLAT, pieces)).toBe(pathOf(FLAT, bends))
+    expect(piecesOf([[1, 1]])).toEqual([])
+    expect(pathData(FLAT, [])).toBe('')
+  })
+  it('a shortened right-angled line keeps the corners of the whole one, even when the cut falls inside a corner', () => {
+    const tight: W[] = [[0, 0], [4, 0], [4, 0.3]]
+    const whole = sample(piecesOf(tight))
+    for (const trim of [0.1, 0.26, 0.4]) for (const q of sample(shortened(piecesOf(tight), 0, trim))) expect(nearest(whole, q)).toBeLessThan(0.01)
+    // a cut longer than the last stretch goes on into the corner before it
+    expect(shortened(piecesOf(tight), 0, 0.26).at(-1)).toHaveLength(3)
+    expect(shortened(piecesOf(tight), 0.26, 0)[0][0]).toEqual([0.26, 0])
+  })
+  it('never cuts a line away to nothing, and leaves it alone when nothing is asked', () => {
+    const short = piecesOf([[0, 0], [0.4, 0]])
+    const left = shortened(short, 5, 5)
+    expect(left).toHaveLength(1)
+    expect(left[0][1][0] - left[0][0][0]).toBeCloseTo(0.04, 5)
+    expect(shortened(short)).toBe(short)
+    expect(shortened([])).toEqual([])
+  })
+  it('finds the point a given distance along a line from either end', () => {
+    const pieces = piecesOf([[0, 0], [10, 0]])
+    expect(pointFrom(pieces, 3, false)).toEqual([3, 0])
+    expect(pointFrom(pieces, 3, true)).toEqual([7, 0])
+    expect(pointFrom(pieces, 99, true)).toEqual([0, 0])
+    const round = piecesOf([[0, 0], [4, 0], [4, 4]])
+    const mid = pointFrom(round, 4, false)
+    expect(nearest(sample(round), mid)).toBeLessThan(0.01)
+    expect(pointFrom([], 1, false)).toEqual([0, 0])
+  })
+  it('the drawing of a connection: the line stops inside its arrowhead and lies on the whole path, and the head lies along the curve', () => {
+    const r = { pts: [[2, 1], [5, 1], [3, 9], [6, 9]] as W[], shape: 'curved' as const }
+    const g = drawingOf(FLAT, r, 'both')
+    expect(g.full).toBe(lineOf(FLAT, r))
+    expect(g.line).toBe(lineOf(FLAT, r, HEAD_TRIM, HEAD_TRIM))
+    expect(g.line).not.toBe(g.full)
+    expect(g.heads).toHaveLength(2)
+    // each head has its tip on the end of the line and its base centred on the curve, one head's length back
+    const whole = sample([r.pts])
+    for (const [tip, left, right] of g.heads) {
+      expect(nearest([r.pts[0], r.pts[3]], tip)).toBe(0)
+      expect(nearest(whole, [(left[0] + right[0]) / 2, (left[1] + right[1]) / 2])).toBeLessThan(0.01)
+      expect(Math.hypot((left[0] + right[0]) / 2 - tip[0], (left[1] + right[1]) / 2 - tip[1])).toBeCloseTo(HEAD, 5)
+    }
+    expect(drawingOf(FLAT, r, 'end').heads).toHaveLength(1)
+    expect(drawingOf(FLAT, r, 'none')).toMatchObject({ heads: [], line: g.full })
+    expect(drawingOf(FLAT, { pts: [[0, 0]], shape: 'ortho' }, 'end')).toEqual({ full: '', line: '', heads: [] })
+  })
+  it('asked again for the same route, camera and arrows it hands back the very same drawing', () => {
+    const r = { pts: [[0, 0], [4, 0], [4, 4]] as W[], shape: 'ortho' as const }
+    const g = drawingOf(FLAT, r, 'end')
+    expect(drawingOf(FLAT, r, 'end')).toBe(g)
+    expect(drawingOf(FLAT, r, 'both')).not.toBe(g)
+    expect(drawingOf(ISO, r, 'both').full).not.toBe(g.full)
   })
 })

@@ -96,11 +96,11 @@ test.describe('a run let go a hair short of level is level', () => {
     expect((await saved(app)).runs).toHaveLength(3)
   })
 
-  for (const [name, wheel] of [['zoomed in', -260], ['zoomed out', 320]] as const) {
+  for (const [name, wheel] of [['zoomed in', -3], ['zoomed out', 4]] as const) {
     test(`${name}, it is the same few pixels on screen`, async ({ page, app }) => {
       await open(page, app)
       const p = await at(page), before = await app.cells(1, 0)
-      await page.mouse.move(p.x, p.y); await page.mouse.wheel(0, wheel); await page.waitForTimeout(500)
+      await page.mouse.move(p.x, p.y); await app.notches(wheel); await page.waitForTimeout(500)
       const after = await app.cells(1, 0)
       expect(Math.abs(Math.hypot(after.x, after.y) / Math.hypot(before.x, before.y) - 1)).toBeGreaterThan(0.15)
       await lift(page, app, 3)

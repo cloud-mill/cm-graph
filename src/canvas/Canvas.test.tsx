@@ -115,7 +115,20 @@ describe('selecting', () => {
     down(hit('edge', 'e'), 4, 1); up(4, 1)
     expect(S().selection).toEqual(['e'])
     expect(S().past).toHaveLength(0)
-    expect(document.querySelector('.overlay path[filter]')).not.toBeNull() // highlighted
+    expect(document.querySelector('.edge-sel path')).not.toBeNull() // highlighted
+  })
+  it('the highlight of a selected connection is the line itself, path for path, whatever shape it is drawn in', () => {
+    for (const extra of [{ shape: 'curved' as const }, { fromSide: 'e' as const, toSide: 'w' as const, fromAt: 0, toAt: 0, runs: [5, 1.2, 6] }, { shape: 'direct' as const }, { arrow: 'both' as const, shape: 'curved' as const }]) {
+      cleanup()
+      mount(docOf([node('a'), node('b', 'ec2', 8, 5)], [edge('e', 'a', 'b', extra)]), { selection: ['e'] })
+      const line = document.querySelector('.edge .edge-line')!.getAttribute('d')
+      const glow = [...document.querySelectorAll('.edge-sel > g > path')].slice(0, 4).map((p) => p.getAttribute('d'))
+      expect(line).toBeTruthy()
+      expect(glow).toEqual([line, line, line, line])
+      // and its arrowheads are the scene's own, one for one
+      const heads = (root: string) => [...document.querySelectorAll(root + ' polygon')].map((p) => p.getAttribute('points'))
+      expect(heads('.edge-sel').slice(0, heads('.edge').length)).toEqual(heads('.edge'))
+    }
   })
   it('a connection can be taken hold of without selecting it first: pressing picks it, pulling moves the run under the pointer', () => {
     mount(docOf([node('a'), node('b', 'ec2', 8, 4)], [edge('e', 'a', 'b')]))
@@ -491,15 +504,36 @@ describe('panning and zooming', () => {
     expect(S().view).toMatchObject({ x: 570, y: 287.5, k: 1 })
     const before = (200 - S().view.x) / S().view.k
     fireEvent.wheel(svg(), { deltaY: -12.5, ctrlKey: true, clientX: 200, clientY: 150 })
-    expect(S().view.k).toBeCloseTo(Math.exp(0.15))
+    // a pinch is followed at once, a hundredth of the scale per unit reported
+    expect(S().view.k).toBeCloseTo(Math.exp(0.125), 10)
     expect((200 - S().view.x) / S().view.k).toBeCloseTo(before)
   })
-  it('eases a mouse wheel notch towards the cursor', async () => {
+  it('one notch of a mouse wheel is a tenth, eased towards the cursor, and a notch back returns exactly', async () => {
     mount()
+    const under = () => [(600 - S().view.x) / S().view.k, (300 - S().view.y) / S().view.k]
+    const was = under()
     fireEvent.wheel(svg(), { deltaY: -100, clientX: 600, clientY: 300 })
-    await waitFor(() => expect(S().view.k).toBeCloseTo(Math.exp(0.22), 3), { timeout: 3000 })
-    fireEvent.wheel(svg(), { deltaY: 3, deltaMode: 1, clientX: 600, clientY: 300 }) // line-based wheels
-    await waitFor(() => expect(S().view.k).toBeCloseTo(Math.exp(0.22 - 0.198), 3), { timeout: 3000 })
+    // nothing has leapt: the step is taken over the next few frames
+    expect(S().view.k).toBe(1)
+    await waitFor(() => expect(S().view.k).toBeCloseTo(1.1, 6), { timeout: 3000 })
+    expect(under()[0]).toBeCloseTo(was[0], 6); expect(under()[1]).toBeCloseTo(was[1], 6)
+    fireEvent.wheel(svg(), { deltaY: 3, deltaMode: 1, clientX: 600, clientY: 300 }) // a wheel that counts in lines: three to the notch
+    await waitFor(() => expect(S().view.k).toBeCloseTo(1, 6), { timeout: 3000 })
+    expect(under()[0]).toBeCloseTo(was[0], 6)
+  })
+  it('several notches in quick succession add up, and turning the wheel back reverses at once', async () => {
+    mount()
+    for (let i = 0; i < 4; i++) fireEvent.wheel(svg(), { deltaY: -100, clientX: 600, clientY: 300 })
+    fireEvent.wheel(svg(), { deltaY: 100, clientX: 600, clientY: 300 })
+    await waitFor(() => expect(S().view.k).toBeCloseTo(1.1 ** 3, 6), { timeout: 3000 })
+  })
+  it('a pinch arriving while a wheel zoom is still easing takes over, and the easing does not pull against it', async () => {
+    mount()
+    fireEvent.wheel(svg(), { deltaY: -300, clientX: 600, clientY: 300 })
+    fireEvent.wheel(svg(), { deltaY: -5, ctrlKey: true, clientX: 600, clientY: 300 })
+    const k = S().view.k
+    await new Promise((r) => setTimeout(r, 120))
+    expect(S().view.k).toBe(k)
   })
 })
 

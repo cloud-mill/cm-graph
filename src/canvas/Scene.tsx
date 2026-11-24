@@ -2,7 +2,7 @@ import { memo, useMemo, useState } from 'react'
 import { type Proj, type Pt, U, alpha, f, planeMatrixUV, poly, pt, upright, uprightAlong } from '../core/iso'
 import { captionOf, type Flow } from '../core/links'
 import { type Routed, routeAll } from '../core/router'
-import { arrowAt, captionAnchor, lineOf } from '../core/linePath'
+import { captionAnchor, drawingOf } from '../core/linePath'
 import { nodeColor, nodeName } from '../core/catalog'
 import { type AreaT, type Doc, type EdgeT, type LabelT, type NodeT, centerOf, footOf } from '../core/types'
 import { Model, SceneDefs } from './models'
@@ -109,21 +109,32 @@ const AreaView = memo(function AreaView({ a, proj }: { a: AreaT; proj: Proj; the
   )
 })
 
+/**
+ * A connection's caption, lying on the ground and reading upright from wherever the camera is. On a curve it is centred
+ * on the line, with a halo of the background colour that parts the line around it. The canvas draws it a second time
+ * over a selected curve's highlight, which would otherwise run straight through the words.
+ */
+export const EdgeCaption = memo(function EdgeCaption({ e, r, proj, theme }: { e: EdgeT; r: Routed; proj: Proj; theme: SceneTheme }) {
+  const caption = captionOf(e)
+  if (!caption || r.pts.length < 2) return null
+  const la = captionAnchor(r), lb = uprightAlong(proj, la.dir)
+  return (
+    <text transform={planeMatrixUV(proj, la.at[0], la.at[1], 0, 1 / U, lb.u, lb.v)} fontFamily={MONO} fontSize={8.5} fontWeight={500} letterSpacing={0.5} fill={theme.textDim}
+      textAnchor="middle" y={la.on ? 3 : -7} stroke={theme.bg} strokeWidth={la.on ? 6 : 4} paintOrder="stroke" strokeLinejoin="round" pointerEvents="none">
+      {caption.toUpperCase()}
+    </text>
+  )
+})
+
 const EdgeView = memo(function EdgeView({ e, r, proj, theme, flow, state }: { e: EdgeT; r: Routed; proj: Proj; theme: SceneTheme; flow?: boolean; state?: 'on' | 'off' }) {
   const pts = r.pts
   const n = pts.length
   if (n < 2) return null
   const color = e.color || theme.edge
-  const hasEnd = e.arrow !== 'none'
   const hasStart = e.arrow === 'both'
-  const d = lineOf(proj, r, hasStart ? 0.26 : 0, hasEnd ? 0.26 : 0)
-  const full = lineOf(proj, r)
+  // every layer below is drawn from this one geometry, so none of them can stray from the others
+  const { full, line: d, heads } = drawingOf(proj, r, e.arrow)
   const dash = e.style === 'dashed' ? '5 5' : e.style === 'dotted' ? '0.5 5' : undefined
-  const caption = captionOf(e)
-  const la = caption ? captionAnchor(r) : null
-  const lb = la ? uprightAlong(proj, la.dir) : null
-  const arrow = (tip: [number, number], from: [number, number]) =>
-    <polygon points={poly(arrowAt(tip, from, 0.34).map((q) => pt(proj, q[0], q[1]) as Pt))} fill={color} stroke={color} strokeWidth={1} strokeLinejoin="round" pointerEvents="none" />
   // a line on a path being followed always shows its direction; a dependency never moves, because nothing travels along it
   // and while a flow is being followed, only its own lines move
   const moving = (state ? state === 'on' : !!flow) && e.kind !== 'dependency' && e.arrow !== 'none'
@@ -133,15 +144,9 @@ const EdgeView = memo(function EdgeView({ e, r, proj, theme, flow, state }: { e:
       <path d={full} fill="none" stroke={theme.bg} strokeOpacity={0.85} strokeWidth={e.width + 5} strokeLinecap="round" strokeLinejoin="round" pointerEvents="none" />
       <path d={d} className="edge-line" fill="none" stroke={color} strokeWidth={e.width * 0.75} strokeDasharray={dash} strokeLinecap="round" strokeLinejoin="round" pointerEvents="none" />
       {moving && <path d={full} className={'edge-flow' + (hasStart ? ' both' : '')} fill="none" stroke={e.color || theme.flow} strokeWidth={e.width + 0.4} strokeLinecap="round" pointerEvents="none" />}
-      {hasEnd && arrow(pts[n - 1], pts[n - 2])}
-      {hasStart && arrow(pts[0], pts[1])}
+      {heads.map((h, i) => <polygon key={i} points={poly(h.map((q) => pt(proj, q[0], q[1]) as Pt))} fill={color} stroke={color} strokeWidth={1} strokeLinejoin="round" pointerEvents="none" />)}
       <path d={full} className="edge-hit" fill="none" stroke="transparent" strokeWidth={16} strokeLinejoin="round" data-kind="edge" data-id={e.id} style={{ cursor: 'pointer' }} />
-      {la && lb && (
-        <text transform={planeMatrixUV(proj, la.at[0], la.at[1], 0, 1 / U, lb.u, lb.v)} fontFamily={MONO} fontSize={8.5} fontWeight={500} letterSpacing={0.5} fill={theme.textDim}
-          textAnchor="middle" y={-7} stroke={theme.bg} strokeWidth={4} paintOrder="stroke" strokeLinejoin="round" pointerEvents="none">
-          {caption.toUpperCase()}
-        </text>
-      )}
+      <EdgeCaption e={e} r={r} proj={proj} theme={theme} />
     </g>
   )
 })
