@@ -66,19 +66,24 @@ const view = (page: Page) => page.evaluate((): View => {
 
 /**
  * Open the scene and take hold of the clock: from here time passes only when a test says so, a frame at a time.
- * Two things that change by themselves or by where the pointer is are put out of the picture first. Neither is what
- * these tests are about, and both are meant to stand still while the view moves and pick up again at rest: the dots
- * that run along the lines, and the marks that answer the pointer.
+ * Two things that change by themselves or by where the pointer is are held still first. Neither is what these tests are
+ * about: the dots that run along the lines (drawn, but not moving), and the marks that answer the pointer.
+ *
+ * The canvas is drawn one of two ways (STEADY_MAX in Canvas.tsx), and what is on the screen has to be right in both.
+ * With `traffic` off nothing on the scene moves by itself and it is layered: it keeps a surface of its own, given up
+ * for the length of a zoom. With traffic on, a scene as small as this one is steady: drawn whole at every frame.
  */
-async function held(page: Page, app: App, doc: SeedDoc = scene()) {
+async function held(page: Page, app: App, doc: SeedDoc = scene(), traffic = false) {
   await keepFrames(page)
+  if (!traffic) await page.addInitScript(() => { try { localStorage.setItem('stratum:pref:flow', 'false') } catch { /* no storage: traffic stays on */ } })
   await page.clock.install()
   await app.open(doc)
-  await page.addStyleTag({ content: '.edge-flow { display: none !important } .hover-mark, .door { visibility: hidden !important } .nd:hover .nd-body { filter: none !important }' })
+  await page.addStyleTag({ content: '.edge-flow { animation: none !important } .hover-mark, .door { visibility: hidden !important } .nd:hover .nd-body { filter: none !important }' })
   await rested(page)
   await page.clock.pauseAt(new Date(Date.now() + 2000))
   await frames(page, 2)
 }
+const steady = (page: Page) => page.locator('.canvas-wrap').evaluate((el) => el.classList.contains('steady'))
 
 /**
  * The browser's own frames, kept out of the clock's reach: taking hold of the clock replaces `requestAnimationFrame`
@@ -130,7 +135,7 @@ async function shown(page: Page) {
  * The frame on screen now, with the zoom still under way, against the frame once the view has come to rest: the same
  * picture, and neither softer than the other. Returns how the view stood while it was under way.
  */
-async function sameAtRest(page: Page, what: string) {
+async function sameAtRest(page: Page, what: string, layered = true) {
   const during = await view(page)
   expect(during.viewing, `${what}: still under way when photographed`).toBe(true)
   // the very first look, whatever the browser had got to, and then the frame it settles on
@@ -140,7 +145,7 @@ async function sameAtRest(page: Page, what: string) {
   await page.clock.runFor(400)
   const after = await view(page)
   expect(after.viewing, `${what}: at rest`).toBe(false)
-  expect(after.own, `${what}: the layer has its own surface back at rest`).toBe(true)
+  expect(after.own, `${what}: ${layered ? 'the layer has its own surface back at rest' : 'drawn the steady way, the scene keeps no surface of its own'}`).toBe(layered)
   // coming to rest moves nothing: where the last frame of the zoom put the scene is where it stays
   expect([after.layer, after.zoom], `${what}: nothing moves at rest`).toEqual([during.layer, during.zoom])
   const b = await shown(page)
@@ -221,6 +226,47 @@ test.describe('sharp at every frame of a zoom', () => {
     expect(during.zooming, 'not drawn with the page at 100%').toBe(false)
     expect(during.own).toBe(true)
     await sameAtRest(page, 'arriving at exactly 100%')
+  })
+
+  test('drawn the steady way (a small scene with traffic running): the frame while a zoom is under way is the picture it comes to rest on', async ({ page, app }) => {
+    await held(page, app, scene(), true)
+    expect(await steady(page)).toBe(true)
+    for (const [what, dy, n] of [['a slow pinch in', -2, 24], ['a fast pinch out', 11, 9]] as const) {
+      for (let i = 0; i < n; i++) { await pinch(page, dy); await frames(page) }
+      await frames(page, 2)
+      const v = await sameAtRest(page, 'steady, ' + what, false)
+      expect(v.own).toBe(false)
+    }
+    await page.mouse.move(MID.x + 6, MID.y + 4)
+    await frames(page, 2)
+    await app.notches(-3)
+    await glided(page)
+    await sameAtRest(page, 'steady, three notches of the wheel in', false)
+    // arriving at exactly 100% is nothing special here: the scene is drawn with the page at every zoom
+    await page.locator('.zoom-pct').click()
+    await glided(page)
+    expect((await view(page)).k).toBe(1)
+    await sameAtRest(page, 'steady, arriving at exactly 100%', false)
+  })
+
+  test('with more to draw the canvas is layered, traffic and all: the frame while a zoom is under way is the picture it comes to rest on', async ({ page, app }) => {
+    // forty-eight components in a block, joined in rows: past what is drawn the steady way
+    const nodes = Array.from({ length: 48 }, (_, i) => ({ id: 'n' + i, type: ['ec2', 'rds', 's3', 'sqs', 'lambda'][i % 5], x: (i % 8) * 4, y: Math.floor(i / 8) * 4, name: 'svc-' + i }))
+    const edges = nodes.filter((_, i) => i % 8 !== 7).map((n, i) => ({ id: 'e' + i, from: n.id, to: 'n' + (Number(n.id.slice(1)) + 1), style: 'solid', arrow: 'end', width: 2 }))
+    await held(page, app, makeDoc(nodes as any, { edges: edges as any }), true)
+    expect(await steady(page)).toBe(false)
+    // close enough in for the dots to be drawn
+    await page.locator('.zoom-pct').click()
+    await glided(page)
+    await page.clock.runFor(400)
+    expect(await page.locator('.edge-flow').count()).toBeGreaterThan(30)
+    // (nothing in the scene has a surface to itself: split over several, a scene is not pixel for pixel the scene drawn on one)
+    expect(await page.locator('.canvas-layer').evaluateAll((els) => els.filter((el) => { const st = getComputedStyle(el); return st.transform !== 'none' || st.willChange !== 'auto' }).length)).toBe(0)
+    for (const [what, dy, n] of [['a slow pinch in', -2, 20], ['a fast pinch out', 9, 8]] as const) {
+      for (let i = 0; i < n; i++) { await pinch(page, dy); await frames(page) }
+      await frames(page, 2)
+      await sameAtRest(page, 'layered with traffic, ' + what)
+    }
   })
 
   test('a pan in the same breath as a pinch is drawn the same way, and is the picture it comes to rest on', async ({ page, app }) => {

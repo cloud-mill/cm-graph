@@ -312,6 +312,10 @@ select.input {
    three to four times the work of drawing what can be seen. Drawn with the rest of the page, only what is on the
    canvas is drawn. The promise is made again once the view has come to rest (see `rest` in Canvas.tsx) */
 .canvas-wrap[data-zooming] .canvas-pan { will-change: auto; }
+/* Nor is it made at all where the canvas is drawn the steady way (see STEADY_MAX in Canvas.tsx): a small scene with
+   traffic running is drawn again at every frame as it is, so a surface kept for it would be drawn twice over and
+   slid about for nothing, and frames that cost different amounts reach the screen unevenly */
+.canvas-wrap.steady .canvas-pan { will-change: auto; }
 /* What carries the zoom (and the fraction of a pixel the view is off a whole one): inside the layer, so a change of
    zoom is a change to what the layer holds, and the browser draws every shape again at the new scale */
 .canvas-zoom { position: absolute; left: 0; top: 0; width: 0; height: 0; transform-origin: 0 0; }
@@ -359,7 +363,7 @@ select.input {
 .intro .nd-body { animation: nd-rise 0.7s var(--ease) both; animation-delay: calc(min(var(--i), 30) * 34ms + 60ms); }
 .intro .nd-ao, .intro .nd-label { animation: fade 0.5s both; animation-delay: calc(min(var(--i), 30) * 34ms + 260ms); }
 .intro .edge, .intro .edge-caption { animation: fade 0.7s 0.55s both; }
-.intro .edge-flow { animation: flow 2.1s steps(63) infinite, fade 0.7s 0.55s both; }
+.intro .edge-flow { animation: flow 2.1s linear infinite, fade 0.7s 0.55s both; }
 @keyframes nd-rise { from { opacity: 0; transform: translateY(-22px); } }
 .fx .nd-new .nd-body { animation: nd-drop 0.25s both; }
 .fx .nd-new .nd-ao { animation: fade 0.4s both; }
@@ -385,15 +389,23 @@ select.input {
 .canvas-layer .edge-hit { stroke-width: calc(16px / var(--k, 1)); }
 @media (pointer: coarse) { .canvas-layer .edge-hit { stroke-width: calc(32px / var(--k, 1)); } }
 .canvas-wrap:not([data-viewing]) .edge:hover .edge-line { stroke: var(--text); }
-/* Traffic drifts at about 23 px a second, so it is moved thirty times a second and not sixty: each step is under a pixel
-   either way, and every step redraws everything it crosses. */
-.edge-flow { stroke-dasharray: 1.5 46; animation: flow 2.1s steps(63) infinite; }
-/* with more in view each step costs more to draw, so there are fewer of them: twenty a second, then twelve (see Canvas.tsx) */
+/* Traffic moves at every frame the screen shows, where there is little enough on the canvas for the whole of it to be
+   drawn again that often: every frame of traffic draws again whatever a dot crosses, which with lines everywhere is
+   all of it. (It was once moved in steps of thirty a second at any size: the steps could be seen, and came unevenly.) */
+.edge-flow { stroke-dasharray: 1.5 46; animation: flow 2.1s linear infinite; }
+/* With more in view than that a frame of it costs more than built-in graphics can draw sixty times a second with
+   anything to spare (measured: sixty components, every frame, kept the graphics card busy 99% of the time and the dots
+   came unevenly all the same), so it steps: twenty times a second, then twelve (see Canvas.tsx). A surface of its own
+   for traffic would make every frame cheap at any size, and was tried: but a scene split over three surfaces is not,
+   pixel for pixel, the scene drawn on one, and a zoom has to be drawn on one */
 .flow-20 .edge-flow { animation-timing-function: steps(42); }
 .flow-12 .edge-flow { animation-timing-function: steps(25); }
-/* traffic holds still while the view or a component is being moved, so every frame goes to the move, and once nothing
-   has been touched for a while */
-.canvas-wrap.busy .edge-flow, .canvas-wrap[data-viewing] .edge-flow, .canvas-wrap[data-asleep] .edge-flow { animation-play-state: paused; }
+/* Traffic holds still while the view or a component is being moved, so every frame goes to the move, and once nothing
+   has been touched for a while. Drawn the steady way it keeps running through a pan and a drag (every frame is drawn
+   whole in any case), and holds still only while every frame is a new scene (a zoom, or the camera turning) and for
+   a breath as the hand lets go (`data-breath`: see BREATH_MS in Canvas.tsx) */
+.canvas-wrap.busy .edge-flow, .canvas-wrap.turning .edge-flow, .canvas-wrap[data-viewing] .edge-flow, .canvas-wrap[data-asleep] .edge-flow, .canvas-wrap[data-breath] .edge-flow { animation-play-state: paused; }
+.canvas-wrap.steady:not([data-zooming]):not(.turning):not([data-asleep]):not([data-breath]) .edge-flow { animation-play-state: running; }
 @keyframes flow { to { stroke-dashoffset: -47.5; } }
 .wire:not(.caught) path { animation: wire 0.5s linear infinite; }
 /* in the hand. It is drawn exactly where it is and where it will stay: not lifted, and not eased anywhere when it is let go */

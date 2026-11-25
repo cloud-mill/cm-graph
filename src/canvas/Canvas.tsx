@@ -150,13 +150,30 @@ const MANY_LINES = 60
 /** Below this zoom the dots of traffic are a fraction of a pixel across, so they are not drawn at all. */
 const FLOW_MIN_K = 0.3
 /**
- * Traffic is the one thing on the canvas that never stops, and each step of it has the browser draw again every part of
- * the picture a dot crosses, which with lines everywhere is all of it. What a step costs goes up with how much is drawn,
- * so it steps as often as the picture is cheap to draw: thirty times a second with a few dozen components drawn, twenty
- * with more, twelve with a great many (when they are small, and so are the steps). At those rates a laptop's built-in
- * graphics keep up with room to spare; any faster and they are busy with nothing else, and drop steps unevenly.
+ * The canvas is drawn in one of two ways while it is being used, and which is right was settled by measuring what
+ * reaches the screen, frame by frame, on a laptop with built-in graphics.
+ *
+ * Steady: with a few dozen components and traffic running, the picture is drawn again at every frame in any case (a
+ * dot has moved), and drawing it is cheap. So nothing is kept from one frame to the next: a pan draws the scene where
+ * the view now is, and traffic keeps running through a pan and through a drag. Every frame costs the same, and the same
+ * is what a screen needs to show them evenly: a frame that is ready sooner than the last one is shown out of step.
+ *
+ * Layered: with more to draw than that, or with nothing on the canvas moving by itself, or under a finger, the scene
+ * keeps a surface of its own that a pan slides without drawing anything (see styles.css), and traffic holds still
+ * while the view or a component is being moved. Each frame of traffic has the browser draw again every part of that
+ * surface a dot crosses, so with this much drawn it steps: twenty times a second, and twelve with a great many in view
+ * (when they are small, and so are the steps). Any faster and built-in graphics are busy with nothing else.
  */
-const FLOW_BUSY = 40, FLOW_CROWDED = 120
+const STEADY_MAX = 40, FLOW_CROWDED = 120
+/**
+ * How long traffic holds still when the hand lets go of a steady canvas, in ms: a breath, four frames long. While
+ * traffic runs, a frame is on its way to the screen at every moment and the browser's queue of them never runs dry by
+ * itself, so once any one frame has been slow (a click that redraws a panel, the page opening) every frame after it
+ * reaches the screen a refresh later than it need, for as long as traffic keeps running: measured, a pan stayed 16 to
+ * 33 ms further behind the hand for a whole session. A few frames with nothing to draw empty the queue. The moment
+ * for it is when the hand lets go: nothing is being followed by eye, and four frames of still dots are not seen.
+ */
+export const BREATH_MS = 70
 /** Traffic stops when nothing has been touched for this long, and picks up at the first sign of life: a blueprint left open on a screen should not keep the machine working. */
 const FLOW_SLEEP_MS = 120_000
 /** How long the view must hold still, in ms, before it counts as at rest: the layer is given back its own surface, and a view left between two pixels is put on them. */
@@ -329,6 +346,10 @@ export function Canvas() {
   // the components that are drawn, in bands from far to near (see `useBands`), and how many that is
   const bands = useBands(shown.nodes, proj, sight)
   const inSight = useMemo(() => bands.reduce((n, b) => n + b.nodes.length, 0), [bands])
+  // which of the two ways the canvas is drawn in (see STEADY_MAX)
+  const steady = !coarse && flow && rk >= FLOW_MIN_K && shown.edges.length > 0 && inSight <= STEADY_MAX
+  const steadyRef = useRef(steady)
+  steadyRef.current = steady
   // seen from far out with a great many in view, components are drawn plainly. It takes a clear step the other way to
   // bring the detail back, so a count that hovers at the line does not redraw everything on every pan
   const plainRef = useRef(false)
@@ -432,7 +453,8 @@ export function Canvas() {
   // the layer moves, every piece of text in the layer is laid out again and the layer repainted, which on a large
   // diagram is a frame dropped. One frame apart, neither happens: the change is drawn, and then the layer moves on its
   // own. So whenever the canvas changes what is in the layer while the view is panning, the layer waits a frame.
-  // (A zoom is another matter: every frame of it draws the scene again anyway.)
+  // (A zoom is another matter: every frame of it draws the scene again anyway. So is a canvas drawn the steady way,
+  // which has no surface to spare and nothing to wait for: its first frame of a pan is the pan.)
   const settle = useRef(0)
   /** Draw more of a large blueprint if the view has come near the edge of what is drawn, or far less if it has closed in. */
   const look = (v: View) => {
@@ -478,6 +500,19 @@ export function Canvas() {
   // large blueprint, the answers to the pointer put away. And once a frame, at the last moment (`stageView`), to put the
   // scene where the view has it
   const wrap = useRef<HTMLDivElement>(null)
+  // a breath (see BREATH_MS): a mark for the stylesheet, which holds traffic still while it is there
+  const breath = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  const breathe = () => {
+    const el = wrap.current
+    if (!el || !steadyRef.current) return
+    el.setAttribute('data-breath', '')
+    clearTimeout(breath.current)
+    breath.current = setTimeout(() => el.removeAttribute('data-breath'), BREATH_MS)
+  }
+  useEffect(() => () => clearTimeout(breath.current), [])
+  // once when a blueprint has opened, too: opening it is the slowest frame there is
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { if (!opening) breathe() }, [opening])
   useLayoutEffect(() => {
     let timer: ReturnType<typeof setTimeout> | undefined
     // A zoom is under way. While it is, the layer gives up the surface of its own that makes panning free (see
@@ -508,13 +543,13 @@ export function Canvas() {
       hoverBack()
     }
     // (after the canvas's own handlers have seen the release, which is where the hand is counted as gone)
-    const letGo = () => setTimeout(() => { if (owed && !inHand()) { owed = false; placeLayer(useStore.getState().view, true) } }, 0)
+    const letGo = () => { breathe(); setTimeout(() => { if (owed && !inHand()) { owed = false; placeLayer(useStore.getState().view, true) } }, 0) }
     window.addEventListener('pointerup', letGo)
     window.addEventListener('pointercancel', letGo)
     const off = followView((v) => {
       // While the view is moving, the answers to the pointer and the traffic stand still, so that every frame is the move
       // alone. Switching them off can itself change what is drawn (a component the pointer was on stops glowing): a frame is left for that
-      if (timer === undefined) { wrap.current?.setAttribute('data-viewing', ''); settle.current = 1 }
+      if (timer === undefined) { wrap.current?.setAttribute('data-viewing', ''); settle.current = steadyRef.current ? 0 : 1 }
       look(v)
       clearTimeout(timer)
       timer = setTimeout(() => { timer = undefined; rest() }, REST_MS)
@@ -1464,7 +1499,7 @@ export function Canvas() {
   const atZoom = useMemo(() => ({ '--k': restK }) as React.CSSProperties, [restK])
 
   return (
-    <div ref={wrap} className={'canvas-wrap' + (intro ? ' intro' : '') + (busy ? ' busy' : '') + (fx ? ' fx' : '') + (inSight > FLOW_CROWDED ? ' flow-12' : inSight > FLOW_BUSY ? ' flow-20' : '')} data-tool={tool}>
+    <div ref={wrap} className={'canvas-wrap' + (intro ? ' intro' : '') + (busy ? ' busy' : '') + (fx ? ' fx' : '') + (steady ? ' steady' : '') + (orbiting || turning ? ' turning' : '') + (inSight > FLOW_CROWDED ? ' flow-12' : inSight > STEADY_MAX ? ' flow-20' : '')} data-tool={tool}>
       <div ref={ref} className="canvas-surface" style={{ cursor }} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp}
         onPointerCancel={onPointerUp} onPointerEnter={measure} onPointerLeave={() => { over.current = null; setHover(null) }} onContextMenu={onContextMenu} onDoubleClick={onDoubleClick}>
         <div ref={pan} className="canvas-pan">

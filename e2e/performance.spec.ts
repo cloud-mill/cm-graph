@@ -261,11 +261,13 @@ test.describe('performance and stability', () => {
     expect(still, 'main-thread work in a second with nothing happening (ms)').toBeLessThan(60)
 
     // With traffic moving along more than a hundred lines, a little: a step repaints the dots and works nothing out,
-    // and with this much drawn there are twenty steps a second, not one on every frame
+    // and with this much drawn there are twenty steps a second, not one on every frame (and the canvas is layered, not
+    // steady: see STEADY_MAX in Canvas.tsx)
     await app.open(bigDoc(100))
     // from as far out as this opens, the dots would be too small to see and are not drawn: closer in, they are
     await page.locator('.zoom-pct').click()
     await expect(page.locator('.zoom-pct .on')).toHaveText('100%')
+    await expect(page.locator('.canvas-wrap')).not.toHaveClass(/steady/)
     await expect(page.locator('.canvas-wrap')).toHaveClass(/flow-20/)
     expect(await page.locator('.edge-flow').count()).toBeGreaterThan(100)
     await page.mouse.move(5, 5)
@@ -299,6 +301,74 @@ test.describe('performance and stability', () => {
     await page.mouse.move(300, 300)
     await expect(wrap).not.toHaveAttribute('data-asleep', '')
     expect(await state()).toBe('running')
+  })
+
+  // The two ways the canvas is drawn in (STEADY_MAX in Canvas.tsx), as the page shows them: which one a blueprint gets,
+  // and what traffic does while the view and a component are moved. That steady is the smoother of the two on a small
+  // blueprint was measured on what reaches the screen, which nothing here can see
+  test('a small blueprint with traffic is drawn the steady way and a larger one layered: traffic runs through a pan on the first and holds still on the second', async ({ page, app }) => {
+    const dots = page.locator('.edge-flow').first(), wrap = page.locator('.canvas-wrap'), pan = page.locator('.canvas-pan')
+    const playing = () => dots.evaluate((el) => getComputedStyle(el).animationPlayState)
+    const kept = () => pan.evaluate((el) => getComputedStyle(el).willChange === 'transform')
+    // a point on the canvas clear of the panels that float over its edges (the middle button pans whatever is under it)
+    const bare = async () => { const box = (await page.locator('.canvas-surface').boundingBox())!; return { x: Math.round(box.x + box.width / 2), y: Math.round(box.y + 130) } }
+    // What traffic was doing each time the canvas marked the view as moving or zooming, noted by the page itself as it
+    // happened: a mark lasts a fraction of a second, and a look from here could come after it has gone
+    const watch = () => page.evaluate(() => {
+      const w = document.querySelector('.canvas-wrap')!, seen: [boolean, boolean, string][] = []
+      ;(window as unknown as { __seen: typeof seen }).__seen = seen
+      new MutationObserver(() => { const dot = document.querySelector('.edge-flow'); if (dot) seen.push([w.hasAttribute('data-viewing'), w.hasAttribute('data-zooming'), getComputedStyle(dot).animationPlayState]) })
+        .observe(w, { attributes: true, attributeFilter: ['data-viewing', 'data-zooming', 'data-breath'] })
+    })
+    const seen = () => page.evaluate(() => (window as unknown as { __seen: [boolean, boolean, string][] }).__seen.splice(0))
+    const panned = async () => {
+      const at = await bare()
+      await page.mouse.move(at.x, at.y)
+      await page.mouse.down({ button: 'middle' })
+      await page.mouse.move(at.x + 40, at.y + 10, { steps: 4 })
+      await page.mouse.up({ button: 'middle' })
+      await rested(page)
+      // the first note is of the view starting to move, with the hand still on it and no zoom
+      return (await seen()).filter(([viewing, zooming]) => viewing && !zooming).map((s) => s[2])
+    }
+
+    const doc = TRIO()
+    doc.edges.push({ id: 'ab', from: 'a', to: 'b', style: 'solid', arrow: 'end', width: 2 }, { id: 'ac', from: 'a', to: 'c', style: 'solid', arrow: 'end', width: 2 })
+    await app.open(doc)
+    await rested(page)
+    await expect(wrap).toHaveClass(/steady/)
+    expect(await kept(), 'steady: no surface kept for the scene').toBe(false)
+    expect(await dots.evaluate((el) => getComputedStyle(el).animationTimingFunction), 'traffic moves at every frame, not in steps').toBe('linear')
+    await watch()
+    const during = await panned()
+    expect(during.length, 'the view was seen to move').toBeGreaterThan(0)
+    expect(during[0], 'steady: traffic keeps running while the view is panned').toBe('running')
+    // letting go, traffic holds still for a breath (BREATH_MS), and then runs on
+    await expect(wrap).not.toHaveAttribute('data-breath', '')
+    expect(await playing()).toBe('running')
+    // a zoom draws a new scene at every frame: traffic holds still for that
+    const at = await bare()
+    await page.mouse.move(at.x, at.y)
+    await app.notches(-1)
+    await page.waitForTimeout(700)
+    await rested(page)
+    const zoomed = (await seen()).filter(([, zooming]) => zooming).map((s) => s[2])
+    expect(zoomed.length, 'the view was seen to zoom').toBeGreaterThan(0)
+    expect(zoomed[0], 'steady: traffic holds still while the view zooms').toBe('paused')
+    expect(await playing()).toBe('running')
+
+    await app.open(bigDoc(48))
+    await page.locator('.zoom-pct').click()
+    await expect(page.locator('.zoom-pct .on')).toHaveText('100%')
+    await rested(page)
+    await expect(wrap).not.toHaveClass(/steady/)
+    expect(await kept(), 'layered: the scene has a surface of its own').toBe(true)
+    expect(await playing()).toBe('running')
+    await watch()
+    const layered = await panned()
+    expect(layered.length, 'the view was seen to move').toBeGreaterThan(0)
+    expect(layered[0], 'layered: traffic holds still while the view is panned').toBe('paused')
+    expect(await playing()).toBe('running')
   })
 
   test('opening and closing blueprints and dialogs does not leak listeners or DOM', async ({ page, app }) => {

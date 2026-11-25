@@ -8,7 +8,7 @@ import { useStore } from '../core/store'
 import { MAX_SCALE, MIN_SCALE } from '../core/types'
 import { docOf, edge, node, resetStore } from '../test/helpers'
 import { COARSE, PHONE, stubMedia } from '../test/media'
-import { Canvas, HOLD_MS, REST_MS, heat, settleView } from './Canvas'
+import { BREATH_MS, Canvas, HOLD_MS, REST_MS, heat, settleView } from './Canvas'
 import { cam, flushFrame, hud, projNow } from './camera'
 
 // these render whole screens; leave headroom for a busy machine
@@ -2419,6 +2419,26 @@ describe('the layer the scene is drawn in', () => {
     expect(wrap().hasAttribute('data-zooming')).toBe(false)
   }))
 
+  it('drawn the steady way, a pan moves in its first frame: there is no kept surface whose turn has to be waited for', () => clocked(() => {
+    mount(docOf([node('a', 'ec2', 0, 0), node('b', 'rds', 8, 0)], [edge('e', 'a', 'b')]), { flow: true })
+    frame(); frame()
+    expect(wrap().classList.contains('steady')).toBe(true)
+    act(() => { useStore.setState({ view: { x: 640, y: 325, k: 1 } }) })
+    expect(layer()).toBe('translate(600px, 300px)')
+    frame()
+    expect(layer()).toBe('translate(640px, 325px)')
+    cleanup()
+    // layered (nothing here is connected, so nothing moves by itself), the first frame of the same pan is waited out
+    mount()
+    frame(); frame()
+    expect(wrap().classList.contains('steady')).toBe(false)
+    act(() => { useStore.setState({ view: { x: 640, y: 325, k: 1 } }) })
+    frame()
+    expect(layer()).toBe('translate(600px, 300px)')
+    frame()
+    expect(layer()).toBe('translate(640px, 325px)')
+  }))
+
   it('a zoom is drawn at its own scale in the frame it happens: the layer is moved, never stretched', () => clocked(() => {
     mount()
     frame(); frame()
@@ -2794,8 +2814,8 @@ describe('traffic', () => {
   const wrap = () => document.querySelector('.canvas-wrap')!
   const row = (n: number) => docOf(Array.from({ length: n }, (_, i) => node('n' + i, 'ec2', (i % 12) * 4, Math.floor(i / 12) * 4)))
 
-  // each step of it has the browser draw the whole picture again, so the more there is to draw the fewer steps it takes
-  it('steps less often the more there is drawn', () => {
+  // each frame of it has the browser draw the picture again, so past what can be drawn whole at every frame it moves in steps, and fewer the more there is
+  it('moves at every frame on a small canvas, and in steps the more there is drawn', () => {
     mount(row(30))
     expect(wrap().className).not.toMatch(/flow-\d/)
     cleanup()
@@ -2804,6 +2824,75 @@ describe('traffic', () => {
     cleanup()
     mount(row(150))
     expect(wrap().classList.contains('flow-12')).toBe(true)
+  })
+
+  // The canvas is drawn one of two ways (STEADY_MAX). Steady, nothing is kept from frame to frame and traffic never
+  // stops for a pan or a drag: right where the scene is cheap to draw and traffic has it drawn at every frame anyway
+  const linked = (n: number) => { const d = row(n); return docOf(d.nodes, [edge('e', 'n0', 'n1')]) }
+  const steady = () => wrap().classList.contains('steady')
+  it('is what makes a small canvas steady: a few dozen components, lines for it to run along, and a zoom it can be seen at', () => {
+    mount(linked(30), { flow: true })
+    expect(steady()).toBe(true)
+    // seen from too far out the dots are not drawn at all, and nothing is moving
+    act(() => { useStore.setState({ view: { x: 600, y: 300, k: 0.2 } }); settleView() })
+    expect(steady()).toBe(false)
+    cleanup()
+    // more to draw than can be drawn whole at every frame
+    mount(linked(60), { flow: true })
+    expect(steady()).toBe(false)
+    cleanup()
+    // nothing connected, so nothing moving
+    mount(row(30), { flow: true })
+    expect(steady()).toBe(false)
+    cleanup()
+    // switched off
+    mount(linked(30), { flow: false })
+    expect(steady()).toBe(false)
+  })
+
+  it('under a finger the canvas is never drawn the steady way: sliding a kept surface is what follows a finger best', () => {
+    vi.stubGlobal('matchMedia', (q: string) => ({ matches: q.includes('coarse'), addEventListener() {}, removeEventListener() {} }))
+    try {
+      mount(linked(30), { flow: true })
+      expect(steady()).toBe(false)
+    } finally { vi.unstubAllGlobals() }
+  })
+
+  // (see BREATH_MS: what lets the browser's queue of frames run dry, so the next gesture is not shown a frame late)
+  it('holds still for a breath when the hand lets go of a steady canvas, and not of a layered one', () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance', 'Date'] })
+    try {
+      mount(linked(30), { flow: true })
+      // a blueprint takes one as it finishes opening
+      act(() => { vi.advanceTimersByTime(3000) })
+      expect(wrap().hasAttribute('data-breath')).toBe(true)
+      act(() => { vi.advanceTimersByTime(BREATH_MS + 10) })
+      expect(wrap().hasAttribute('data-breath')).toBe(false)
+      act(() => { window.dispatchEvent(new Event('pointerup')) })
+      expect(wrap().hasAttribute('data-breath')).toBe(true)
+      act(() => { vi.advanceTimersByTime(BREATH_MS - 10) })
+      expect(wrap().hasAttribute('data-breath')).toBe(true)
+      act(() => { vi.advanceTimersByTime(20) })
+      expect(wrap().hasAttribute('data-breath')).toBe(false)
+      cleanup()
+      mount(linked(60), { flow: true })
+      act(() => { vi.advanceTimersByTime(3000) })
+      expect(wrap().hasAttribute('data-breath')).toBe(false)
+      act(() => { window.dispatchEvent(new Event('pointerup')) })
+      expect(wrap().hasAttribute('data-breath')).toBe(false)
+    } finally { vi.useRealTimers() }
+  })
+
+  it('is marked as turning while the camera turns, and for a moment after: every frame of that is a new scene, and traffic holds still for it', () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance', 'Date'] })
+    try {
+      mount(linked(30), { flow: true })
+      expect(wrap().classList.contains('turning')).toBe(false)
+      act(() => { useStore.setState({ yaw: useStore.getState().yaw + 5 }) })
+      expect(wrap().classList.contains('turning')).toBe(true)
+      act(() => { vi.advanceTimersByTime(REST_MS + 20) })
+      expect(wrap().classList.contains('turning')).toBe(false)
+    } finally { vi.useRealTimers() }
   })
 
   it('stops when nothing has been touched for two minutes, and picks up at the first sign of life', () => {

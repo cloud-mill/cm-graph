@@ -41,8 +41,8 @@ test.describe('phone: sharp at every frame of a pinch', () => {
     await page.addInitScript(() => { (window as unknown as { __frame: typeof requestAnimationFrame }).__frame = window.requestAnimationFrame.bind(window) })
     await page.clock.install()
     await app.open(scene())
-    // the dots that run along the lines move by themselves, and stand still while the view moves: not what this is about
-    await page.addStyleTag({ content: '.edge-flow { display: none !important }' })
+    // the dots that run along the lines move by themselves: drawn here, but held still (under a finger the canvas is always layered, and they have a surface of their own)
+    await page.addStyleTag({ content: '.edge-flow { animation: none !important }' })
     await rested(page)
     await page.clock.pauseAt(new Date(Date.now() + 2000))
     await frames(page, 2)
