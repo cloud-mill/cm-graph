@@ -1,171 +1,154 @@
+<div align="center">
+
 # CloudMill Graph
 
-An isometric cloud architecture studio that runs entirely in the browser: draw
-infrastructure diagrams that know what they cost, review themselves, and
-round-trip with Terraform.
+**Draw cloud architecture that knows what it costs.**
+
+An isometric design studio for AWS, Google Cloud and Azure. It prices your
+architecture as you draw, reviews it for you, and turns it into Terraform.<br>
+It runs entirely in your browser. No account, no server, nothing uploaded.
+
+[**Open the app**](https://graph.cloud-mill.com) · [Features](#features) · [Quick start](#quick-start)
+
+</div>
+
+<picture>
+  <source media="(prefers-color-scheme: light)" srcset=".github/assets/editor-light.webp">
+  <img src=".github/assets/editor-dark.webp" alt="A Kubernetes architecture on the CloudMill Graph canvas, with its monthly cost on AWS, Google Cloud and Azure in the inspector">
+</picture>
+
+## Why
+
+Most architecture diagrams are pictures. They cannot tell you what the system
+costs, whether it survives a zone going down, or how to build it, and they are
+out of date the day after they are drawn.
+
+CloudMill Graph treats the diagram as a model. Every component is configured
+and priced. Every connection says what travels along it. The whole design can be
+reviewed, compared across clouds, and exported as infrastructure code.
+
+## Features
+
+### Draw in three dimensions
+
+A real orbit camera over an isometric scene, not a flat board with tilted
+icons.
+
+- **169 components** across AWS, Google Cloud and Azure, each with its own
+  configuration and price.
+- **Orbit, tilt and turn** around any point, snap to standard views with the
+  view cube, or switch to a flat top view in one click.
+- **Six starter blueprints**, from a three-tier web app to a streaming data
+  platform, or begin on a blank canvas.
+- **What you place stays put.** Nothing is nudged, re-routed or tidied behind
+  your back: what is on screen when you let go is what is saved.
+
+### Connections that mean something
+
+- **Every line carries a relationship** (request, data, event, replication or
+  dependency), with a protocol and a port.
+- **Lines route themselves** in clean right angles around everything in the
+  way, and moving dots show which way traffic runs.
+- **Shape any line by hand** and it is kept exactly as you left it.
+- **Follow the flow** lights up everything upstream and downstream of a
+  component.
+
+### Know the cost before you build
+
+![The budget panel beside a canvas coloured by cost](.github/assets/budget.webp)
+
+- **A live monthly estimate** for the whole blueprint and for every component
+  and category.
+- **Real AWS rates**, read from the public AWS Price List per instance type and
+  region, with on-demand, one-year and three-year pricing.
+- **A cost heatmap** on the canvas shows where the money goes.
+- **Honest figures.** Each line is marked fixed, usage-based or estimated, and
+  free allowances are taken off once for the whole design.
+
+### One architecture, three clouds
+
+The inspector prices the same design on AWS, Google Cloud and Azure, side by
+side. One click moves the whole blueprint, swapping every component for its
+closest equivalent, and one undo brings it back.
+
+### A reviewer built in
+
+![The advisor scoring a three-tier web app and listing what to fix](.github/assets/advisor.webp)
+
+- **Thirteen checks** for reliability, security, cost and hygiene: single
+  points of failure, databases in one zone, exposed data stores, missing
+  firewalls, cheaper processors, idle load balancers and more.
+- **A score, and what it would save.** Findings are ranked by severity, with
+  the monthly saving beside each one.
+- **One-click fixes**, one at a time or all the recommended ones together.
+
+### Terraform, both ways
+
+Paste HCL and get a laid-out diagram: resources become components, references
+become connections, and VPC membership becomes areas. Export any blueprint back
+to HCL for the `aws`, `google` and `azurerm` providers.
+
+### Yours, and easy to share
+
+<img src=".github/assets/phone.webp" alt="CloudMill Graph on a phone, with a component selected" width="230" align="right">
+
+- **Nothing leaves your browser.** Blueprints autosave locally, with version
+  history.
+- **Share by link.** The whole diagram is compressed into the URL, so there is
+  nothing to upload and nothing to sign in to.
+- **Export** to PNG, SVG, Terraform, JSON and CSV.
+- **At home on a phone.** A layout of its own with map-style gestures: drag,
+  pinch, twist to turn, two fingers to tilt. It installs to the home screen.
+- **Fast to drive.** A command palette (`⌘K` or `Ctrl K`), keyboard shortcuts
+  throughout, undo and redo, auto-layout, a minimap, and light and dark themes.
+
+<br clear="all">
+
+## Quick start
+
+Try it now at [graph.cloud-mill.com](https://graph.cloud-mill.com), or run it
+locally with Node 20 or newer:
 
 ```bash
 npm install
-npm run dev        # http://localhost:5183
-npm test           # unit and component tests
-npm run build      # typecheck + production bundle
+npm run dev
 ```
 
-## What it does
+Open <http://localhost:5183> and start from a sample blueprint.
 
-- **Isometric canvas**: pan, zoom, orbit, snapping, marquee select, copy and
-  paste, undo and redo, resizable components, areas (VPC, subnet, zone, group)
-  and text labels.
-- **AWS, Google Cloud and Azure**: about 170 components, each with
-  configuration and pricing. Search looks across all three clouds.
-- **Cloud translation**: the same architecture priced on each cloud, and one
-  click to swap every component for its closest equivalent.
-- **Budget**: live monthly estimate, region and commitment pricing, a cost
-  heatmap and CSV export.
-- **Advisor**: well-architected checks with one-click fixes and a score.
-- **Terraform**: paste HCL to get a laid-out diagram, export any diagram back
-  to HCL (`aws`, `google`, `azurerm`).
-- **Export** to PNG, SVG, Terraform, JSON and CSV. **Share** by link: the
-  diagram lives in the URL, so nothing is uploaded.
-- **Also**: version history, autosave to local storage, command palette (`⌘K`),
-  minimap, auto-layout, light and dark themes.
+## Development
 
-## Design
+| Command            | What it does                                      |
+|--------------------|---------------------------------------------------|
+| `npm run dev`      | Start the dev server                              |
+| `npm run build`    | Typecheck and build for production                |
+| `npm test`         | Unit and component tests                          |
+| `npm run test:e2e` | End-to-end tests in Google Chrome                 |
+| `npm run verify`   | Everything: types, lint, tests, build, end-to-end |
+| `npm run bench`    | Measure frame times on blueprints of any size     |
 
-Black, white and zinc, set in Geist. Colour appears only where it carries
-meaning and in the architecture itself. The shell is flat; only what floats over
-the canvas is glass. Tokens live at the top of `src/styles.css`.
+The project is held to a high bar: more than 1,300 unit and component tests,
+about 600 end-to-end tests across desktop and four phone profiles, a 98%
+coverage floor, WCAG 2.1 AA checks in both themes, and tests that photograph
+the canvas to prove it stays sharp at every frame of a zoom.
 
-## Layout
+## Under the hood
+
+React 19, TypeScript, Zustand and Vite. The canvas is plain SVG with no drawing
+library, and there is no backend.
 
 ```
-src/core     projection maths, catalog and pricing, store, routing, layout,
-             advisor, Terraform import and export, storage
-src/canvas   isometric models, the pure <Scene/>, the interactive canvas,
-             image export
+src/core     projection maths, catalog and pricing, routing, layout, advisor,
+             Terraform import and export, storage
+src/canvas   isometric models, the renderer, the interactive canvas, image export
 src/ui       editor shell, panels, dialogs, dashboard
 ```
 
-`<Scene/>` is a pure function of the document and a projection, so one renderer
-drives the editor, thumbnails, previews and exports.
+One pure renderer draws the editor, the thumbnails, the previews and the
+exports, so what you export is what you saw.
 
-## Pricing
+---
 
-Estimates are for comparing designs, and each figure says how far it can be
-trusted.
-
-- **AWS rates come from the public AWS Price List API**, per instance type and
-  region, on-demand and reserved. Refresh with
-  `node scripts/build-rate-card.mjs`. Azure and Google Cloud are held as US list
-  prices.
-- **Every cost line is Fixed, Usage-based or Estimated.** Estimated lines are
-  marked `~` with a note saying what was used instead.
-- **Free allowances** are taken off once for the whole blueprint.
-- **Assumes** 730 hours a month, US dollars, list price, first pricing tier.
-  Not included: data transfer, support plans, backups, tax.
-
-## Editing
-
-Two rules, both held by tests (`e2e/free.spec.ts`):
-
-1. **What is in your hand is drawn, not written.** The blueprint changes once,
-   on release. Escape before then puts everything back.
-2. **What is on screen when you let go is what stays.** Nothing is rounded,
-   pushed, eased or re-planned afterwards, and nothing else moves.
-
-- **Carrying**: a component goes exactly as far as the pointer. Shift keeps to
-  one axis, Alt carries a copy.
-- **Snapping** is a tool and starts off (`S`). Ctrl flips it for one drag.
-- **Connecting**: pull from one of a component's four doors and let go on or
-  near another. Let go on open ground to add a new component already connected.
-- **Dropping a component onto a line** puts it in the middle of that line.
-- **Arranging**: Shift-drag selects a box; the bar above aligns, spaces, groups
-  or duplicates.
-
-## Connections
-
-- **A line carries meaning**: a relationship (request, data, event, replication
-  or dependency), optionally a protocol and a port.
-- **Routing** is right-angled, shortest path with the fewest turns, never
-  through a component, deterministic and cached (`src/core/router.ts`).
-- **Automatic or Manual.** An automatic line is planned once and again only when
-  its own components change. Drag any part and it becomes manual, kept exactly
-  where you left it (`src/core/shape.ts`). Neither is re-planned behind your
-  back.
-- **Shaping**: pull a run sideways, drag a turn, right-click for "Add a bend
-  here", double-click a turn to remove it. A run brought level with the next
-  merges with it.
-- **Straighten** makes a line one straight run and keeps it so; "Line up" moves
-  a component when no straight line is possible.
-- **Follow the flow** lights everything upstream and downstream.
-- **Other shapes**: Direct (one stroke at any angle) or Curved.
-
-## Performance
-
-- **Small blueprints** (up to forty components, traffic on, with a mouse) are
-  drawn whole at every frame. It is cheap at that size and is what a screen
-  shows most evenly.
-- **Larger blueprints** slide an already drawn picture when panned, so a pan
-  draws nothing.
-- **A zoom draws everything at its own size on every frame**, so it is never
-  soft, during or after.
-- **Only what is near the screen is drawn** past a few hundred components, and
-  from far out components are drawn plainly.
-- **Traffic** moves at every frame on a small blueprint, in steps on a larger
-  one, and stops after two minutes untouched.
-
-`npm run bench` measures all of it (see [Testing](#testing)).
-
-## On a phone
-
-A narrow screen gets its own layout: a dock in the thumb's reach, the library
-and inspector as sheets, and the Back button closing one layer at a time.
-
-| Gesture                      | What it does                         |
-|------------------------------|--------------------------------------|
-| Drag with one finger         | Move                                 |
-| Pinch                        | Zoom about the point between fingers |
-| Twist two fingers            | Turn the scene                       |
-| Slide two fingers up or down | Tilt                                 |
-| Double tap the ground        | Zoom in there                        |
-| Tap with two fingers         | Zoom out                             |
-| Drag the cube                | Orbit                                |
-
-Tap selects, drag moves, press and hold picks up or opens a menu. Connecting is
-two taps: the first component, then the one it talks to. Tablets and touch
-laptops get the same gestures with the desktop layout.
-
-## Testing
-
-`npm run verify` runs everything, in order.
-
-| Command                 | What it runs                                         |
-|-------------------------|------------------------------------------------------|
-| `npm run typecheck`     | TypeScript                                           |
-| `npm run lint`          | oxlint                                               |
-| `npm test`              | Unit and component tests (Vitest)                    |
-| `npm run test:coverage` | The same, with a coverage floor                      |
-| `npm run test:e2e`      | End-to-end tests in Google Chrome, on the dev server |
-| `npm run test:e2e:prod` | The same, on the production build                    |
-| `npm run test:perf`     | Only the performance and stability tests             |
-| `npm run test:e2e:ui`   | Playwright's interactive runner                      |
-| `npm run bench`         | Frame times and edit latency, 30 to 2,000 components |
-
-- **Unit tests** cover the pure logic in `src/core`.
-- **Component tests** render the real components against the real store.
-  Only browser boundaries are mocked.
-- **End-to-end tests** cover editing, every panel and dialog, six screen sizes,
-  four phone profiles with real multi-touch, accessibility (WCAG 2.1 AA) and
-  performance. Any page error fails the test.
-- **Sharpness** is tested by photographing the screen in the middle of a zoom
-  and again at rest: the two must match (`e2e/sharp.spec.ts`).
-- **Coverage** is held at 98% of statements, functions and lines and 94% of
-  branches.
-
-The first end-to-end run needs Google Chrome (`npx playwright install chrome`).
-Safari's engine is opt-in: `npx playwright install --with-deps webkit`, then
-`E2E_WEBKIT=1 npm run test:e2e -- --project=safari`.
-
-Prices are estimates from approximate public list prices. CloudMill Graph is an
+Cost figures are estimates from public list prices. CloudMill Graph is an
 independent project; AWS, Google Cloud and Azure service names are used for
 reference only.
