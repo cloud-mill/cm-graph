@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { flushSync } from 'react-dom'
 import { AlignCenterVertical, AlignHorizontalSpaceAround, Copy, CornerDownRight, Group, Minus, Pin, Scan, Slash, Spline, Trash2, Wand2, Waypoints } from 'lucide-react'
 import { MAX_PITCH, MIN_PITCH, type Proj, U, f, makeCam, mix, normYaw, poly, pt, unproject, upright } from '../core/iso'
 import { costOf, defOf, defaultProps, docCost, money, nodeName } from '../core/catalog'
@@ -10,9 +11,9 @@ import { SIDES, doorNear, magnet, portsOf, reachTo } from '../core/snap'
 import { inArea, lineUp, spaceEvenly } from '../core/layout'
 import { type View, kindOf, moveItems, useStore, reended } from '../core/store'
 import { type AreaT, type Doc, type NodeT, type Side, MAX_SCALE, MIN_SCALE, centerOf, footOf, type EdgeT } from '../core/types'
-import { EdgeCaption, Scene, THEMES, brackets, useRoutes } from './Scene'
-import { Model } from './models'
-import { animateView, beginOrbit, cam, center, fitView, flushFrame, glide, holdStill, hud, insets, onFrame, projNow, smoothZoom, stopZoom, zoomBy } from './camera'
+import { type Box, EdgeCaption, NodeBand, SceneFlow, SceneGround, SceneText, THEMES, brackets, nodeBox, routeBox, useBands, useRoutes } from './Scene'
+import { Model, ModelDefs } from './models'
+import { animateView, beginOrbit, cam, center, fitView, flushFrame, followView, glide, holdStill, hud, inNextFrame, insets, onFrame, projNow, smoothZoom, stageView, stopZoom, zoomBy } from './camera'
 import { type Finger, type Gesture, MAX_K, MIN_K, type Trail, fling, gestureMove, gestureRebase, gestureStart, isTwoFingerTap, track } from './touch'
 import { type Gap, type Guide, alignGuides, spacingGaps } from '../core/guides'
 import { QuickAdd } from './QuickAdd'
@@ -23,8 +24,19 @@ import { ContextMenu, type MenuState } from '../ui/ContextMenu'
 import { keys } from '../ui/atoms'
 
 /**
- * The interactive canvas: one <svg> that owns every pointer, touch and wheel gesture on the diagram, and the overlays
- * (selection marks, handles, doors, guides, the bars above a selection) drawn around <Scene/>.
+ * The interactive canvas: one surface that owns every pointer, touch and wheel gesture on the diagram, and the overlays
+ * (selection marks, handles, doors, guides, the bars above a selection) drawn around the scene.
+ *
+ * How it is drawn. The surface holds one layer that pans (`.canvas-pan`), in it the element that carries the zoom
+ * (`.canvas-zoom`), and in that a stack of <svg>s, bottom to top: the grid and the marks that lie under things, the ground
+ * of the scene (areas and lines), the traffic, the components, and the handles. Panning and zooming never go through
+ * React: the view in the store is written straight onto those two elements (`placeLayer`). A pan moves the layer, which
+ * the browser carries out on the graphics card without drawing anything again. A zoom changes the scale inside the
+ * layer, and the browser draws every shape again at that scale in the same frame: the layer itself is never scaled,
+ * because a picture already drawn and shown at another size is soft, and the canvas is sharp on every frame of a zoom,
+ * not only once it has ended. React keeps its own note of the zoom (`rk`) for the few things that are drawn at a size
+ * worked out from it, and draws again mid-zoom only when one of those is on the canvas (`follows`). The stack is split
+ * because a browser redraws an <svg> as a whole: apart, a handle that moves or traffic that flows redraws only itself.
  *
  * How a drag works. Pointer-down decides what the press is and records it in `drag.current` (see `Drag`); pointer-move takes
  * it a step further; pointer-up, or pointer-cancel, ends it. Nothing is written to the blueprint in between: a drag that
@@ -33,7 +45,8 @@ import { keys } from '../ui/atoms'
  *
  * Coordinates. Pointer events arrive in client px. `toWorld` turns them into ground cells: less the canvas's corner, less the
  * pan and divided by the zoom (`view`), then back through the camera (`proj`, made from yaw and pitch). `pt` goes the other
- * way, from cells to scene px, and the outer <g> applies `view`. Everything kept in a `Doc` is in cells.
+ * way, from cells to scene px; the element that carries the zoom scales those and the panning layer applies the rest
+ * of `view`. Everything kept in a `Doc` is in cells.
  *
  * Not done here: the camera's own animations (camera.ts), telling two-finger gestures apart (touch.ts), working out where
  * lines run (core/router), and any key but Space and Escape.
@@ -115,10 +128,103 @@ const CARRIES = new Set(['move', 'connect', 'relink', 'seg', 'resize', 'nresize'
 // how near an edge of the clear canvas, in screen px, the pointer must be before the view starts to follow it
 const EDGE_ZONE = 30
 
+// ---- how much is drawn, and how finely. None of this changes what a blueprint is, only what the browser is asked to draw.
+/** A blueprint with more components and connections than this is only drawn where it can be seen: the rest is left out until the view comes near it. */
+export const CULL_AT = 500
+/** How far past the edges of the canvas such a blueprint is still drawn, in screen px: room to pan into before anything has to be added. */
+const SIGHT_MARGIN = 360
+/**
+ * A blueprint with no more components than this opens with each rising into place, and fades what it dims or adds.
+ * Each of those moves a component on a compositor layer of its own, which is nothing for a few dozen and a great deal for hundreds.
+ */
+export const FX_MAX = 60
+/** Seen from further out than this, with more than `PLAIN_COUNT` components in view, they are drawn plainly: no detail that small could be made out. */
+const PLAIN_K = 0.4, PLAIN_COUNT = 300
+/**
+ * While the camera is turning, every shape of every component is drawn afresh on every frame. With more than this many
+ * in view they are drawn plainly until it comes to rest, which is the difference between a turn that can be followed and one that cannot.
+ */
+const TURN_PLAIN = 120
+/** With more connections than this selected at once, each is lit with a plain line: the halo and end marks of a few would be thousands of shapes. */
+const MANY_LINES = 60
+/** Below this zoom the dots of traffic are a fraction of a pixel across, so they are not drawn at all. */
+const FLOW_MIN_K = 0.3
+/**
+ * Traffic is the one thing on the canvas that never stops, and each step of it has the browser draw again every part of
+ * the picture a dot crosses, which with lines everywhere is all of it. What a step costs goes up with how much is drawn,
+ * so it steps as often as the picture is cheap to draw: thirty times a second with a few dozen components drawn, twenty
+ * with more, twelve with a great many (when they are small, and so are the steps). At those rates a laptop's built-in
+ * graphics keep up with room to spare; any faster and they are busy with nothing else, and drop steps unevenly.
+ */
+const FLOW_BUSY = 40, FLOW_CROWDED = 120
+/** Traffic stops when nothing has been touched for this long, and picks up at the first sign of life: a blueprint left open on a screen should not keep the machine working. */
+const FLOW_SLEEP_MS = 120_000
+/** How long the view must hold still, in ms, before it counts as at rest: the layer is given back its own surface, and a view left between two pixels is put on them. */
+export const REST_MS = 140
+/** The fine dots of the grid fade in over this stretch of zoom, from nothing at the first to full at the second. */
+const FINE_FROM = 0.3, FINE_FULL = 0.65
+const fineOpacity = (k: number) => Math.max(0, Math.min(1, (k - FINE_FROM) / (FINE_FULL - FINE_FROM)))
+
+// what the canvas now on the page does when the view comes to rest, for `settleView`
+let atRest: (() => void) | null = null
+/**
+ * Do now what the canvas otherwise does once the view has held still for a moment (see `rest` in the canvas). For whatever
+ * changes the view and cannot wait that long to see the outcome, which in practice means a test.
+ */
+export function settleView() {
+  atRest?.()
+}
+
+/** A length on the nearest whole device pixel. A layer that sits on a fraction of a pixel is drawn blurred. */
+const whole = (v: number) => { const d = (typeof devicePixelRatio === 'number' && devicePixelRatio) || 1; return Math.round(v * d) / d }
+/**
+ * How the scene sits inside its layer: at zoom `k`, and moved by the fraction of a pixel (fx, fy) that the view was off a
+ * whole one when it was put there. The layer makes up the rest of the view in whole pixels, so everything is exactly
+ * where the view says, and sharp.
+ */
+/**
+ * How the zoom is handed to the browser. There are two ways, and which is right depends on the browser's engine: each
+ * was settled by filming what the engine puts on the screen frame by frame while a zoom is under way.
+ *
+ * In Chrome and Safari it is a scale on the element that holds the layers of the scene: one style to write, nothing to
+ * lay out, and every shape drawn again at the new scale.
+ *
+ * Firefox takes any transform that script keeps changing for an animation, and draws what is under it at the next power
+ * of two above its scale, to be shrunk to size when it is shown. That is soft, and stays soft until something next
+ * makes Firefox draw. A transform on a group inside the <svg> gets the same treatment. The box of its drawing an <svg>
+ * shows (its viewBox) does not: it scales what is in it just the same, and is drawn at that scale exactly, in the frame.
+ * So there the zoom is written on each layer's <svg>.
+ */
+const zoomsByViewBox = () => typeof CSS !== 'undefined' && typeof CSS.supports === 'function' && CSS.supports('-moz-appearance', 'none')
+interface Drawn { k: number; fx: number; fy: number }
+const drawnFor = (v: View): Drawn => ({ k: v.k, fx: v.x - whole(v.x), fy: v.y - whole(v.y) })
+/** The part of the scene the canvas shows under view `v`, and `margin` screen px beyond every edge: scene px. */
+const sightOf = (v: View, margin: number): Box => ({ x0: (-v.x - margin) / v.k, y0: (-v.y - margin) / v.k, x1: (cam.w - v.x + margin) / v.k, y1: (cam.h - v.y + margin) / v.k })
+const holds = (outer: Box, inner: Box) => outer.x0 <= inner.x0 && outer.y0 <= inner.y0 && outer.x1 >= inner.x1 && outer.y1 >= inner.y1
+const touching = (a: Box, b: Box) => a.x0 <= b.x1 && a.x1 >= b.x0 && a.y0 <= b.y1 && a.y1 >= b.y0
+
 export function Canvas() {
-  const ref = useRef<SVGSVGElement>(null)
+  // the surface: the one element that hears the pointer, and whose box is the canvas
+  const ref = useRef<HTMLDivElement>(null)
+  // the layer that pans: everything drawn of the diagram is inside it
+  const pan = useRef<HTMLDivElement>(null)
   const doc = useStore((s) => s.doc)
-  const view = useStore((s) => s.view)
+  // the element inside the layer that carries the zoom: every drawing of the diagram is inside this one
+  const zoom = useRef<HTMLDivElement>(null)
+  // How the scene sits in its layer at this moment (see `Drawn`). Neither the pan nor the zoom is drawn by React: both
+  // are written straight onto those two elements, frame by frame, and the browser draws the shapes at the zoom they are given
+  const drawnRef = useRef<Drawn>(drawnFor(useStore.getState().view))
+  // The zoom that what React does draw for a zoom was last drawn at: the handles and outlines that keep their size on
+  // the screen whatever the zoom, and how finely components are drawn. It follows the view at once whenever any of
+  // that is on the canvas or would change (`follows`), and otherwise when the view comes to rest
+  const [rk, setRk] = useState(() => useStore.getState().view.k)
+  const rkRef = useRef(rk)
+  rkRef.current = rk
+  // The zoom the view last came to rest at. What takes a click on a line is a band of the same width on the screen at
+  // any zoom (styles.css, `.edge-hit`): a width worked out from this. It is not `rk`: that follows a zoom frame by
+  // frame when something is selected, and a band nobody can see has no need to, at the cost of every line being
+  // measured again on each of those frames
+  const [restK, setRestK] = useState(() => useStore.getState().view.k)
   const yaw = useStore((s) => s.yaw)
   const pitch = useStore((s) => s.pitch)
   const selection = useStore((s) => s.selection)
@@ -137,8 +243,8 @@ export function Canvas() {
   const fresh = useStore((s) => s.fresh)
   const [moving, setMoving] = useState(false)
   // components build in when a blueprint opens
-  const [intro, setIntro] = useState(true)
-  useEffect(() => { setIntro(true); const t = setTimeout(() => setIntro(false), 1500); return () => clearTimeout(t) }, [doc.id])
+  const [opening, setOpening] = useState(true)
+  useEffect(() => { setOpening(true); const t = setTimeout(() => setOpening(false), 1500); return () => clearTimeout(t) }, [doc.id])
   const drag = useRef<Drag | null>(null)
   // Space is down, so the next press pans. A ref so that press sees it at once; `panning` is the state that turns the cursor
   const space = useRef(false)
@@ -155,12 +261,16 @@ export function Canvas() {
   const hoverRef = useRef<string | null>(null)
   // every pointer move asks; only a change of component is worth a render
   const setHover = (id: string | null) => { if (hoverRef.current !== id) { hoverRef.current = id; setHoverState(id) } }
+  // where the pointer last was while nothing was held: what it is over is looked up again there once the view has stopped moving
+  const over = useRef<[number, number] | null>(null)
   const [picking, setPicking] = useState<string[]>([])
   const [splice, setSplice] = useState<string | null>(null)
   const [quick, setQuick] = useState<{ x: number; y: number; wx: number; wy: number; from: string } | null>(null)
   // the last report of a carry, and the frame request of `follow`: a pointer resting at the edge reports nothing, so the view
   // goes on moving, and the drag with it, from the last place it was known to be
   const lastPtr = useRef<Ptr | null>(null)
+  // what the cursor read-out last said
+  const hudText = useRef('')
   const scrollRaf = useRef(0)
   const [ghost, setGhost] = useState<{ at: [number, number] } | null>(null)
   const [wire, setWireState] = useState<Wire | null>(null)
@@ -202,6 +312,40 @@ export function Canvas() {
   // what is drawn: the blueprint, or the blueprint with whatever is in the hand
   const shown = liveDoc ?? doc
   const routes = useRoutes(shown)
+  // small enough for the flourishes; and opening, which only a small blueprint makes a show of
+  const fx = shown.nodes.length <= FX_MAX
+  const intro = opening && fx
+
+  // ---- what is worth drawing. A large blueprint is only drawn where the view is, and a little beyond (`sight`, in scene px).
+  // It is kept in state so the scene is drawn again only when the view has moved far enough to need more, and in a ref so the
+  // view's listener, which outlives every render, can tell
+  const big = shown.nodes.length + shown.edges.length > CULL_AT
+  const [sightState, setSight] = useState<Box | null>(null)
+  const sightRef = useRef<Box | null>(null)
+  const bigRef = useRef(big)
+  bigRef.current = big
+  // the first render of a large blueprint comes before any view has been worked out for it: draw what the view in the store shows
+  const sight = big ? sightState ?? sightOf(useStore.getState().view, SIGHT_MARGIN) : null
+  // the components that are drawn, in bands from far to near (see `useBands`), and how many that is
+  const bands = useBands(shown.nodes, proj, sight)
+  const inSight = useMemo(() => bands.reduce((n, b) => n + b.nodes.length, 0), [bands])
+  // seen from far out with a great many in view, components are drawn plainly. It takes a clear step the other way to
+  // bring the detail back, so a count that hovers at the line does not redraw everything on every pan
+  const plainRef = useRef(false)
+  plainRef.current = big && (plainRef.current ? rk < PLAIN_K * 1.12 && inSight > PLAIN_COUNT * 0.75 : rk < PLAIN_K && inSight > PLAIN_COUNT)
+  // the camera is turning (by hand, or on its way to a view that was asked for), and for a moment after it stops
+  const [turning, setTurning] = useState(false)
+  const turned = useRef<{ yaw: number; pitch: number; timer?: ReturnType<typeof setTimeout> }>({ yaw, pitch })
+  useEffect(() => {
+    const t = turned.current
+    if (t.yaw === yaw && t.pitch === pitch) return
+    t.yaw = yaw; t.pitch = pitch
+    setTurning(true)
+    clearTimeout(t.timer)
+    t.timer = setTimeout(() => setTurning(false), REST_MS)
+  }, [yaw, pitch])
+  useEffect(() => () => clearTimeout(turned.current.timer), [])
+  const plain = plainRef.current || (turning && inSight > TURN_PLAIN)
   const trace = useStore((s) => s.trace)
   const focus = useMemo(() => (trace ? traceFlow(doc, trace) : null), [doc, trace])
 
@@ -215,22 +359,284 @@ export function Canvas() {
     }))
   }, [lens, doc, pricing])
 
+  // ---- the view. Pan and zoom are written straight onto two elements, outside React. A pan moves the layer, which the
+  // browser does on the graphics card without drawing anything again. A zoom changes the scale on the element inside
+  // the layer, and the browser draws the scene again from its shapes at that scale, in the same frame: nothing that was
+  // drawn at one size is ever shown at another (see `placeLayer`).
+  // `bars` are the two bars that float over a selection: they are not in the panning layer (they must stay the same size
+  // whatever the zoom), so they are moved here too, from where each is anchored in the scene. They sit at the canvas's
+  // corner and are carried from there by `translate`
+  const bars = useRef<{ node: HTMLDivElement | null; edge: HTMLDivElement | null; nodeAt: [number, number] | null; edgeAt: [number, number] | null }>({ node: null, edge: null, nodeAt: null, edgeAt: null })
+  /**
+   * The view as it is on screen. While the scene is drawn at the size it is shown, the layer sits on whole pixels (on a
+   * fraction of one, everything in it would be a little soft), so what is drawn can be up to half a pixel from what the
+   * store holds. Anything that turns a place on the screen into a place on the ground goes by this, not by the store.
+   */
+  const shownView = (v: View = useStore.getState().view): View => { const d = drawnRef.current; return v.k === d.k ? { k: v.k, x: whole(v.x - d.fx) + d.fx, y: whole(v.y - d.fy) + d.fy } : v }
+  /**
+   * Put the bars over the selection, and (`placeLayer`) the layer, where view `at` has them. Both are moved by a transform
+   * and nothing else: a position written as `left` or `top` would have the page laid out, which is the one thing a frame
+   * of a pan must not need (see camera.ts).
+   */
+  const placeBars = (at: View) => {
+    const v = shownView(at), b = bars.current
+    if (b.node && b.nodeAt) b.node.style.translate = `${b.nodeAt[0] * v.k + v.x}px ${b.nodeAt[1] * v.k + v.y}px`
+    if (b.edge && b.edgeAt) b.edge.style.translate = `${b.edgeAt[0] * v.k + v.x}px ${b.edgeAt[1] * v.k + v.y - 16}px`
+  }
+  // what holds the layer of the grid's fine dots, whose strength goes by the zoom
+  const fineDots = useRef<HTMLDivElement>(null)
+  /**
+   * Put the scene where view `at` has it.
+   *
+   * At the zoom it already has, only the layer moves, by whole pixels: nothing is drawn again, and the fraction of a
+   * pixel the view may be off by is left for when it comes to rest. With `exact`, or at any other zoom, the scene is put
+   * there exactly: the zoom and the fraction go on the element inside the layer. That is a change to what is in the
+   * layer, so the browser draws every shape again at the new scale, which is the point. The layer's own transform is
+   * never given a scale: a layer the browser has already drawn, shown at another size, is a stretched picture, soft
+   * until it is drawn again, and that is not shown for even a frame.
+   */
+  const [byViewBox] = useState(zoomsByViewBox)
+  /** Write the zoom, and the fraction of a pixel that goes with it, where this browser wants them (see `zoomsByViewBox`). */
+  const writeZoom = (d: Drawn) => {
+    const z = zoom.current
+    if (!z) return
+    if (byViewBox) {
+      // Each layer's <svg> is one pixel square, so the square of the scene it shows is 1/k of a scene px a side: that
+      // is the zoom. Its corner is set back by the fraction, which moves the scene on by as much
+      const box = `${-d.fx / d.k} ${-d.fy / d.k} ${1 / d.k} ${1 / d.k}`
+      for (const el of Array.from(z.children)) {
+        // (the fine dots' layer is inside an element of its own)
+        const layer = el instanceof SVGElement ? el : el.firstElementChild
+        if (layer && layer.getAttribute('viewBox') !== box) layer.setAttribute('viewBox', box)
+      }
+    } else {
+      const to = (d.fx || d.fy ? `translate(${d.fx}px, ${d.fy}px) ` : '') + `scale(${d.k})`
+      if (to !== z.style.transform) z.style.transform = to
+    }
+  }
+  const placeLayer = (at: View, exact = false) => {
+    const el = pan.current
+    if (!el || !zoom.current) return
+    let d = drawnRef.current
+    if (exact || at.k !== d.k) {
+      d = drawnRef.current = drawnFor(at)
+      writeZoom(d)
+      if (fineDots.current) fineDots.current.style.opacity = String(fineOpacity(d.k))
+    }
+    const to = `translate(${whole(at.x - d.fx)}px, ${whole(at.y - d.fy)}px)`
+    if (to !== el.style.transform) el.style.transform = to
+  }
+  const place = (at: View, exact = false) => { placeLayer(at, exact); placeBars(at) }
+  // Frames for which the layer is left where it is, counted down by the frame callback below. The reason is Chrome's:
+  // SVG text is laid out for the size it is shown at, and when anything on the page is laid out in the same frame as
+  // the layer moves, every piece of text in the layer is laid out again and the layer repainted, which on a large
+  // diagram is a frame dropped. One frame apart, neither happens: the change is drawn, and then the layer moves on its
+  // own. So whenever the canvas changes what is in the layer while the view is panning, the layer waits a frame.
+  // (A zoom is another matter: every frame of it draws the scene again anyway.)
+  const settle = useRef(0)
+  /** Draw more of a large blueprint if the view has come near the edge of what is drawn, or far less if it has closed in. */
+  const look = (v: View) => {
+    if (!bigRef.current) { if (sightRef.current) { sightRef.current = null; setSight(null) } return }
+    // what is drawn will do while it reaches a little past the canvas all round, and not absurdly far past (as it would after zooming a long way in)
+    const have = sightRef.current
+    if (have && holds(have, sightOf(v, SIGHT_MARGIN / 3)) && holds(sightOf(v, SIGHT_MARGIN * 4), have)) return
+    sightRef.current = sightOf(v, SIGHT_MARGIN)
+    settle.current = 1
+    setSight(sightRef.current)
+  }
+  /**
+   * The view has come to rest: let go of what a zoom in has left drawn far outside it. While the view moves, what is
+   * drawn is kept for as long as it will do (`look`), which after closing in can be several times more than the screen
+   * and its margin hold. It is all still painted, and traffic moving along the lines out there is drawn at every step,
+   * so at rest it is cut back to the margin. Nothing that can be seen changes.
+   */
+  const trim = (v: View) => {
+    const have = sightRef.current
+    if (!bigRef.current || !have || holds(sightOf(v, SIGHT_MARGIN * 2), have)) return
+    sightRef.current = sightOf(v, SIGHT_MARGIN)
+    setSight(sightRef.current)
+  }
+  // ---- what React draws for a zoom, and when it has to be drawn again in the middle of one. Most of the canvas does not
+  // care what the zoom is: the shapes are the same shapes. Three things do. Marks that keep their size on the screen
+  // (handles, guides, the outline round a selected group) are drawn at a size worked out from the zoom; components are
+  // drawn plainly from far out; and traffic and the fine grid are left out altogether below a certain zoom. `follows`
+  // says whether any of that is on the canvas, or would come out differently at zoom `k`: if so React draws again in that
+  // frame, and if not it is left alone until the view comes to rest. Drawing in the middle of a zoom is not free: what
+  // React changes is laid out, and in Chrome up to 156 one layout during a zoom has every word on the canvas laid out
+  // again on each frame after it until the zoom ends (a layout brings on a check of what is under the pointer, and that
+  // check re-measures any <svg> text whose scale has changed since it was last measured)
+  const inSightRef = useRef(inSight)
+  inSightRef.current = inSight
+  const plainAt = (k: number) => bigRef.current && (plainRef.current ? k < PLAIN_K * 1.12 && inSightRef.current > PLAIN_COUNT * 0.75 : k < PLAIN_K && inSightRef.current > PLAIN_COUNT)
+  const lookOf = (k: number) => (plainAt(k) ? 1 : 0) + (k >= FLOW_MIN_K ? 2 : 0) + (k > FINE_FROM ? 4 : 0)
+  // set further down, where the marks are drawn: some of them are sized by the zoom
+  const sized = useRef(false)
+  const follows = (k: number) => k !== rkRef.current && (sized.current || lookOf(k) !== lookOf(rkRef.current))
+
+  // Set up once, for the life of the canvas, before anything else here runs: what these call reads only refs and the store.
+  // The canvas hears of a change of view twice. As it happens (`followView`), to decide what that calls for: more of a
+  // large blueprint, the answers to the pointer put away. And once a frame, at the last moment (`stageView`), to put the
+  // scene where the view has it
+  const wrap = useRef<HTMLDivElement>(null)
+  useLayoutEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    // A zoom is under way. While it is, the layer gives up the surface of its own that makes panning free (see
+    // styles.css, `data-zooming`). On that surface the browser keeps a margin drawn all round the canvas, ready to be
+    // panned into, and would draw the margin again on every frame of the zoom along with what can be seen: three to
+    // four times the drawing, for nothing. Without it, a frame of a zoom draws what is on the canvas and no more
+    let zooming = false
+    // the scene has not been put exactly in place because the view was still in the hand: owed when the hand lets go
+    let owed = false
+    const inHand = () => drag.current !== null || fingers.current.size > 0
+    // the view has held still: traffic and the answers to the pointer, which stood still while it moved, pick up; the
+    // layer is given its own surface back; and a view that has stopped between two pixels is put exactly on them
+    const rest = () => {
+      wrap.current?.removeAttribute('data-viewing')
+      const v = useStore.getState().view
+      if (zooming) { zooming = false; wrap.current?.removeAttribute('data-zooming') }
+      trim(v)
+      // whatever React draws for the zoom, if it has not been following it
+      setRk(v.k)
+      setRestK(v.k)
+      // The view has paused with the button, or a finger, still down. At the zoom it has, the scene is left as it is: put
+      // exactly in place for where the hand has paused, it would sit a fraction of a pixel off wherever the hand took it
+      // next, and step back when it let go. So what is on screen when the hand lets go is what stays, and the scene is
+      // put in place then, once, if it needs it at all
+      if (inHand() && v.k === drawnRef.current.k) { owed = true; return }
+      owed = false
+      placeLayer(v, true)
+      hoverBack()
+    }
+    // (after the canvas's own handlers have seen the release, which is where the hand is counted as gone)
+    const letGo = () => setTimeout(() => { if (owed && !inHand()) { owed = false; placeLayer(useStore.getState().view, true) } }, 0)
+    window.addEventListener('pointerup', letGo)
+    window.addEventListener('pointercancel', letGo)
+    const off = followView((v) => {
+      // While the view is moving, the answers to the pointer and the traffic stand still, so that every frame is the move
+      // alone. Switching them off can itself change what is drawn (a component the pointer was on stops glowing): a frame is left for that
+      if (timer === undefined) { wrap.current?.setAttribute('data-viewing', ''); settle.current = 1 }
+      look(v)
+      clearTimeout(timer)
+      timer = setTimeout(() => { timer = undefined; rest() }, REST_MS)
+    })
+    stageView((v) => {
+      if (zooming || v.k !== drawnRef.current.k) {
+        // A frame of a zoom. The scene goes to the new zoom exactly, and the browser draws it there from its shapes, in
+        // this frame. Until the view comes to rest every frame is drawn like this, a pan in between included.
+        // One zoom is the exception: exactly 100%. Drawn with the page, at its natural size, on the page's opaque
+        // ground, words qualify for the subpixel antialiasing that screens with it switched on (most of Windows) give
+        // ordinary text, which a layer with a surface of its own never gets. The words would take on coloured edges as a
+        // zoom arrived at 100%, and lose them again a moment later at rest. So a frame at 100% is drawn on the layer's
+        // own surface, as it will be at rest
+        const own = Math.abs(v.k - 1) < 1e-6
+        if (zooming === own) { zooming = !own; wrap.current?.toggleAttribute('data-zooming', zooming) }
+        // what answers the pointer is put away for as long as the zoom lasts (see `hoverAway`)
+        hoverAway()
+        settle.current = 0
+        place(v, true)
+        // and what React draws for the zoom, in the same frame, if there is any of it to draw
+        if (follows(v.k)) flushSync(() => setRk(v.k))
+        return
+      }
+      if (settle.current > 0) { settle.current--; return false }
+      place(v)
+    })
+    place(useStore.getState().view, true)
+    atRest = () => { clearTimeout(timer); timer = undefined; rest() }
+    return () => { off(); stageView(null); clearTimeout(timer); atRest = null; window.removeEventListener('pointerup', letGo); window.removeEventListener('pointercancel', letGo) }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+  // ---- another screen. The layer sits on whole device pixels, which are not the same places on every screen: drag the
+  // window to one with a different number of them to the pixel, or use the browser's own zoom, and a layer that was on
+  // them is between them, where the browser shows its picture blended across two. So when that number changes the scene
+  // is put in place again. The browser says so in two ways, and both are listened to: a media query on the number it is
+  // now stops matching (a move between screens), and the canvas changes size (the browser's zoom; see the observer below)
+  const pixelsToAPixel = useRef((typeof devicePixelRatio === 'number' && devicePixelRatio) || 1)
+  const onScreen = () => {
+    const now = (typeof devicePixelRatio === 'number' && devicePixelRatio) || 1
+    if (now === pixelsToAPixel.current) return
+    pixelsToAPixel.current = now
+    placeLayer(useStore.getState().view, true)
+  }
+  useEffect(() => {
+    if (typeof matchMedia !== 'function') return
+    let watched: MediaQueryList | null = null
+    const moved = () => { onScreen(); watch() }
+    const watch = () => {
+      watched?.removeEventListener('change', moved)
+      watched = matchMedia(`(resolution: ${pixelsToAPixel.current}dppx)`)
+      watched.addEventListener('change', moved)
+    }
+    watch()
+    return () => watched?.removeEventListener('change', moved)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // ---- traffic goes to sleep when nothing has been touched for a while. A mark on the canvas that the stylesheet reads:
+  // it is not state, so it draws nothing
+  useEffect(() => {
+    let last = performance.now(), timer: ReturnType<typeof setTimeout> | undefined
+    const sleep = () => {
+      const idle = performance.now() - last
+      if (idle < FLOW_SLEEP_MS) { timer = setTimeout(sleep, FLOW_SLEEP_MS - idle); return }
+      timer = undefined
+      wrap.current?.setAttribute('data-asleep', '')
+    }
+    // every sign of life is noted, which costs a clock reading; the timer is only set again once it has run out
+    const stir = () => { last = performance.now(); if (timer === undefined) { wrap.current?.removeAttribute('data-asleep'); timer = setTimeout(sleep, FLOW_SLEEP_MS) } }
+    const signs = ['pointermove', 'pointerdown', 'keydown', 'wheel', 'touchstart'] as const
+    for (const name of signs) window.addEventListener(name, stir, { passive: true })
+    timer = setTimeout(sleep, FLOW_SLEEP_MS)
+    return () => { for (const name of signs) window.removeEventListener(name, stir); clearTimeout(timer) }
+  }, [])
+
+  // After every render. The bars are placed: they may be new, or anchored somewhere else. The layer is left to the frame
+  // callback, with one exception: if the camera has turned. Everything in the layer has then just been drawn again for the
+  // new angle, and for the view as it now stands (a turn keeps the point it turns about in place by moving the view with
+  // it, which rarely lands on a whole pixel). The scene is put there exactly, in the same breath: left to the frame
+  // callback it could be a frame behind the drawing, and for that frame the ground would not be where the turn is
+  // holding it; left on whole pixels, it would step into place when the turn had ended. Nothing is lost by it: a frame
+  // in which every shape has been drawn again is the long way round already
+  const placedFor = useRef(proj)
+  useLayoutEffect(() => {
+    const v = useStore.getState().view
+    if (placedFor.current !== proj) { placedFor.current = proj; placeLayer(v, true) }
+    // a layer that has only just been added has not been told the zoom, where it is each layer that is told
+    else if (byViewBox) writeZoom(drawnRef.current)
+    placeBars(v)
+    look(v)
+  })
+
   // ---- viewport size: `cam` (in camera.ts) is told how big the canvas is and where it sits, and the diagram is brought into frame.
   // Run again for each blueprint that is opened, which is why it hangs on `doc.id` though it never reads it: a new blueprint
   // is fitted, without animation, and resizes after that leave the view the user has
-  useEffect(() => {
+  /** Tell `cam` where the canvas is and how big. Called whenever that may have changed, so that nothing has to measure it while the pointer moves. */
+  const measure = () => {
+    const r = ref.current!.getBoundingClientRect()
+    cam.w = r.width; cam.h = r.height; cam.left = r.left; cam.top = r.top
+  }
+  // Before the first paint, and before any of the diagram is drawn: what is worth drawing, and how finely, depends on the
+  // view, and the view is not known until the canvas has been measured and the diagram fitted to it. A large blueprint
+  // is then drawn once, for the view it opens in, and not first for a view it never had
+  const [fitted, setFitted] = useState(false)
+  useLayoutEffect(() => {
     const el = ref.current!
     const ro = new ResizeObserver(() => {
-      const r = el.getBoundingClientRect()
       // still at the size `cam` starts with: nothing has been measured yet, so this is the first real size and worth a fit
       const first = cam.w === 1200 && cam.h === 800
-      cam.w = r.width; cam.h = r.height; cam.left = r.left; cam.top = r.top
+      measure()
       if (first) fitView(undefined, false)
+      onScreen()
+      look(useStore.getState().view)
     })
     ro.observe(el)
-    const r = el.getBoundingClientRect()
-    cam.w = r.width; cam.h = r.height; cam.left = r.left; cam.top = r.top
+    measure()
     fitView(undefined, false)
+    // the scene is about to be drawn for the first time: for this view, exactly
+    placeLayer(useStore.getState().view, true)
+    setRk(useStore.getState().view.k)
+    setRestK(useStore.getState().view.k)
+    setFitted(true)
     return () => ro.disconnect()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [doc.id])
@@ -239,11 +645,12 @@ export function Canvas() {
    * Client px to ground cells: take off the canvas's corner, undo the pan and zoom, then undo the camera.
    * The view is read from the store, not from this render, so it is right even inside a handler that has just changed it.
    * The camera defaults to this render's; a listener that outlives the render must pass `projNow()`.
+   * The corner is the one `cam` holds (see `measure`): asking the page for it here, on every pointer move, would make the
+   * browser lay the page out again each time.
    */
   const toWorld = (cx: number, cy: number, p: Proj = proj): [number, number] => {
-    const r = ref.current!.getBoundingClientRect()
-    const v = useStore.getState().view
-    return unproject(p, (cx - r.left - v.x) / v.k, (cy - r.top - v.y) / v.k)
+    const v = shownView()
+    return unproject(p, (cx - cam.left - v.x) / v.k, (cy - cam.top - v.y) / v.k)
   }
   /** The component under a client position. Asked of the page, because while the pointer is captured every event's target is the canvas itself. */
   const nodeAt = (cx: number, cy: number) => {
@@ -257,11 +664,10 @@ export function Canvas() {
     const el = ref.current!
     const onWheel = (e: WheelEvent) => {
       e.preventDefault()
-      const r = el.getBoundingClientRect()
       const { view } = useStore.getState()
       // what the event means (a wheel's notches, a pinch, or two fingers sliding) is worked out in wheel.ts, which knows how
       // differently the same movement is reported from one system to the next
-      const act = readWheel(e), cx = e.clientX - r.left, cy = e.clientY - r.top
+      const act = readWheel(e), cx = e.clientX - cam.left, cy = e.clientY - cam.top
       if (act.kind === 'pan') useStore.setState({ view: { ...view, x: view.x + act.dx, y: view.y + act.dy } })
       else if (act.eased) smoothZoom(act.factor, cx, cy)
       else { stopZoom(); useStore.setState({ view: zoomBy(act.factor, cx, cy) }) }
@@ -308,7 +714,7 @@ export function Canvas() {
     const over = (e: PointerEvent) => {
       const r = ref.current!.getBoundingClientRect()
       return e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom &&
-        !!(document.elementFromPoint(e.clientX, e.clientY)?.closest('.canvas-svg'))
+        !!(document.elementFromPoint(e.clientX, e.clientY)?.closest('.canvas-surface'))
     }
     // a new component stands on two cells by two, so its corner is one cell back from the pointer and its middle under it
     const at = (e: PointerEvent): [number, number] => {
@@ -355,8 +761,10 @@ export function Canvas() {
     // browser lets go of the capture itself when the pointer comes up or is cancelled, so nothing here releases it. The price:
     // from the next event on, `e.target` is the canvas, and what is under the pointer has to be asked of the page (`nodeAt`)
     try { ref.current!.setPointerCapture(e.pointerId) } catch { /* a pointer that is already gone cannot be captured */ }
+    // once a press, so every move that follows can take the canvas's corner as read
+    measure()
     if (touch) {
-      const r = ref.current!.getBoundingClientRect()
+      const r = cam
       const now = performance.now()
       // a finger on the glass stops whatever the camera was doing
       holdStill()
@@ -385,8 +793,7 @@ export function Canvas() {
     const hitEl = target.closest('[data-kind], [data-handle]')
     // orbit: right-drag anywhere, alt-drag on empty ground, or any drag with the orbit tool
     if (e.button === 2 || (e.button === 0 && (st.tool === 'orbit' || (e.altKey && !hitEl)))) {
-      const r = ref.current!.getBoundingClientRect()
-      drag.current = { mode: 'orbit', sx: e.clientX, sy: e.clientY, moved: false, button: e.button, update: beginOrbit(e.clientX - r.left, e.clientY - r.top) }
+      drag.current = { mode: 'orbit', sx: e.clientX, sy: e.clientY, moved: false, button: e.button, update: beginOrbit(e.clientX - cam.left, e.clientY - cam.top) }
       return
     }
     // the middle button, or Space held: a pan whatever is under the pointer. `moved` from the start, so letting go never deselects
@@ -640,9 +1047,10 @@ export function Canvas() {
   /** How hard the pointer is pushing against each edge of the canvas, in pixels per frame. */
   const edgePush = (p: Ptr): [number, number] => {
     // the edges that count are those of the ground left clear by the panels, since that is all there is to see
-    const r = ref.current!.getBoundingClientRect(), i = insets()
+    const i = insets(), right = cam.left + cam.w, bottom = cam.top + cam.h
     const f = (d: number) => (d < EDGE_ZONE ? Math.min(1, 1 - d / EDGE_ZONE) : 0)
-    return [(f(r.right - i.r + 12 - p.x) - f(p.x - r.left - i.l + 12)) * 14, (f(r.bottom - p.y) - f(p.y - r.top - i.t + 30)) * 14]
+    // in whole pixels: the view then stays on the pixels it is drawn for, and nothing has to be put right when it stops
+    return [whole((f(right - i.r + 12 - p.x) - f(p.x - cam.left - i.l + 12)) * 14), whole((f(bottom - p.y) - f(p.y - cam.top - i.t + 30)) * 14)]
   }
   /** While something is carried to the edge of the canvas, the view moves on so it can be taken further. */
   const follow = () => {
@@ -654,7 +1062,7 @@ export function Canvas() {
     const v = useStore.getState().view
     useStore.setState({ view: { ...v, x: v.x - vx, y: v.y - vy } })
     carry(d, p)
-    scrollRaf.current = requestAnimationFrame(follow)
+    scrollRaf.current = inNextFrame(follow)
   }
 
   /** Move the camera to where the two fingers are now. */
@@ -690,8 +1098,7 @@ export function Canvas() {
 
   const onPointerMove = (e: React.PointerEvent) => {
     if (e.pointerType === 'touch' && fingers.current.has(e.pointerId)) {
-      const r = ref.current!.getBoundingClientRect()
-      fingers.current.set(e.pointerId, { x: e.clientX - r.left, y: e.clientY - r.top })
+      fingers.current.set(e.pointerId, { x: e.clientX - cam.left, y: e.clientY - cam.top })
       if (gesture.current) {
         // both fingers report separately: wait for the frame so the camera moves once, with both in place
         if (fingers.current.size >= 2) onFrame(stepGesture)
@@ -703,7 +1110,9 @@ export function Canvas() {
     if (hud.el) {
       const [hx, hy] = toWorld(e.clientX, e.clientY)
       const n = (v: number) => (v < 0 ? '-' : '+') + String(Math.abs(Math.round(v))).padStart(3, '0')
-      hud.el.textContent = `X ${n(hx)}  Y ${n(hy)}`
+      // it reads in whole cells, so most moves change nothing: the page is only touched when the figure does
+      const text = `X ${n(hx)}  Y ${n(hy)}`
+      if (text !== hudText.current) { hudText.current = text; hud.el.textContent = text }
     }
     if (!d) { if (e.pointerType !== 'touch') trackHover(e); return }
     const st = useStore.getState()
@@ -711,7 +1120,7 @@ export function Canvas() {
       const p: Ptr = { x: e.clientX, y: e.clientY, shift: e.shiftKey, alt: e.altKey, ctrl: e.ctrlKey || e.metaKey, touch: e.pointerType === 'touch' }
       lastPtr.current = p
       carry(d, p)
-      if (!scrollRaf.current && edgePush(p).some(Boolean)) scrollRaf.current = requestAnimationFrame(follow)
+      if (!scrollRaf.current && edgePush(p).some(Boolean)) scrollRaf.current = inNextFrame(follow)
       return
     }
     if (d.mode === 'touch') {
@@ -730,8 +1139,7 @@ export function Canvas() {
       if (!d.moved && Math.abs(dy) < TOUCH_SLOP) return
       if (!d.moved) { d.moved = true; d.sy += Math.sign(dy) * TOUCH_SLOP; setPanning(true) }
       // down zooms in, up zooms out, about the spot that was tapped
-      const r = ref.current!.getBoundingClientRect()
-      const cx = d.sx - r.left, cy = d.sy - r.top
+      const cx = d.sx - cam.left, cy = d.sy - cam.top
       const k = Math.max(MIN_K, Math.min(MAX_K, d.view.k * Math.exp((e.clientY - d.sy) * 0.01)))
       st.set({ view: { k, x: cx - ((cx - d.view.x) * k) / d.view.k, y: cy - ((cy - d.view.y) * k) / d.view.k } })
       return
@@ -748,8 +1156,7 @@ export function Canvas() {
       if (!d.moved) { d.moved = true; setOrbiting(true) }
       d.update(dx, dy)
     } else if (d.mode === 'marquee') {
-      const r = ref.current!.getBoundingClientRect()
-      const m = { x: Math.min(d.sx, e.clientX) - r.left, y: Math.min(d.sy, e.clientY) - r.top, w: Math.abs(e.clientX - d.sx), h: Math.abs(e.clientY - d.sy) }
+      const m = { x: Math.min(d.sx, e.clientX) - cam.left, y: Math.min(d.sy, e.clientY) - cam.top, w: Math.abs(e.clientX - d.sx), h: Math.abs(e.clientY - d.sy) }
       setMarquee(m)
       // what the box has caught so far lights up as it grows
       const ids = inMarquee(m)
@@ -760,23 +1167,40 @@ export function Canvas() {
     }
   }
 
-  /** Which component the pointer is over, or just beside: its doors show while it is. */
-  const trackHover = (e: React.PointerEvent) => {
+  /** Which component the pointer is over, or just beside: its doors show while it is. `t` is what is under the pointer, at (x, y) on the page. */
+  const hoverAt = (t: Element | null, x: number, y: number) => {
     const st = useStore.getState()
-    if (st.tool !== 'select' || st.placing) return setHover(null)
-    const t = e.target as Element
+    if (!t || st.tool !== 'select' || st.placing) return setHover(null)
     let id = (t.closest?.('[data-handle="connect"]') as HTMLElement | null)?.dataset.id ?? (t.closest?.('[data-kind="node"]') as HTMLElement | null)?.dataset.id ?? null
     // the doors sit outside the body, so the pointer may leave it to reach one without losing them
     if (!id && hoverRef.current && !t.closest?.('[data-kind], [data-handle]')) {
       const n = st.doc.nodes.find((x) => x.id === hoverRef.current)
-      if (n && reachTo(n, toWorld(e.clientX, e.clientY)) < 1.3) id = n.id
+      if (n && reachTo(n, toWorld(x, y)) < 1.3) id = n.id
     }
     setHover(id)
+  }
+  const trackHover = (e: React.PointerEvent) => {
+    over.current = [e.clientX, e.clientY]
+    // not while the view is moving: the browser reports a pointer that has not moved as moving whenever what is under it does
+    if (!wrap.current?.hasAttribute('data-viewing')) hoverAt(e.target as Element, e.clientX, e.clientY)
+  }
+  /**
+   * The answers to the pointer are put away while the view zooms, and brought back when it has come to rest. A wheel is
+   * turned with the pointer on the canvas, as often as not on a component, and that component's doors are drawn at a
+   * size worked out from the zoom: left there, they would have to be drawn again on every frame of every zoom. Its glow
+   * goes out for as long as the view moves in any case (styles.css, `data-viewing`).
+   */
+  const hoverAway = () => setHover(null)
+  const hoverBack = () => {
+    const at = over.current, el = ref.current
+    if (!at || !el || drag.current) return
+    const t = document.elementFromPoint?.(at[0], at[1])
+    if (t && el.contains(t)) hoverAt(t, at[0], at[1])
   }
 
   /** Everything a selection box on screen has inside it. */
   const inMarquee = (m: { x: number; y: number; w: number; h: number }) => {
-    const st = useStore.getState(), v = st.view
+    const st = useStore.getState(), v = shownView(st.view)
     const inside = (wx: number, wy: number) => {
       const q = pt(proj, wx, wy)
       const sx = q[0] * v.k + v.x, sy = q[1] * v.k + v.y
@@ -979,14 +1403,19 @@ export function Canvas() {
   }
 
   // ---- overlay geometry
-  const byId = useMemo(() => new Map(shown.nodes.map((n) => [n.id, n])), [shown.nodes])
-  const selNodes = shown.nodes.filter((n) => sel.has(n.id))
-  const selAreas = shown.areas.filter((a) => sel.has(a.id))
-  const selEdges = shown.edges.filter((e) => sel.has(e.id))
-  const selLabels = shown.labels.filter((l) => sel.has(l.id))
+  const byId = useMemo(() => { const m = new Map<string, NodeT>(); for (const n of shown.nodes) m.set(n.id, n); return m }, [shown.nodes])
+  const selNodes = sel.size ? shown.nodes.filter((n) => sel.has(n.id)) : []
+  const selAreas = sel.size ? shown.areas.filter((a) => sel.has(a.id)) : []
+  const selEdges = sel.size ? shown.edges.filter((e) => sel.has(e.id)) : []
+  const selLabels = sel.size ? shown.labels.filter((l) => sel.has(l.id)) : []
+  // marks are only drawn for what is drawn: in a large blueprint, with everything selected, most of it is out of sight
+  const marked = sight ? selNodes.filter((n) => touching(nodeBox(n, proj), sight)) : selNodes
+  const litEdges = sight ? selEdges.filter((e) => { const r = routes.get(e.id); return !!r && touching(routeBox(r, proj), sight) }) : selEdges
+  // a few selected lines each get a soft halo and their ends marked; a great many are lit plainly, which says the same with a fifth of the drawing
+  const fine = litEdges.length <= MANY_LINES
   const single = selection.length === 1 && selNodes.length === 1 ? selNodes[0] : null
   const foot = (x: number, y: number, o = 0.06, s = 2) => poly([pt(proj, x - o, y - o), pt(proj, x + s + o, y - o), pt(proj, x + s + o, y + s + o), pt(proj, x - o, y + s + o)])
-  const gridOpacity = Math.max(0, Math.min(1, (view.k - 0.3) / 0.35))
+  const gridOpacity = fineOpacity(rk)
   const cursor = orbiting ? 'move' : panning ? 'grabbing' : tool === 'orbit' ? 'move' : placing ? 'copy' : tool === 'connect' || tool === 'area' ? 'crosshair' : tool === 'text' ? 'text' : 'default'
   const wireFrom = wire ? byId.get(wire.from) : null
   const wireTarget = wire?.target ? byId.get(wire.target) : null
@@ -997,258 +1426,320 @@ export function Canvas() {
   const hoverNode = hover && !busy && tool === 'select' ? byId.get(hover) : null
   const doorNodes = wire ? (wireTarget && !wire.bad ? [wireTarget] : []) : busy || tool !== 'select' ? [] : [...new Set([single, hoverNode].filter((n): n is NodeT => !!n))]
   const into = dropArea ? shown.areas.find((a) => a.id === dropArea) : null
+  // Some of what is marked on the canvas keeps its size on the screen whatever the zoom: handles, the outline of a
+  // selected group or label, guides while something is carried, a component's doors. Each is drawn at a size divided
+  // by the zoom, so while any of it is there, React draws again on every frame of a zoom (`follows`)
+  sized.current = !!single || litEdges.length > 0 || selAreas.length > 0 || selLabels.length > 0 || !!wire || !!into || guides.length > 0 || gaps.length > 0 || doorNodes.length > 0
   const fp = (x: number, y: number, o: number, s = 2) => brackets(proj, x - o, y - o, x + s + o, y + s + o, 0.55)
-  // screen position of a point in the scene
-  const toScreen = (wx: number, wy: number, wz = 0) => { const q = pt(proj, wx, wy, wz); return [q[0] * view.k + view.x, q[1] * view.k + view.y] }
-  const barAt = selNodes.length ? (() => {
-    const xs = selNodes.map((n) => centerOf(n)[0]), ys = selNodes.map((n) => centerOf(n)[1])
-    const cx = (Math.min(...xs) + Math.max(...xs)) / 2, cy = (Math.min(...ys) + Math.max(...ys)) / 2
-    // anchor above the tallest point of the selection
-    // (the body in a 3D view, the footprint's far edge when looking straight down)
-    const tops = selNodes.flatMap((n) => { const fs = footOf(n), k = fs / 2; return [toScreen(n.x + k, n.y + k, ((HEIGHT[defOf(n.type).model] ?? 1.6) + 0.25) * k)[1], ...[[0, 0], [fs, 0], [0, fs], [fs, fs]].map(([dx, dy]) => toScreen(n.x + dx, n.y + dy)[1])] })
-    return [toScreen(cx, cy, 0)[0], Math.min(...tops)]
+  // Where the bar over the selected components is anchored, in scene px: `place` turns that into a place on the canvas for
+  // whatever the view is. It sits above the tallest point of the selection (the body in a 3D view, the footprint's far edge
+  // when looking straight down); scene px only grow down the screen, so the highest point is the least y whatever the zoom
+  const barAt: [number, number] | null = selNodes.length ? (() => {
+    let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity, top = Infinity
+    for (const n of selNodes) {
+      const c = centerOf(n), fs = footOf(n), k = fs / 2
+      x0 = Math.min(x0, c[0]); x1 = Math.max(x1, c[0]); y0 = Math.min(y0, c[1]); y1 = Math.max(y1, c[1])
+      top = Math.min(top, pt(proj, n.x + k, n.y + k, ((HEIGHT[defOf(n.type).model] ?? 1.6) + 0.25) * k)[1], pt(proj, n.x, n.y)[1], pt(proj, n.x + fs, n.y)[1], pt(proj, n.x, n.y + fs)[1], pt(proj, n.x + fs, n.y + fs)[1])
+    }
+    return [pt(proj, (x0 + x1) / 2, (y0 + y1) / 2)[0], top]
   })() : null
 
   // one selected connection gets its own bar, where the line is: straighten it, change how it is drawn, hand it back to the router
   const oneEdge = selection.length === 1 && selEdges.length === 1 ? selEdges[0] : null
   const oneRoute = oneEdge ? routes.get(oneEdge.id) : null
-  // it sits above the whole of the line, never on it: the line is what is being worked on
-  const edgeBar = oneEdge && oneRoute ? (() => { const q = oneRoute.pts.map((p) => toScreen(p[0], p[1])); const xs = q.map((p) => p[0]); return [(Math.min(...xs) + Math.max(...xs)) / 2, Math.min(...q.map((p) => p[1])) - 16] })() : null
+  // it sits above the whole of the line, never on it: the line is what is being worked on. Anchored in scene px, like the other
+  const edgeBar: [number, number] | null = oneEdge && oneRoute ? (() => { const q = oneRoute.pts.map((p) => pt(proj, p[0], p[1])); const xs = q.map((p) => p[0]); return [(Math.min(...xs) + Math.max(...xs)) / 2, Math.min(...q.map((p) => p[1]))] })() : null
   const straight = oneEdge && oneRoute ? straightness(shown, oneEdge, oneRoute) : null
+  // what a selection of several costs, for the bar over it. Only while the bar is up, and only when the blueprint or the
+  // selection changes: summed on every render it would be worked out on every frame of a drag, for nothing
+  const showBar = !!barAt && !busy && tool === 'select'
+  const selCost = useMemo(() => (showBar && !single ? doc.nodes.reduce((t, n) => (sel.has(n.id) ? t + costOf(n, doc.region, pricing).monthly : t), 0) : 0), [showBar, single, doc.nodes, doc.region, sel, pricing])
+  // where the bars are anchored, for `place`: it runs after this render, and again whenever the view moves
+  bars.current.nodeAt = barAt
+  bars.current.edgeAt = edgeBar
+  // the scene is handed the selection as what is in the hand only while it is: otherwise nothing in it need know what is selected
+  const lifted = moving && drag.current?.mode === 'move' ? sel : null
+  const scene = { doc: shown, proj, theme, routes, focus, dim: wire?.relink?.id, within: sight, plain }
+  // handed to the stylesheet, for what is sized by the zoom there (the same object while the zoom is the same, so nothing is restyled for it)
+  const atZoom = useMemo(() => ({ '--k': restK }) as React.CSSProperties, [restK])
 
   return (
-    <div className={'canvas-wrap' + (intro ? ' intro' : '') + (busy ? ' busy' : '')} data-tool={tool}>
-      <svg ref={ref} className="canvas-svg" style={{ cursor }} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp}
-        onPointerCancel={onPointerUp} onPointerLeave={() => setHover(null)} onContextMenu={onContextMenu} onDoubleClick={onDoubleClick}>
-        <defs>
-          {/* dotted ground: a dot per cell, a stronger one every fourth. Each tile is shifted half a cell so one whole dot sits on the grid point: a quarter of the drawing of four clipped corner dots */}
-          <pattern id="grid" x={-U / 2} y={-U / 2} width={U} height={U} patternUnits="userSpaceOnUse">
-            <circle cx={U / 2} cy={U / 2} r={1.15} fill={theme.grid} />
-          </pattern>
-          <pattern id="grid-major" x={-U * 2} y={-U * 2} width={U * 4} height={U * 4} patternUnits="userSpaceOnUse">
-            <circle cx={U * 2} cy={U * 2} r={1.9} fill={theme.gridMajor} />
-          </pattern>
-        </defs>
-        <g transform={`translate(${f(view.x)} ${f(view.y)}) scale(${view.k})`}>
-          {showGrid && (
-            <g transform={`matrix(${proj.a} ${proj.c} ${proj.b} ${proj.d} 0 0)`} pointerEvents="none">
-              {/* zoomed far out the fine dots have faded away, so they are not drawn at all */}
-              {gridOpacity > 0 && <rect x={-300 * U} y={-300 * U} width={600 * U} height={600 * U} fill="url(#grid)" opacity={gridOpacity} />}
-              <rect x={-300 * U} y={-300 * U} width={600 * U} height={600 * U} fill="url(#grid-major)" />
-              {/* origin mark */}
-              <path d={`M${-U * 0.5} 0H${U * 0.5}M0 ${-U * 0.5}V${U * 0.5}`} stroke={theme.gridMajor} strokeWidth={1.2} />
-            </g>
+    <div ref={wrap} className={'canvas-wrap' + (intro ? ' intro' : '') + (busy ? ' busy' : '') + (fx ? ' fx' : '') + (inSight > FLOW_CROWDED ? ' flow-12' : inSight > FLOW_BUSY ? ' flow-20' : '')} data-tool={tool}>
+      <div ref={ref} className="canvas-surface" style={{ cursor }} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp}
+        onPointerCancel={onPointerUp} onPointerEnter={measure} onPointerLeave={() => { over.current = null; setHover(null) }} onContextMenu={onContextMenu} onDoubleClick={onDoubleClick}>
+        <div ref={pan} className="canvas-pan">
+          {/* One pixel that can barely be told from none, drawn in the layer but outside the element that carries the zoom.
+              It is what keeps the zoom part of the drawing. With everything in the layer inside that element, Chrome
+              would make the element's scale the layer's own, and a layer's scale is applied to the picture it has already
+              drawn: the very stretching this is built to avoid */}
+          <i className="canvas-pin" />
+          <div ref={zoom} className="canvas-zoom">
+          {/* Under everything, the fine dots of the ground's grid: a layer of their own, because they fade with the zoom.
+              The fading is written frame by frame as a zoom goes (see `placeLayer`), and it is written on an element
+              that wraps the layer, not on the <svg> or the shape in it. Chrome answers a change of opacity on either of
+              those by laying the drawing out again, and with it every word on the canvas (measured: one layout pass a
+              frame, where the same change on a <div> costs none). Zoomed far out the dots have faded away altogether,
+              so they are not drawn at all */}
+          {showGrid && gridOpacity > 0 && (
+            <div ref={fineDots} className="canvas-fine" style={{ opacity: gridOpacity }}>
+              <svg className="canvas-layer fine" aria-hidden>
+                <g pointerEvents="none" transform={`matrix(${proj.a} ${proj.c} ${proj.b} ${proj.d} 0 0)`}>
+                  <rect x={-300 * U} y={-300 * U} width={600 * U} height={600 * U} fill="url(#grid)" />
+                </g>
+              </svg>
+            </div>
           )}
-          {/* selection marks sit under the scene so bodies occlude them naturally */}
-          <g pointerEvents="none">
-            {selNodes.map((n) => (
-              <g key={n.id} className="sel-mark">
-                <polygon points={foot(n.x, n.y, 0.1, footOf(n))} fill={ACCENT} fillOpacity={0.09} />
-                <path d={fp(n.x, n.y, 0.1, footOf(n))} fill="none" stroke={ACCENT} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" />
-              </g>
-            ))}
-            {/* from here on, marks for what is under way: a drop, a selection box, a hover, a connection waiting for its other end */}
-            {/* the group it is about to join */}
-            {into && <polygon className="drop-area" points={poly([pt(proj, into.x, into.y), pt(proj, into.x + into.w, into.y), pt(proj, into.x + into.w, into.y + into.d), pt(proj, into.x, into.y + into.d)])} fill={ACCENT} fillOpacity={0.06} stroke={ACCENT} strokeOpacity={0.8} strokeWidth={1.5 / view.k} strokeLinejoin="round" />}
-            {/* what a selection box has caught so far */}
-            {picking.map((id) => { const n = byId.get(id); return n && !sel.has(id) ? <path key={'p' + id} className="picking" d={fp(n.x, n.y, 0.1, footOf(n))} fill="none" stroke={ACCENT} strokeOpacity={0.6} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" /> : null })}
-            {/* a component's footprint answers the pointer before anything is pressed */}
-            {hoverNode && !sel.has(hoverNode.id) && <path className="hover-mark" d={fp(hoverNode.x, hoverNode.y, 0.1, footOf(hoverNode))} fill="none" stroke={ACCENT} strokeOpacity={0.4} strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round" />}
-            {linkNode && (
-              <g className="link-from">
-                <polygon points={foot(linkNode.x, linkNode.y, 0.1, footOf(linkNode))} fill={ACCENT} fillOpacity={0.18} />
-                <path d={fp(linkNode.x, linkNode.y, 0.1, footOf(linkNode))} fill="none" stroke={ACCENT} strokeWidth={2} strokeLinecap="round" />
-              </g>
-            )}
-            {guides.map((g) => {
-              const a = g.axis === 'x' ? pt(proj, g.at, g.from - 1.6) : pt(proj, g.from - 1.6, g.at)
-              const b = g.axis === 'x' ? pt(proj, g.at, g.to + 1.6) : pt(proj, g.to + 1.6, g.at)
-              return <line key={g.axis + g.at} className="guide" x1={f(a[0])} y1={f(a[1])} x2={f(b[0])} y2={f(b[1])} stroke={ACCENT} strokeOpacity={0.75} strokeWidth={1 / view.k} strokeDasharray={`${3 / view.k} ${4 / view.k}`} />
-            })}
-            {/* equal gaps: a measure across each, capped at both ends */}
-            {gaps.map((g) => {
-              const P = (along: number, across: number) => (g.axis === 'x' ? pt(proj, along, across) : pt(proj, across, along))
-              const a = P(g.from, g.at), b = P(g.to, g.at), c = 0.22
-              const cap = (v: number) => { const p = P(v, g.at - c), q = P(v, g.at + c); return `M${f(p[0])} ${f(p[1])}L${f(q[0])} ${f(q[1])}` }
-              return <path key={g.axis + g.from + ':' + g.to} className="gap" d={`M${f(a[0])} ${f(a[1])}L${f(b[0])} ${f(b[1])}${cap(g.from)}${cap(g.to)}`} fill="none" stroke={ACCENT} strokeOpacity={0.85} strokeWidth={1.25 / view.k} strokeLinecap="round" />
-            })}
-            {wireTarget && (
-              <g className={'wire-target' + (wire?.bad ? ' bad' : '')}>
-                <polygon points={foot(wireTarget.x, wireTarget.y, 0.1, footOf(wireTarget))} fill={wire?.bad ? theme.textDim : ACCENT} fillOpacity={wire?.bad ? 0.08 : 0.18} />
-                <path d={fp(wireTarget.x, wireTarget.y, 0.1, footOf(wireTarget))} fill="none" stroke={wire?.bad ? theme.textDim : ACCENT} strokeWidth={2} strokeLinecap="round" strokeDasharray={wire?.bad ? '3 5' : undefined} />
-              </g>
-            )}
-          </g>
-          <Scene doc={shown} proj={proj} theme={theme} showLabels={showLabels} flow={flow} lens={lensMap} fresh={fresh} routes={routes} focus={focus}
-            lifted={moving && drag.current?.mode === 'move' ? sel : null} dim={wire?.relink?.id} />
-          <g className="overlay">
-            {selEdges.map((e) => {
-              const a = byId.get(e.from), b = byId.get(e.to), r = routes.get(e.id)
-              // while one of its ends is in the hand, the line is drawn where it is going, not where it was
-              if (!a || !b || !r || wire?.relink?.id === e.id) return null
-              // the highlight is the scene's own drawing of this line, asked for again: the same path and the same arrowheads,
-              // so it lies exactly on the line it lights up and never reshapes it
-              const { line: d, heads } = drawingOf(proj, r, e.arrow)
-              const editing = selection.length === 1 && tool === 'select'
-              const P = (q: [number, number]) => pt(proj, q[0], q[1])
-              // fingers get a generous invisible target around each small visible handle
-              const grab = (c: [number, number], name: string) => coarse && <circle cx={c[0]} cy={c[1]} r={17 / view.k} fill="transparent" data-handle={name} />
-              const last = r.pts.length - 1
-              const held = drag.current?.mode === 'seg' && moving
-              return (
-                <g key={e.id} className={'edge-sel' + (held ? ' held' : '')}>
-                  <g pointerEvents="none">
-                    {/* a soft halo in three plain strokes that fade outwards, then the line itself. No blur filter: a filter's box is sized from the
-                        path's bounds, which have no height on a level line, so a blurred glow came out clipped or lopsided there */}
-                    {[[11, 0.045], [7, 0.07], [3.5, 0.13]].map(([wide, op]) => <path key={wide} d={d} fill="none" stroke={ACCENT} strokeWidth={e.width + wide} strokeOpacity={op} strokeLinecap="round" strokeLinejoin="round" />)}
-                    <path d={d} fill="none" stroke={ACCENT} strokeWidth={e.width} strokeLinecap="round" strokeLinejoin="round" />
-                    {heads.map((h, i) => <polygon key={i} points={poly(h.map((q) => pt(proj, q[0], q[1])))} fill={ACCENT} stroke={ACCENT} strokeWidth={1} strokeLinejoin="round" />)}
-                    {/* a caption that sits on a curve is drawn again over the highlight, so the line does not run through the words */}
-                    {r.shape === 'curved' && <EdgeCaption e={e} r={r} proj={proj} theme={theme} />}
-                    {/* both ends of the selected connection are marked, so it is plain what it joins */}
-                    {[a, b].map((n) => <path key={n.id} d={fp(n.x, n.y, 0.12, footOf(n))} fill="none" stroke={ACCENT} strokeWidth={2} strokeOpacity={0.8} strokeLinecap="round" strokeLinejoin="round" />)}
-                  </g>
-                  {/* every run of a right-angled line can be taken hold of along its whole length and moved sideways.
-                      A short grip in the middle of each says so, and the pointer shows which way it goes */}
-                  {editing && !moving && r.shape === 'ortho' && r.pts.slice(0, -1).map((p, i) => {
-                    const q = r.pts[i + 1], len = Math.abs(q[0] - p[0]) + Math.abs(q[1] - p[1])
-                    if (len < 0.2) return null
-                    const A = P(p), B = P(q), c = [(A[0] + B[0]) / 2, (A[1] + B[1]) / 2]
-                    const L = Math.hypot(B[0] - A[0], B[1] - A[1]) || 1, ux = (B[0] - A[0]) / L, uy = (B[1] - A[1]) / L
-                    // which way the run travels on screen when it is moved: across itself on the ground
-                    const side = p[1] === q[1] ? [P([p[0], p[1] + 1]), A] : [P([p[0] + 1, p[1]]), A]
-                    const deg = ((Math.atan2(side[0][1] - side[1][1], side[0][0] - side[1][0]) * 180) / Math.PI + 360) % 180
-                    const cursor = ['ew-resize', 'nwse-resize', 'ns-resize', 'nesw-resize'][Math.round(deg / 45) % 4]
-                    const g = Math.min(8, (L * view.k) / 3) / view.k
-                    return (
-                      <g key={'s' + i} className="run-hit" data-handle={'s' + i} style={{ cursor }}>
-                        <line x1={A[0]} y1={A[1]} x2={B[0]} y2={B[1]} stroke="transparent" strokeWidth={(coarse ? 30 : 14) / view.k} strokeLinecap="butt" />
-                        {len >= 0.9 && <line className="run-grip" x1={c[0] - ux * g} y1={c[1] - uy * g} x2={c[0] + ux * g} y2={c[1] + uy * g} stroke={theme.bg} strokeWidth={7 / view.k} strokeLinecap="round" pointerEvents="none" />}
-                        {len >= 0.9 && <line className="run-grip" x1={c[0] - ux * g} y1={c[1] - uy * g} x2={c[0] + ux * g} y2={c[1] + uy * g} stroke={ACCENT} strokeWidth={3.5 / view.k} strokeLinecap="round" pointerEvents="none" />}
-                      </g>
-                    )
-                  })}
-                  {/* each turn can be taken hold of too, and moved wherever: the two runs that meet at it follow */}
-                  {editing && !moving && r.shape === 'ortho' && r.pts.slice(1, -1).map((p, i) => {
-                    const c = P(p)
-                    return (
-                      <g key={'c' + i}>
-                        {grab(c, 'c' + (i + 1))}
-                        <circle cx={c[0]} cy={c[1]} r={8 / view.k} fill="transparent" data-handle={'c' + (i + 1)} style={{ cursor: 'move' }} />
-                        <circle className="turn-grip" cx={c[0]} cy={c[1]} r={3.2 / view.k} fill={ACCENT} stroke={theme.bg} strokeWidth={1.5 / view.k} pointerEvents="none" />
-                      </g>
-                    )
-                  })}
-                  {editing && ([['ea', r.pts[0]], ['eb', r.pts[last]]] as const).map(([name, p]) => {
-                    const c = P(p as [number, number])
-                    return (
-                      <g key={name}>
-                        {grab(c, name)}
-                        <circle cx={c[0]} cy={c[1]} r={5.5 / view.k} fill={theme.bg} stroke={ACCENT} strokeWidth={2 / view.k} data-handle={name} className="handle link-end" style={{ cursor: 'crosshair' }} />
-                      </g>
-                    )
-                  })}
+          {/* then the rest of the grid; then the marks that bodies stand on and so hide where they should */}
+          <svg className="canvas-layer under" aria-hidden>
+            <defs>
+              {/* dotted ground: a dot per cell, a stronger one every fourth. Each tile is shifted half a cell so one whole dot sits on the grid point: a quarter of the drawing of four clipped corner dots */}
+              <pattern id="grid" x={-U / 2} y={-U / 2} width={U} height={U} patternUnits="userSpaceOnUse">
+                <circle cx={U / 2} cy={U / 2} r={1.15} fill={theme.grid} />
+              </pattern>
+              <pattern id="grid-major" x={-U * 2} y={-U * 2} width={U * 4} height={U * 4} patternUnits="userSpaceOnUse">
+                <circle cx={U * 2} cy={U * 2} r={1.9} fill={theme.gridMajor} />
+              </pattern>
+            </defs>
+            <g pointerEvents="none">
+              {showGrid && (
+                <g transform={`matrix(${proj.a} ${proj.c} ${proj.b} ${proj.d} 0 0)`}>
+                  <rect x={-300 * U} y={-300 * U} width={600 * U} height={600 * U} fill="url(#grid-major)" />
+                  {/* origin mark */}
+                  <path d={`M${-U * 0.5} 0H${U * 0.5}M0 ${-U * 0.5}V${U * 0.5}`} stroke={theme.gridMajor} strokeWidth={1.2} />
                 </g>
-              )
-            })}
-            {selAreas.map((a) => {
-              const corners = [pt(proj, a.x, a.y), pt(proj, a.x + a.w, a.y), pt(proj, a.x + a.w, a.y + a.d), pt(proj, a.x, a.y + a.d)]
-              return (
-                <g key={a.id}>
-                  <polygon points={poly(corners)} fill={ACCENT} fillOpacity={0.04} stroke={ACCENT} strokeWidth={1.25 / view.k} strokeLinejoin="round" pointerEvents="none" />
-                  {selection.length === 1 && coarse && corners.map((c, i) => <circle key={'t' + i} cx={c[0]} cy={c[1]} r={15 / view.k} fill="transparent" data-handle={'r' + i} />)}
-                  {selection.length === 1 && corners.map((c, i) => (
-                    <rect key={i} x={c[0] - 5 / view.k} y={c[1] - 5 / view.k} width={10 / view.k} height={10 / view.k} rx={2.5 / view.k} fill={theme.bg} stroke={ACCENT} strokeWidth={1.5 / view.k}
-                      data-handle={'r' + i} className="handle" style={{ cursor: 'crosshair' }} />
-                  ))}
+              )}
+            </g>
+          </svg>
+          {/* The marks on the ground are a layer of their own, apart from the grid under them. They change on every frame of
+              a carry (the selection's mark goes with it, guides come and go), and a browser paints an <svg> as a whole:
+              in the grid's, each of those frames would have Firefox work the dotted ground out again, which costs it more
+              than the rest of a small blueprint put together (measured: 36 ms a frame against 17) */}
+          <svg className="canvas-layer marks" aria-hidden>
+            <g pointerEvents="none">
+              {/* selection marks sit under the scene so bodies occlude them naturally */}
+              {marked.map((n) => (
+                <g key={n.id} className="sel-mark">
+                  <polygon points={foot(n.x, n.y, 0.1, footOf(n))} fill={ACCENT} fillOpacity={0.09} />
+                  <path d={fp(n.x, n.y, 0.1, footOf(n))} fill="none" stroke={ACCENT} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" />
                 </g>
-              )
-            })}
-            {selLabels.map((l) => {
-              const len = Math.max(...l.text.split('\n').map((t) => t.length)) * l.size * 0.56 / U
-              const rows = l.text.split('\n').length * l.size * 1.2 / U
-              const c = l.dir === 'x'
-                ? [pt(proj, l.x - 0.15, l.y - 0.1), pt(proj, l.x + len + 0.15, l.y - 0.1), pt(proj, l.x + len + 0.15, l.y + rows), pt(proj, l.x - 0.15, l.y + rows)]
-                : [pt(proj, l.x - 0.1, l.y + 0.15), pt(proj, l.x - 0.1, l.y - len - 0.15), pt(proj, l.x + rows, l.y - len - 0.15), pt(proj, l.x + rows, l.y + 0.15)]
-              return <polygon key={l.id} points={poly(c)} fill={ACCENT} fillOpacity={0.05} stroke={ACCENT} strokeWidth={1.25 / view.k} pointerEvents="none" />
-            })}
-            {draft && (
-              <g pointerEvents="none">
-                <polygon points={poly([pt(proj, draft.x, draft.y), pt(proj, draft.x + draft.w, draft.y), pt(proj, draft.x + draft.w, draft.y + draft.d), pt(proj, draft.x, draft.y + draft.d)])}
-                  fill={ACCENT} fillOpacity={0.07} stroke={ACCENT} strokeOpacity={0.5} strokeWidth={1} />
-                <path d={brackets(proj, draft.x, draft.y, draft.x + draft.w, draft.y + draft.d, 0.6)} fill="none" stroke={ACCENT} strokeWidth={2} strokeLinecap="round" />
-              </g>
-            )}
-            {splice && routes.get(splice) && <path className="splice" d={lineOf(proj, routes.get(splice)!)} fill="none" stroke={ACCENT} strokeWidth={4} strokeLinecap="round" strokeLinejoin="round" pointerEvents="none" />}
-            {wire && wireFrom && (() => {
-              // the line as it will be drawn if it is let go now: routed round what is in the way, to what it has caught or to the pointer
-              const caught = wireTarget && !wire.bad && wireTarget.id !== wireFrom.id ? wireTarget : null
-              const back = wire.relink?.end === 'from'
-              // caught, it is routed exactly as it will be once it is let go: as part of the whole diagram, beside the lines already on those sides
-              const moving = wire.relink ? shown.edges.find((x) => x.id === wire.relink!.id) : null
-              const made: EdgeT | null = !caught ? null : moving ? reended(moving, wire.relink!.end, caught.id, wire.side) : { id: '~wire', from: wireFrom.id, to: caught.id, style: 'solid', arrow: 'end', width: 2, toSide: wire.side }
-              const pts = made
-                ? routeAll(shown.nodes, moving ? shown.edges.map((x) => (x.id === made.id ? made : x)) : [...shown.edges, made]).get(made.id)?.pts ?? []
-                : routeToPoint(wireFrom, wire.to, shown.nodes)
-              if (pts.length < 2) return null
-              const n = pts.length, tip = back ? null : pts[n - 1]
-              return (
-                <g pointerEvents="none" className={'wire' + (caught ? ' caught' : '') + (wire.bad ? ' bad' : '')}>
-                  <path d={pathOf(proj, pts, 0, caught && tip ? 0.26 : 0)} fill="none" stroke={ACCENT} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" strokeDasharray={caught ? undefined : '5 6'} />
-                  {caught && tip && <polygon points={poly(arrowAt(tip, pts[n - 2], 0.34).map((q) => pt(proj, q[0], q[1])))} fill={ACCENT} stroke={ACCENT} strokeWidth={1} strokeLinejoin="round" />}
-                  {!caught && (() => { const c = pt(proj, wire.to[0], wire.to[1]); return <circle cx={f(c[0])} cy={f(c[1])} r={3.5 / view.k} fill={ACCENT} /> })()}
+              ))}
+              {/* from here on, marks for what is under way: a drop, a selection box, a hover, a connection waiting for its other end */}
+              {/* the group it is about to join */}
+              {into && <polygon className="drop-area" points={poly([pt(proj, into.x, into.y), pt(proj, into.x + into.w, into.y), pt(proj, into.x + into.w, into.y + into.d), pt(proj, into.x, into.y + into.d)])} fill={ACCENT} fillOpacity={0.06} stroke={ACCENT} strokeOpacity={0.8} strokeWidth={1.5 / rk} strokeLinejoin="round" />}
+              {/* what a selection box has caught so far */}
+              {picking.map((id) => { const n = byId.get(id); return n && !sel.has(id) ? <path key={'p' + id} className="picking" d={fp(n.x, n.y, 0.1, footOf(n))} fill="none" stroke={ACCENT} strokeOpacity={0.6} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" /> : null })}
+              {/* a component's footprint answers the pointer before anything is pressed */}
+              {hoverNode && !sel.has(hoverNode.id) && <path className="hover-mark" d={fp(hoverNode.x, hoverNode.y, 0.1, footOf(hoverNode))} fill="none" stroke={ACCENT} strokeOpacity={0.4} strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round" />}
+              {linkNode && (
+                <g className="link-from">
+                  <polygon points={foot(linkNode.x, linkNode.y, 0.1, footOf(linkNode))} fill={ACCENT} fillOpacity={0.18} />
+                  <path d={fp(linkNode.x, linkNode.y, 0.1, footOf(linkNode))} fill="none" stroke={ACCENT} strokeWidth={2} strokeLinecap="round" />
                 </g>
-              )
-            })()}
-            {ghost && placing && (
-              <g pointerEvents="none" className="ghost">
-                {/* the cell it will land in, then the component itself, following the pointer */}
-                <polygon points={foot(ghost.at[0], ghost.at[1], 0.1)} fill={ACCENT} fillOpacity={0.1} />
-                <path d={fp(ghost.at[0], ghost.at[1], 0.1)} fill="none" stroke={ACCENT} strokeWidth={2} strokeLinecap="round" />
-                <g transform={`translate(${pt(proj, ghost.at[0], ghost.at[1]).map(f).join(' ')})`} opacity={0.82}><Model type={placing} proj={proj} /></g>
-              </g>
-            )}
-            {/* corner handles: drag to resize the selected component */}
-            {single && tool === 'select' && !wire && !moving && (!coarse || footOf(single) * U * view.k > 64) && [[0, 0], [1, 0], [1, 1], [0, 1]].map(([ix, iy], i) => {
-              const fs = footOf(single), o = 0.1
-              const c = pt(proj, single.x + (ix ? fs + o : -o), single.y + (iy ? fs + o : -o))
-              const r = 4.5 / view.k
-              // the arrow points the way the corner actually moves on screen, whatever the camera angle
-              const mid = pt(proj, single.x + fs / 2, single.y + fs / 2)
-              const deg = ((Math.atan2(c[1] - mid[1], c[0] - mid[0]) * 180) / Math.PI + 360) % 180
-              const arrow = ['ew-resize', 'nwse-resize', 'ns-resize', 'nesw-resize'][Math.round(deg / 45) % 4]
-              return (
-                <g key={i} data-handle={'n' + i} style={{ cursor: arrow }}>
-                  {coarse && <circle cx={c[0]} cy={c[1]} r={15 / view.k} fill="transparent" />}
-                  <rect x={c[0] - r} y={c[1] - r} width={r * 2} height={r * 2} rx={r * 0.3} fill={theme.bg} stroke={ACCENT} strokeWidth={1.5 / view.k}
-                    className="handle" style={{ cursor: arrow }}><title>Drag to resize</title></rect>
+              )}
+              {guides.map((g) => {
+                const a = g.axis === 'x' ? pt(proj, g.at, g.from - 1.6) : pt(proj, g.from - 1.6, g.at)
+                const b = g.axis === 'x' ? pt(proj, g.at, g.to + 1.6) : pt(proj, g.to + 1.6, g.at)
+                return <line key={g.axis + g.at} className="guide" x1={f(a[0])} y1={f(a[1])} x2={f(b[0])} y2={f(b[1])} stroke={ACCENT} strokeOpacity={0.75} strokeWidth={1 / rk} strokeDasharray={`${3 / rk} ${4 / rk}`} />
+              })}
+              {/* equal gaps: a measure across each, capped at both ends */}
+              {gaps.map((g) => {
+                const P = (along: number, across: number) => (g.axis === 'x' ? pt(proj, along, across) : pt(proj, across, along))
+                const a = P(g.from, g.at), b = P(g.to, g.at), c = 0.22
+                const cap = (v: number) => { const p = P(v, g.at - c), q = P(v, g.at + c); return `M${f(p[0])} ${f(p[1])}L${f(q[0])} ${f(q[1])}` }
+                return <path key={g.axis + g.from + ':' + g.to} className="gap" d={`M${f(a[0])} ${f(a[1])}L${f(b[0])} ${f(b[1])}${cap(g.from)}${cap(g.to)}`} fill="none" stroke={ACCENT} strokeOpacity={0.85} strokeWidth={1.25 / rk} strokeLinecap="round" />
+              })}
+              {wireTarget && (
+                <g className={'wire-target' + (wire?.bad ? ' bad' : '')}>
+                  <polygon points={foot(wireTarget.x, wireTarget.y, 0.1, footOf(wireTarget))} fill={wire?.bad ? theme.textDim : ACCENT} fillOpacity={wire?.bad ? 0.08 : 0.18} />
+                  <path d={fp(wireTarget.x, wireTarget.y, 0.1, footOf(wireTarget))} fill="none" stroke={wire?.bad ? theme.textDim : ACCENT} strokeWidth={2} strokeLinecap="round" strokeDasharray={wire?.bad ? '3 5' : undefined} />
                 </g>
-              )
-            })}
-            {/* doors: press on one and pull to draw a connection. They show on what the pointer is over, on the one thing selected,
-                and on whatever a connection in the hand has caught */}
-            {doorNodes.map((n) => {
-              const ports = doors(n)
-              return SIDES.map((side) => {
-                const c = pt(proj, ports[side][0], ports[side][1])
-                const aimed = !!wire && wire.target === n.id && wire.side === side
+              )}
+            </g>
+          </svg>
+          {/* the scene, a layer to an <svg>: see Scene.tsx for why they are apart */}
+          {fitted && <svg className="canvas-layer ground" aria-hidden style={atZoom}><g><SceneGround {...scene} /></g></svg>}
+          {fitted && <svg className="canvas-layer flow" aria-hidden><g><SceneFlow {...scene} flow={flow && rk >= FLOW_MIN_K} /></g></svg>}
+          {fitted && <svg className="canvas-layer top" aria-hidden><g><SceneText {...scene} lens={lensMap} bands={bands} /></g></svg>}
+          {/* components, a band of depth to an <svg>: moving one repaints its own band and leaves the rest as they are */}
+          {fitted && bands.map((b) => (
+            <svg key={b.key} className="canvas-layer band" aria-hidden>
+              <g><NodeBand nodes={b.nodes} first={intro ? b.first : undefined} proj={proj} theme={theme} showLabels={showLabels} lens={lensMap} fresh={fresh} focus={focus} lifted={lifted} plain={plain} /></g>
+            </svg>
+          ))}
+          <svg className="canvas-layer over">
+            <g className="overlay" style={atZoom}>
+              {litEdges.map((e) => {
+                const a = byId.get(e.from), b = byId.get(e.to), r = routes.get(e.id)
+                // while one of its ends is in the hand, the line is drawn where it is going, not where it was
+                if (!a || !b || !r || wire?.relink?.id === e.id) return null
+                // the highlight is the scene's own drawing of this line, asked for again: the same path and the same arrowheads,
+                // so it lies exactly on the line it lights up and never reshapes it
+                const { line: d, heads } = drawingOf(proj, r, e.arrow)
+                const editing = selection.length === 1 && tool === 'select'
+                const P = (q: [number, number]) => pt(proj, q[0], q[1])
+                // fingers get a generous invisible target around each small visible handle
+                const grab = (c: [number, number], name: string) => coarse && <circle cx={c[0]} cy={c[1]} r={17 / rk} fill="transparent" data-handle={name} />
+                const last = r.pts.length - 1
+                const held = drag.current?.mode === 'seg' && moving
                 return (
-                  <g key={n.id + side} data-handle="connect" data-id={n.id} data-side={side} className={'connect-handle door' + (aimed ? ' aimed' : '')} style={{ cursor: 'crosshair' }} pointerEvents={wire ? 'none' : undefined}>
-                    <title>Drag to connect</title>
-                    <circle cx={c[0]} cy={c[1]} r={(coarse ? 20 : 11) / view.k} fill="transparent" />
-                    <circle className="door-dot" cx={c[0]} cy={c[1]} r={(aimed ? 6 : 4.2) / view.k} fill={aimed ? ACCENT : theme.bg} stroke={ACCENT} strokeWidth={1.6 / view.k} />
+                  <g key={e.id} className={'edge-sel' + (held ? ' held' : '')}>
+                    <g pointerEvents="none">
+                      {/* a soft halo in three plain strokes that fade outwards, then the line itself. No blur filter: a filter's box is sized from the
+                          path's bounds, which have no height on a level line, so a blurred glow came out clipped or lopsided there */}
+                      {fine && [[11, 0.045], [7, 0.07], [3.5, 0.13]].map(([wide, op]) => <path key={wide} d={d} fill="none" stroke={ACCENT} strokeWidth={e.width + wide} strokeOpacity={op} strokeLinecap="round" strokeLinejoin="round" />)}
+                      <path d={d} fill="none" stroke={ACCENT} strokeWidth={e.width} strokeLinecap="round" strokeLinejoin="round" />
+                      {heads.map((h, i) => <polygon key={i} points={poly(h.map((q) => pt(proj, q[0], q[1])))} fill={ACCENT} stroke={ACCENT} strokeWidth={1} strokeLinejoin="round" />)}
+                      {/* a caption that sits on a curve is drawn again over the highlight, so the line does not run through the words */}
+                      {r.shape === 'curved' && <EdgeCaption e={e} r={r} proj={proj} theme={theme} />}
+                      {/* both ends of the selected connection are marked, so it is plain what it joins */}
+                      {fine && [a, b].map((n) => <path key={n.id} d={fp(n.x, n.y, 0.12, footOf(n))} fill="none" stroke={ACCENT} strokeWidth={2} strokeOpacity={0.8} strokeLinecap="round" strokeLinejoin="round" />)}
+                    </g>
+                    {/* every run of a right-angled line can be taken hold of along its whole length and moved sideways.
+                        A short grip in the middle of each says so, and the pointer shows which way it goes */}
+                    {editing && !moving && r.shape === 'ortho' && r.pts.slice(0, -1).map((p, i) => {
+                      const q = r.pts[i + 1], len = Math.abs(q[0] - p[0]) + Math.abs(q[1] - p[1])
+                      if (len < 0.2) return null
+                      const A = P(p), B = P(q), c = [(A[0] + B[0]) / 2, (A[1] + B[1]) / 2]
+                      const L = Math.hypot(B[0] - A[0], B[1] - A[1]) || 1, ux = (B[0] - A[0]) / L, uy = (B[1] - A[1]) / L
+                      // which way the run travels on screen when it is moved: across itself on the ground
+                      const side = p[1] === q[1] ? [P([p[0], p[1] + 1]), A] : [P([p[0] + 1, p[1]]), A]
+                      const deg = ((Math.atan2(side[0][1] - side[1][1], side[0][0] - side[1][0]) * 180) / Math.PI + 360) % 180
+                      const cursor = ['ew-resize', 'nwse-resize', 'ns-resize', 'nesw-resize'][Math.round(deg / 45) % 4]
+                      const g = Math.min(8, (L * rk) / 3) / rk
+                      return (
+                        <g key={'s' + i} className="run-hit" data-handle={'s' + i} style={{ cursor }}>
+                          <line x1={A[0]} y1={A[1]} x2={B[0]} y2={B[1]} stroke="transparent" strokeWidth={(coarse ? 30 : 14) / rk} strokeLinecap="butt" />
+                          {len >= 0.9 && <line className="run-grip" x1={c[0] - ux * g} y1={c[1] - uy * g} x2={c[0] + ux * g} y2={c[1] + uy * g} stroke={theme.bg} strokeWidth={7 / rk} strokeLinecap="round" pointerEvents="none" />}
+                          {len >= 0.9 && <line className="run-grip" x1={c[0] - ux * g} y1={c[1] - uy * g} x2={c[0] + ux * g} y2={c[1] + uy * g} stroke={ACCENT} strokeWidth={3.5 / rk} strokeLinecap="round" pointerEvents="none" />}
+                        </g>
+                      )
+                    })}
+                    {/* each turn can be taken hold of too, and moved wherever: the two runs that meet at it follow */}
+                    {editing && !moving && r.shape === 'ortho' && r.pts.slice(1, -1).map((p, i) => {
+                      const c = P(p)
+                      return (
+                        <g key={'c' + i}>
+                          {grab(c, 'c' + (i + 1))}
+                          <circle cx={c[0]} cy={c[1]} r={8 / rk} fill="transparent" data-handle={'c' + (i + 1)} style={{ cursor: 'move' }} />
+                          <circle className="turn-grip" cx={c[0]} cy={c[1]} r={3.2 / rk} fill={ACCENT} stroke={theme.bg} strokeWidth={1.5 / rk} pointerEvents="none" />
+                        </g>
+                      )
+                    })}
+                    {editing && ([['ea', r.pts[0]], ['eb', r.pts[last]]] as const).map(([name, p]) => {
+                      const c = P(p as [number, number])
+                      return (
+                        <g key={name}>
+                          {grab(c, name)}
+                          <circle cx={c[0]} cy={c[1]} r={5.5 / rk} fill={theme.bg} stroke={ACCENT} strokeWidth={2 / rk} data-handle={name} className="handle link-end" style={{ cursor: 'crosshair' }} />
+                        </g>
+                      )
+                    })}
                   </g>
                 )
-              })
-            })}
-          </g>
-        </g>
-        {marquee && <rect x={marquee.x} y={marquee.y} width={marquee.w} height={marquee.h} rx={3} fill={ACCENT} fillOpacity={0.06} stroke={ACCENT} strokeOpacity={0.7} strokeWidth={1} pointerEvents="none" />}
-      </svg>
+              })}
+              {selAreas.map((a) => {
+                const corners = [pt(proj, a.x, a.y), pt(proj, a.x + a.w, a.y), pt(proj, a.x + a.w, a.y + a.d), pt(proj, a.x, a.y + a.d)]
+                return (
+                  <g key={a.id}>
+                    <polygon points={poly(corners)} fill={ACCENT} fillOpacity={0.04} stroke={ACCENT} strokeWidth={1.25 / rk} strokeLinejoin="round" pointerEvents="none" />
+                    {selection.length === 1 && coarse && corners.map((c, i) => <circle key={'t' + i} cx={c[0]} cy={c[1]} r={15 / rk} fill="transparent" data-handle={'r' + i} />)}
+                    {selection.length === 1 && corners.map((c, i) => (
+                      <rect key={i} x={c[0] - 5 / rk} y={c[1] - 5 / rk} width={10 / rk} height={10 / rk} rx={2.5 / rk} fill={theme.bg} stroke={ACCENT} strokeWidth={1.5 / rk}
+                        data-handle={'r' + i} className="handle" style={{ cursor: 'crosshair' }} />
+                    ))}
+                  </g>
+                )
+              })}
+              {selLabels.map((l) => {
+                const len = Math.max(...l.text.split('\n').map((t) => t.length)) * l.size * 0.56 / U
+                const rows = l.text.split('\n').length * l.size * 1.2 / U
+                const c = l.dir === 'x'
+                  ? [pt(proj, l.x - 0.15, l.y - 0.1), pt(proj, l.x + len + 0.15, l.y - 0.1), pt(proj, l.x + len + 0.15, l.y + rows), pt(proj, l.x - 0.15, l.y + rows)]
+                  : [pt(proj, l.x - 0.1, l.y + 0.15), pt(proj, l.x - 0.1, l.y - len - 0.15), pt(proj, l.x + rows, l.y - len - 0.15), pt(proj, l.x + rows, l.y + 0.15)]
+                return <polygon key={l.id} points={poly(c)} fill={ACCENT} fillOpacity={0.05} stroke={ACCENT} strokeWidth={1.25 / rk} pointerEvents="none" />
+              })}
+              {draft && (
+                <g pointerEvents="none">
+                  <polygon points={poly([pt(proj, draft.x, draft.y), pt(proj, draft.x + draft.w, draft.y), pt(proj, draft.x + draft.w, draft.y + draft.d), pt(proj, draft.x, draft.y + draft.d)])}
+                    fill={ACCENT} fillOpacity={0.07} stroke={ACCENT} strokeOpacity={0.5} strokeWidth={1} />
+                  <path d={brackets(proj, draft.x, draft.y, draft.x + draft.w, draft.y + draft.d, 0.6)} fill="none" stroke={ACCENT} strokeWidth={2} strokeLinecap="round" />
+                </g>
+              )}
+              {splice && routes.get(splice) && <path className="splice" d={lineOf(proj, routes.get(splice)!)} fill="none" stroke={ACCENT} strokeWidth={4} strokeLinecap="round" strokeLinejoin="round" pointerEvents="none" />}
+              {wire && wireFrom && (() => {
+                // the line as it will be drawn if it is let go now: routed round what is in the way, to what it has caught or to the pointer
+                const caught = wireTarget && !wire.bad && wireTarget.id !== wireFrom.id ? wireTarget : null
+                const back = wire.relink?.end === 'from'
+                // caught, it is routed exactly as it will be once it is let go: as part of the whole diagram, beside the lines already on those sides
+                const moving = wire.relink ? shown.edges.find((x) => x.id === wire.relink!.id) : null
+                const made: EdgeT | null = !caught ? null : moving ? reended(moving, wire.relink!.end, caught.id, wire.side) : { id: '~wire', from: wireFrom.id, to: caught.id, style: 'solid', arrow: 'end', width: 2, toSide: wire.side }
+                const pts = made
+                  ? routeAll(shown.nodes, moving ? shown.edges.map((x) => (x.id === made.id ? made : x)) : [...shown.edges, made]).get(made.id)?.pts ?? []
+                  : routeToPoint(wireFrom, wire.to, shown.nodes)
+                if (pts.length < 2) return null
+                const n = pts.length, tip = back ? null : pts[n - 1]
+                return (
+                  <g pointerEvents="none" className={'wire' + (caught ? ' caught' : '') + (wire.bad ? ' bad' : '')}>
+                    <path d={pathOf(proj, pts, 0, caught && tip ? 0.26 : 0)} fill="none" stroke={ACCENT} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" strokeDasharray={caught ? undefined : '5 6'} />
+                    {caught && tip && <polygon points={poly(arrowAt(tip, pts[n - 2], 0.34).map((q) => pt(proj, q[0], q[1])))} fill={ACCENT} stroke={ACCENT} strokeWidth={1} strokeLinejoin="round" />}
+                    {!caught && (() => { const c = pt(proj, wire.to[0], wire.to[1]); return <circle cx={f(c[0])} cy={f(c[1])} r={3.5 / rk} fill={ACCENT} /> })()}
+                  </g>
+                )
+              })()}
+              {ghost && placing && (
+                <g pointerEvents="none" className="ghost">
+                  {/* the cell it will land in, then the component itself, following the pointer */}
+                  <polygon points={foot(ghost.at[0], ghost.at[1], 0.1)} fill={ACCENT} fillOpacity={0.1} />
+                  <path d={fp(ghost.at[0], ghost.at[1], 0.1)} fill="none" stroke={ACCENT} strokeWidth={2} strokeLinecap="round" />
+                  {/* its gradients come with it: there may be nothing of its kind on the canvas yet */}
+                  <ModelDefs models={[[placing]]} proj={proj} />
+                  <g transform={`translate(${pt(proj, ghost.at[0], ghost.at[1]).map(f).join(' ')})`} opacity={0.82}><Model type={placing} proj={proj} /></g>
+                </g>
+              )}
+              {/* corner handles: drag to resize the selected component */}
+              {single && tool === 'select' && !wire && !moving && (!coarse || footOf(single) * U * rk > 64) && [[0, 0], [1, 0], [1, 1], [0, 1]].map(([ix, iy], i) => {
+                const fs = footOf(single), o = 0.1
+                const c = pt(proj, single.x + (ix ? fs + o : -o), single.y + (iy ? fs + o : -o))
+                const r = 4.5 / rk
+                // the arrow points the way the corner actually moves on screen, whatever the camera angle
+                const mid = pt(proj, single.x + fs / 2, single.y + fs / 2)
+                const deg = ((Math.atan2(c[1] - mid[1], c[0] - mid[0]) * 180) / Math.PI + 360) % 180
+                const arrow = ['ew-resize', 'nwse-resize', 'ns-resize', 'nesw-resize'][Math.round(deg / 45) % 4]
+                return (
+                  <g key={i} data-handle={'n' + i} style={{ cursor: arrow }}>
+                    {coarse && <circle cx={c[0]} cy={c[1]} r={15 / rk} fill="transparent" />}
+                    <rect x={c[0] - r} y={c[1] - r} width={r * 2} height={r * 2} rx={r * 0.3} fill={theme.bg} stroke={ACCENT} strokeWidth={1.5 / rk}
+                      className="handle" style={{ cursor: arrow }}><title>Drag to resize</title></rect>
+                  </g>
+                )
+              })}
+              {/* doors: press on one and pull to draw a connection. They show on what the pointer is over, on the one thing selected,
+                  and on whatever a connection in the hand has caught */}
+              {doorNodes.map((n) => {
+                const ports = doors(n)
+                return SIDES.map((side) => {
+                  const c = pt(proj, ports[side][0], ports[side][1])
+                  const aimed = !!wire && wire.target === n.id && wire.side === side
+                  return (
+                    <g key={n.id + side} data-handle="connect" data-id={n.id} data-side={side} className={'connect-handle door' + (aimed ? ' aimed' : '')} style={{ cursor: 'crosshair' }} pointerEvents={wire ? 'none' : undefined}>
+                      <title>Drag to connect</title>
+                      <circle cx={c[0]} cy={c[1]} r={(coarse ? 20 : 11) / rk} fill="transparent" />
+                      <circle className="door-dot" cx={c[0]} cy={c[1]} r={(aimed ? 6 : 4.2) / rk} fill={aimed ? ACCENT : theme.bg} stroke={ACCENT} strokeWidth={1.6 / rk} />
+                    </g>
+                  )
+                })
+              })}
+            </g>
+          </svg>
+          </div>
+        </div>
+        {/* a selection box is a rectangle on the glass, not on the ground: it is drawn over the canvas and does not pan with it */}
+        {marquee && <svg className="canvas-marquee" aria-hidden><rect x={marquee.x} y={marquee.y} width={marquee.w} height={marquee.h} rx={3} fill={ACCENT} fillOpacity={0.06} stroke={ACCENT} strokeOpacity={0.7} strokeWidth={1} /></svg>}
+      </div>
       {/* what the fingers are doing to the camera, while they are doing it */}
       {reading && <div className="gesture-pill mono" role="status">{reading === 'turn' ? `Turn ${Math.round(normYaw(yaw - 45))}°` : pitch >= 89.5 ? 'Plan view' : `Tilt ${Math.round(90 - pitch)}°`}</div>}
-      {barAt && !busy && tool === 'select' && (
-        <div className="sel-bar" style={{ left: barAt[0], top: barAt[1] }} key={selection.join()}>
+      {showBar && (
+        <div className="sel-bar" ref={(el) => { bars.current.node = el }} key={selection.join()}>
           {single ? (
             <span className="sel-bar-info">
               <b>{nodeName(single)}</b>
@@ -1256,7 +1747,7 @@ export function Canvas() {
               {costOf(single, doc.region, pricing).monthly > 0 && <em>{money(costOf(single, doc.region, pricing).monthly)}</em>}
             </span>
           ) : (
-            <span className="sel-bar-info"><b>{selNodes.length} selected</b><em>{money(selNodes.reduce((t, n) => t + costOf(n, doc.region, pricing).monthly, 0))}</em></span>
+            <span className="sel-bar-info"><b>{selNodes.length} selected</b><em>{money(selCost)}</em></span>
           )}
           <span className="sel-bar-sep" />
           {single && <button aria-label="Connect" data-tip="Connect  C" onClick={() => useStore.setState({ tool: 'connect' })}><Waypoints size={14} /></button>}
@@ -1269,7 +1760,7 @@ export function Canvas() {
         </div>
       )}
       {oneEdge && edgeBar && straight && !busy && tool === 'select' && (
-        <div className="sel-bar edge-bar" style={{ left: edgeBar[0], top: edgeBar[1] }} key={oneEdge.id}>
+        <div className="sel-bar edge-bar" ref={(el) => { bars.current.edge = el }} key={oneEdge.id}>
           {straight.state === 'apart'
             ? <button className="wide" aria-label="Line up" data-tip="Move one into line with the other, so the line is straight" onClick={() => straightenLinks([oneEdge.id])}><Minus size={14} />Line up</button>
             : <button className="wide" aria-label="Straighten" disabled={straight.state === 'straight' && !!oneEdge.runs} data-tip={straight.state === 'can' && straight.through ? 'Make it one straight line, passing under what stands between' : 'Make it one straight line'} onClick={() => straightenLinks([oneEdge.id])}><Minus size={14} />Straighten</button>}

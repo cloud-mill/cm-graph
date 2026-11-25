@@ -53,7 +53,7 @@ for (const size of SIZES) {
       await expect(page.locator(size.width <= 760 ? '.dock' : '.toolbar')).toBeInViewport()
       await expect(page.getByRole('button', { name: 'Share' })).toBeInViewport()
       // all three components were framed inside the canvas that is actually visible
-      const canvas = (await page.locator('.canvas-svg').boundingBox())!
+      const canvas = (await page.locator('.canvas-surface').boundingBox())!
       for (const id of ['a', 'b', 'c']) {
         const b = (await app.node(id).locator('.nd-body').boundingBox())!
         expect(b.x, id).toBeGreaterThanOrEqual(canvas.x)
@@ -92,7 +92,7 @@ for (const size of SIZES) {
         // the bare canvas point nearest the bottom-right corner
         for (let d = 6; d < 600; d += 6) {
           const x = innerWidth - d, y = innerHeight - d * 0.6 - 60
-          if (document.elementFromPoint(x, y)?.classList.contains('canvas-svg')) return { x, y }
+          if (document.elementFromPoint(x, y)?.classList.contains('canvas-surface')) return { x, y }
         }
         return null
       })
@@ -155,7 +155,7 @@ test.describe('resizing the window', () => {
     for (const [w, h] of [[900, 700], [500, 800], [1700, 950]]) {
       await page.setViewportSize({ width: w, height: h })
       await page.keyboard.press('f')
-      const canvas = (await page.locator('.canvas-svg').boundingBox())!
+      const canvas = (await page.locator('.canvas-surface').boundingBox())!
       expect(canvas.width).toBeGreaterThan(w * 0.25)
       await expect.poll(async () => {
         const b = (await app.node('a').locator('.nd-body').boundingBox())!

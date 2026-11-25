@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, fireEvent, render, screen, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { CATALOG_LIST, docCost, money } from '../core/catalog'
@@ -26,14 +26,15 @@ beforeEach(() => {
 afterEach(() => { vi.useRealTimers() })
 
 describe('Dashboard', () => {
-  it('introduces the product with figures taken from the real sample', () => {
+  it('introduces the product with figures taken from the real sample', async () => {
     render(<Dashboard />)
     expect(document.title).toBe('CloudMill Graph · cloud architecture studio')
     expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Infrastructure,drawn to scale.')
     const sample = TEMPLATES[0].make()
     expect(document.querySelector('.feat-total')).toHaveTextContent(money(docCost(sample).total))
     expect(screen.getByText(new RegExp(`${CATALOG_LIST.length} components across AWS`))).toBeInTheDocument()
-    expect(screen.getByLabelText('Terraform generated from the sample blueprint')).toHaveTextContent('resource "aws_db_instance"')
+    // the Terraform is worked out by code fetched after the page has been drawn, so it arrives a moment later
+    await waitFor(() => expect(screen.getByLabelText('Terraform generated from the sample blueprint')).toHaveTextContent('resource "aws_db_instance"'), { timeout: 10_000 })
     expect(document.querySelectorAll('.feat')).toHaveLength(4)
     const hero = TEMPLATES[3].make()
     expect(document.querySelector('.hero-stage')).toHaveTextContent(`${hero.nodes.length} nodes · ${hero.edges.length} links`)
@@ -192,7 +193,8 @@ describe('Dashboard', () => {
   it('creates a blueprint from pasted Terraform', async () => {
     render(<Dashboard />)
     await userEvent.click(screen.getByRole('button', { name: 'Import Terraform' }))
-    const dlg = screen.getByRole('dialog', { name: 'Import' })
+    // the dialog's code is fetched the first time it is asked for
+    const dlg = await screen.findByRole('dialog', { name: 'Import' }, { timeout: 10_000 })
     await userEvent.click(within(dlg).getByRole('button', { name: 'Load sample' }))
     await userEvent.click(within(dlg).getByRole('button', { name: 'Create blueprint' }))
     expect(screen.queryByRole('dialog')).toBeNull()
@@ -205,14 +207,52 @@ describe('Dashboard', () => {
     const again = screen.getByRole('button', { name: 'Import from Terraform' })
     expect(again).toHaveClass('only-phone')
     await userEvent.click(again)
-    expect(screen.getByRole('dialog', { name: 'Import' })).toBeInTheDocument()
+    expect(await screen.findByRole('dialog', { name: 'Import' }, { timeout: 10_000 })).toBeInTheDocument()
   })
   it('closes the import dialog without creating anything', async () => {
     render(<Dashboard />)
     await userEvent.click(screen.getByRole('button', { name: 'Import Terraform' }))
+    await screen.findByRole('dialog', { name: 'Import' }, { timeout: 10_000 })
     await userEvent.keyboard('{Escape}')
     expect(screen.queryByRole('dialog')).toBeNull()
     expect(listDocs()).toHaveLength(0)
+  })
+  it('has the import dialog ready by the time the button is pressed, once the pointer has come to it', async () => {
+    render(<Dashboard />)
+    const button = screen.getByRole('button', { name: 'Import Terraform' })
+    fireEvent.pointerEnter(button)
+    // its code arrives (here, from the test runner): nothing is shown for that
+    await act(async () => { await import('./editing') })
+    expect(screen.queryByRole('dialog')).toBeNull()
+    // pressed now, the dialog is there in the same breath: no wait, and nothing to wait for
+    fireEvent.click(button)
+    expect(screen.getByRole('dialog', { name: 'Import' })).toBeInTheDocument()
+    expect(button).not.toHaveAttribute('aria-busy')
+  })
+  it('says so and stays put when the import dialog cannot be fetched, and fetches it the next time it is asked for', async () => {
+    // a copy of the page that has fetched nothing yet, on a connection that drops the editor's code
+    vi.resetModules()
+    vi.doMock('./editing', () => { throw new Error('the editor could not be fetched') })
+    try {
+      const fresh = await import('./Dashboard'), store = (await import('../core/store')).useStore
+      render(<fresh.Dashboard />)
+      const button = screen.getByRole('button', { name: 'Import Terraform' })
+      await userEvent.click(button)
+      await waitFor(() => expect(store.getState().toasts.map((t) => t.text)).toEqual(['The importer could not be loaded. Check your connection and try again.']))
+      // no dialog, no broken page: the list of blueprints is as it was, and the button can be pressed again
+      expect(screen.queryByRole('dialog')).toBeNull()
+      expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Infrastructure,drawn to scale.')
+      expect(button).not.toHaveAttribute('aria-busy')
+      // the sample of generated Terraform, which comes with the same code, is simply left empty
+      expect(screen.getByLabelText('Terraform generated from the sample blueprint')).not.toHaveTextContent('resource')
+      // the connection is back
+      vi.doUnmock('./editing')
+      await userEvent.click(button)
+      expect(await screen.findByRole('dialog', { name: 'Import' }, { timeout: 10_000 })).toBeInTheDocument()
+    } finally {
+      vi.doUnmock('./editing')
+      vi.resetModules()
+    }
   })
   it('scrolls to a section from the navigation', async () => {
     const scroll = vi.spyOn(Element.prototype, 'scrollIntoView')
@@ -221,6 +261,75 @@ describe('Dashboard', () => {
     await userEvent.click(screen.getByRole('link', { name: 'Blueprints' }))
     expect(scroll.mock.contexts.map((e) => (e as Element).id)).toEqual(['templates', 'blueprints'])
     expect(location.hash).toBe('')
+  })
+})
+
+describe('what is further down the page waits until the page is near it', () => {
+  // the browser says when something comes into view: here the test does
+  type Watch = { tell: (visible: boolean) => void; el: Element | null; margin?: string; gone: boolean }
+  let watches: Watch[] = []
+  beforeEach(() => {
+    watches = []
+    vi.stubGlobal('IntersectionObserver', class {
+      w: Watch
+      constructor(cb: (entries: { isIntersecting: boolean }[]) => void, o?: { rootMargin?: string }) { this.w = { tell: (v) => act(() => cb([{ isIntersecting: v }])), el: null, margin: o?.rootMargin, gone: false }; watches.push(this.w) }
+      observe(el: Element) { this.w.el = el }
+      unobserve() {}
+      disconnect() { this.w.gone = true }
+    })
+  })
+  afterEach(() => { vi.unstubAllGlobals() })
+  const watching = (el: Element | null) => watches.filter((w) => !w.gone && w.el === el)
+
+  it('a saved blueprint has its picture drawn when its card comes within reach, and not before', () => {
+    stored('d1', 'Alpha')
+    render(<Dashboard />)
+    const art = () => card('Alpha').querySelector('.card-art')!
+    expect(art().querySelector('svg')).toBeNull()
+    const [watch] = watching(card('Alpha'))
+    // asked for well before the card is on the screen, so the picture is there by the time it is
+    expect(watch.margin).toBe('600px')
+    watch.tell(false)
+    expect(art().querySelector('svg')).toBeNull()
+    watch.tell(true)
+    expect(art().querySelector('[data-kind="node"]')).not.toBeNull()
+    // once drawn it stays drawn, and nothing is left watching
+    expect(watching(card('Alpha'))).toHaveLength(0)
+  })
+
+  it('the Terraform sample is worked out when its panel comes near, and not before', async () => {
+    render(<Dashboard />)
+    const panel = screen.getByLabelText('Terraform generated from the sample blueprint')
+    await act(async () => { await new Promise((r) => setTimeout(r, 50)) })
+    expect(panel).not.toHaveTextContent('resource')
+    const feat = panel.closest('.feat')!
+    const mine = watches.filter((w) => !w.gone && w.el && (w.el === feat || w.el.contains(panel) || panel.contains(w.el)))
+    expect(mine.length).toBeGreaterThan(0)
+    for (const w of mine) w.tell(true)
+    await waitFor(() => expect(panel).toHaveTextContent('resource "aws_db_instance"'), { timeout: 10_000 })
+  })
+
+  it('the hero turns only while some of it can be seen', () => {
+    vi.mocked(window.matchMedia).mockImplementation((q) => ({ matches: false, media: q, addEventListener() {}, removeEventListener() {} }) as any)
+    vi.useFakeTimers({ toFake: ['requestAnimationFrame', 'cancelAnimationFrame', 'performance', 'setTimeout', 'clearTimeout', 'Date'] })
+    render(<Dashboard />)
+    const az = document.querySelector('.readout.tr span')!
+    const stage = document.querySelector('.hero-stage')!
+    const [watch] = watches.filter((w) => !w.gone && w.el && stage.contains(w.el) && w.margin === undefined)
+    // not told it is in view yet: it stands still
+    act(() => { vi.advanceTimersByTime(2000) })
+    expect(az.textContent).toBe('045°')
+    watch.tell(true)
+    act(() => { vi.advanceTimersByTime(3000) })
+    const turned = az.textContent
+    expect(turned).not.toBe('045°')
+    // scrolled out of view: it stops where it was, and picks up from there when it is back
+    watch.tell(false)
+    act(() => { vi.advanceTimersByTime(3000) })
+    expect(az.textContent).toBe(turned)
+    watch.tell(true)
+    act(() => { vi.advanceTimersByTime(3000) })
+    expect(az.textContent).not.toBe(turned)
   })
 })
 

@@ -47,8 +47,10 @@ export default defineConfig({
     ...(process.env.E2E_WEBKIT ? [{ name: 'safari', use: { ...devices['iPhone 15'] }, testMatch: /mobile\.spec/ }] : []),
     // timing is only meaningful on a quiet machine, so these run one at a time (`fullyParallel: false` keeps the one spec file
     // in a single worker) after everything else has finished.
-    // `npm run test:perf` passes --no-deps to run them alone
-    { name: 'performance', fullyParallel: false, use: { ...devices['Desktop Chrome'], channel: 'chrome', viewport: { width: 1440, height: 900 } }, testMatch: /performance\.spec/, dependencies: ['desktop', 'responsive', 'android', 'iphone', 'small-phone', 'landscape'] },
+    // `npm run test:perf` passes --no-deps to run them alone.
+    // No trace is recorded: the recorder films the page, and taking each frame of that film costs about as much as drawing
+    // the frame does, so a pan that runs at 60 frames a second is timed at 30 with it on
+    { name: 'performance', fullyParallel: false, use: { ...devices['Desktop Chrome'], channel: 'chrome', viewport: { width: 1440, height: 900 }, trace: 'off' }, testMatch: /performance\.spec/, dependencies: ['desktop', 'responsive', 'android', 'iphone', 'small-phone', 'landscape'] },
   ],
   webServer: {
     // --strictPort: fail if the port is taken, since `baseURL` would point at whatever else is there

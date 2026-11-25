@@ -121,7 +121,7 @@ test.describe('persistence and failure handling', () => {
     const other = await context.newPage()
     await other.goto('/')
     await other.getByRole('button', { name: 'New blueprint' }).click()
-    await expect(other.locator('.canvas-svg')).toBeVisible()
+    await expect(other.locator('.canvas-surface')).toBeVisible()
     await page.reload()
     await expect(page.locator('.card.doc')).toHaveCount(1)
     await other.close()

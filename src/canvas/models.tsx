@@ -1,5 +1,5 @@
 import { memo, type ReactNode } from 'react'
-import { type Proj, type Pt, U, f, poly, pt, shade } from '../core/iso'
+import { type Proj, type Pt, U, f, mix, poly, pt, shade } from '../core/iso'
 import { type ModelKind, defOf } from '../core/catalog'
 import { GLYPHS } from './glyphs'
 
@@ -8,14 +8,48 @@ import { GLYPHS } from './glyphs'
  * solids (box, cylinder/frustum) projected through `Proj`, so models morph
  * smoothly between the isometric and plan views. Geometry is expressed in the
  * node's local space: a 2×2 footprint with the origin at its back corner.
+ *
+ * A model is two things: its shapes, and the gradients those shapes are filled with. The gradients are named after
+ * the colour they shade, so every model of that colour shares them, and whoever draws models puts them in the
+ * document once (`ModelDefs`). A face is one shape with one fill: the light falling off down a wall and the sheen
+ * across a lid are part of the gradient it is filled with, not a second shape laid over the first.
  */
 
 interface Ctx {
   p: Proj
   k: number // unique-ish key counter
+  /** flat colours and no small detail: for a view from so far out that neither could be seen */
+  plain: boolean
+  /** the gradients the shapes built so far are filled with, by id */
+  defs: Map<string, ReactNode>
 }
 
 const P = (c: Ctx, x: number, y: number, z: number): Pt => pt(c.p, x, y, z)
+
+/** The fill of a wall of this colour: the colour itself at the top, falling off into shadow towards the ground. */
+function wall(c: Ctx, color: string): string {
+  if (c.plain) return color
+  const id = 'mw' + color.slice(1)
+  if (!c.defs.has(id)) c.defs.set(id, (
+    <linearGradient key={id} id={id} x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stopColor={color} />
+      <stop offset="1" stopColor={mix(color, '#000000', 0.26)} />
+    </linearGradient>
+  ))
+  return `url(#${id})`
+}
+/** The fill of a lid of this colour: a soft sheen across the corner nearest the light, fading into the colour itself. */
+function sheen(c: Ctx, color: string): string {
+  if (c.plain) return color
+  const id = 'ml' + color.slice(1)
+  if (!c.defs.has(id)) c.defs.set(id, (
+    <linearGradient key={id} id={id} x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stopColor={mix(color, '#ffffff', 0.2)} />
+      <stop offset="0.55" stopColor={color} />
+    </linearGradient>
+  ))
+  return `url(#${id})`
+}
 
 // World-fixed light: each face keeps its shade as the camera orbits, which is
 // the depth cue that makes the scene read as solid.
@@ -31,33 +65,31 @@ function box(c: Ctx, x: number, y: number, z: number, w: number, d: number, h: n
   const yFace = poly([P(c, x, fy, z), P(c, x1, fy, z), P(c, x1, fy, z1), P(c, x, fy, z1)])
   const xFace = poly([P(c, fx, y, z), P(c, fx, y1, z), P(c, fx, y1, z1), P(c, fx, y, z1)])
   const lid = poly([P(c, x, y, z1), P(c, x1, y, z1), P(c, x1, y1, z1), P(c, x, y1, z1)])
+  // walls fall off towards the ground, unless they are too low for it to show; the lid catches a soft sheen and a lit rim
   const tall = h * c.p.e > 0.12
+  const yCol = shade(color, yFront ? SHADE.yp : SHADE.yn), xCol = shade(color, xFront ? SHADE.xp : SHADE.xn), lidCol = top ?? shade(color, SHADE.top)
   return (
     <g key={c.k++}>
-      <polygon points={yFace} fill={shade(color, yFront ? SHADE.yp : SHADE.yn)} />
-      <polygon points={xFace} fill={shade(color, xFront ? SHADE.xp : SHADE.xn)} />
-      {/* walls fall off towards the ground; the lid catches a soft sheen and a lit rim */}
-      {tall && <polygon points={yFace} fill="url(#st-wall)" />}
-      {tall && <polygon points={xFace} fill="url(#st-wall)" />}
-      <polygon points={lid} fill={top ?? shade(color, SHADE.top)} />
-      <polygon points={lid} fill="url(#st-sheen)" stroke={shade(color, 0.55)} strokeOpacity={0.55} strokeWidth={0.8} strokeLinejoin="round" />
+      <polygon points={yFace} fill={tall ? wall(c, yCol) : yCol} />
+      <polygon points={xFace} fill={tall ? wall(c, xCol) : xCol} />
+      {c.plain ? <polygon points={lid} fill={lidCol} /> : <polygon points={lid} fill={sheen(c, lidCol)} stroke={shade(color, 0.55)} strokeOpacity={0.55} strokeWidth={0.8} strokeLinejoin="round" />}
     </g>
   )
 }
 
 /** detail on the +y face of a box, in face-local coords u∈[0,w], v∈[0,h]; hidden when that face is turned away */
 function leftQuad(c: Ctx, x: number, y1: number, z: number, u0: number, v0: number, u1: number, v1: number, fill: string, opacity = 1) {
-  if (c.p.d <= 0) return null
+  if (c.p.d <= 0 || c.plain) return null
   return (
-    <polygon key={c.k++} opacity={opacity} fill={fill}
+    <polygon key={c.k++} fillOpacity={opacity === 1 ? undefined : opacity} fill={fill}
       points={poly([P(c, x + u0, y1, z + v0), P(c, x + u1, y1, z + v0), P(c, x + u1, y1, z + v1), P(c, x + u0, y1, z + v1)])} />
   )
 }
 /** detail on the +x face of a box */
 function rightQuad(c: Ctx, x1: number, y: number, z: number, u0: number, v0: number, u1: number, v1: number, fill: string, opacity = 1) {
-  if (c.p.c <= 0) return null
+  if (c.p.c <= 0 || c.plain) return null
   return (
-    <polygon key={c.k++} opacity={opacity} fill={fill}
+    <polygon key={c.k++} fillOpacity={opacity === 1 ? undefined : opacity} fill={fill}
       points={poly([P(c, x1, y + u0, z + v0), P(c, x1, y + u1, z + v0), P(c, x1, y + u1, z + v1), P(c, x1, y + u0, z + v1)])} />
   )
 }
@@ -86,46 +118,55 @@ function cyl(c: Ctx, cx: number, cy: number, z: number, r0: number, r1: number, 
   if (Math.cos(mid - near) < 0) { from = th + Math.PI; to = th + Math.PI * 2 }
   const bottom = ring(c, cx, cy, z, r0, from, to)
   const upper = ring(c, cx, cy, z + h, r1, from, to).reverse()
+  const lid = poly(ring(c, cx, cy, z + h, r1)), lidCol = top ?? shade(color, 0.16)
+  if (c.plain) return (
+    <g key={c.k++}>
+      <polygon points={poly([...bottom, ...upper])} fill={shade(color, -0.14)} />
+      <polygon points={lid} fill={lidCol} />
+    </g>
+  )
+  // round the side, light on one flank and shadow on the other
   const gid = 'cg' + color.replace('#', '')
+  if (!c.defs.has(gid)) c.defs.set(gid, (
+    <linearGradient key={gid} id={gid} x1="0" x2="1" y1="0" y2="0">
+      <stop offset="0" stopColor={shade(color, 0.02)} />
+      <stop offset="0.45" stopColor={shade(color, -0.14)} />
+      <stop offset="1" stopColor={shade(color, -0.42)} />
+    </linearGradient>
+  ))
   return (
     <g key={c.k++}>
-      <defs>
-        <linearGradient id={gid} x1="0" x2="1" y1="0" y2="0">
-          <stop offset="0" stopColor={shade(color, 0.02)} />
-          <stop offset="0.45" stopColor={shade(color, -0.14)} />
-          <stop offset="1" stopColor={shade(color, -0.42)} />
-        </linearGradient>
-      </defs>
       <polygon points={poly([...bottom, ...upper])} fill={`url(#${gid})`} />
-      <polygon points={poly(ring(c, cx, cy, z + h, r1))} fill={top ?? shade(color, 0.16)} />
-      <polygon points={poly(ring(c, cx, cy, z + h, r1))} fill="url(#st-sheen)" stroke={shade(color, 0.55)} strokeOpacity={0.5} strokeWidth={0.8} />
+      <polygon points={lid} fill={sheen(c, lidCol)} stroke={shade(color, 0.55)} strokeOpacity={0.5} strokeWidth={0.8} />
     </g>
   )
 }
 
 function band(c: Ctx, cx: number, cy: number, z: number, r: number, color: string, w = 1.4): ReactNode {
+  if (c.plain) return null
   const th = Math.atan2(c.p.b, c.p.a)
   const near = Math.atan2(c.p.d, c.p.c)
   let from = th, to = th + Math.PI
   if (Math.cos(from + Math.PI / 2 - near) < 0) { from = th + Math.PI; to = th + Math.PI * 2 }
-  return <polyline key={c.k++} points={poly(ring(c, cx, cy, z, r, from, to))} fill="none" stroke={color} strokeWidth={w} opacity={Math.min(1, c.p.e)} />
+  return <polyline key={c.k++} points={poly(ring(c, cx, cy, z, r, from, to))} fill="none" stroke={color} strokeWidth={w} strokeOpacity={Math.min(1, c.p.e)} />
 }
 
 /** Glyph lying flat on a horizontal plane, centred at (cx, cy, z) spanning `size` world units. */
 function decal(c: Ctx, glyph: string, cx: number, cy: number, z: number, size: number, color = '#ffffff', opacity = 0.92): ReactNode {
+  if (c.plain) return null
   const [tx, ty] = P(c, cx, cy, z)
   const k = (U * size) / 24
   const { a, b, c: cc, d } = c.p
+  // the glyph is drawn on a 24-unit square about its own middle: the move to that middle is folded into the one matrix
+  const m = [a * k, cc * k, b * k, d * k]
   return (
-    <g key={c.k++} transform={`matrix(${f(a * k)} ${f(cc * k)} ${f(b * k)} ${f(d * k)} ${f(tx)} ${f(ty)})`}>
-      <path d={GLYPHS[glyph] ?? GLYPHS.cube} transform="translate(-12 -12)" fill="none" stroke={color} strokeWidth={1.9}
-        strokeLinecap="round" strokeLinejoin="round" opacity={opacity} />
-    </g>
+    <path key={c.k++} d={GLYPHS[glyph] ?? GLYPHS.cube} transform={`matrix(${f(m[0])} ${f(m[1])} ${f(m[2])} ${f(m[3])} ${f(tx - 12 * (m[0] + m[2]))} ${f(ty - 12 * (m[1] + m[3]))})`}
+      fill="none" stroke={color} strokeWidth={1.9} strokeLinecap="round" strokeLinejoin="round" strokeOpacity={opacity} />
   )
 }
 
-function build(kind: ModelKind, color: string, glyph: string, p: Proj): ReactNode[] {
-  const c: Ctx = { p, k: 0 }
+function build(kind: ModelKind, color: string, glyph: string, p: Proj, plain: boolean): Built {
+  const c: Ctx = { p, k: 0, plain, defs: new Map() }
   const out: ReactNode[] = []
   const dark = shade(color, -0.55)
   const lite = shade(color, 0.45)
@@ -159,8 +200,8 @@ function build(kind: ModelKind, color: string, glyph: string, p: Proj): ReactNod
     }
     case 'tile': {
       out.push(box(c, 0.2, 0.2, 0, 1.6, 1.6, 0.22, color))
-      out.push(
-        <polygon key={c.k++} fill="none" stroke={lite} strokeWidth={1} opacity={0.5}
+      if (!plain) out.push(
+        <polygon key={c.k++} fill="none" stroke={lite} strokeWidth={1} strokeOpacity={0.5}
           points={poly([P(c, 0.36, 0.36, 0.22), P(c, 1.64, 0.36, 0.22), P(c, 1.64, 1.64, 0.22), P(c, 0.36, 1.64, 0.22)])} />,
       )
       out.push(decal(c, glyph, 1, 1, 0.22, 0.98))
@@ -204,13 +245,13 @@ function build(kind: ModelKind, color: string, glyph: string, p: Proj): ReactNod
     }
     case 'people': {
       const figs: [number, number, string][] = [[0.62, 0.72, shade(color, 0.2)], [1.42, 0.86, shade(color, -0.1)], [0.92, 1.42, color]]
-      out.push(<polygon key={c.k++} points={poly(ring(c, 1, 1, 0, 0.95))} fill={shade(color, -0.5)} opacity={0.35} />)
+      out.push(<polygon key={c.k++} points={poly(ring(c, 1, 1, 0, 0.95))} fill={shade(color, -0.5)} fillOpacity={0.35} />)
       figs.sort((m, n) => depth(c, m[0], m[1]) - depth(c, n[0], n[1]))
       for (const [x, y, col] of figs) {
         out.push(cyl(c, x, y, 0, 0.27, 0.12, 0.62, col))
         const [hx, hy] = P(c, x, y, 0.84)
         out.push(<circle key={c.k++} cx={f(hx)} cy={f(hy)} r={0.2 * U} fill={shade(col, 0.3)} />)
-        out.push(<circle key={c.k++} cx={f(hx - 2.2)} cy={f(hy - 2.4)} r={0.08 * U} fill="#ffffff" opacity={0.35} />)
+        if (!plain) out.push(<circle key={c.k++} cx={f(hx - 2.2)} cy={f(hy - 2.4)} r={0.08 * U} fill="#ffffff" fillOpacity={0.35} />)
       }
       break
     }
@@ -218,16 +259,17 @@ function build(kind: ModelKind, color: string, glyph: string, p: Proj): ReactNod
       out.push(cyl(c, 1, 1, 0, 0.5, 0.36, 0.2, shade(color, -0.4)))
       const [gx, gy] = P(c, 1, 1, 1.0)
       const r = 0.78 * U
+      if (plain) { out.push(<circle key={c.k++} cx={f(gx)} cy={f(gy)} r={r} fill={color} />); break }
       const gid = 'gl' + color.replace('#', '')
+      if (!c.defs.has(gid)) c.defs.set(gid, (
+        <radialGradient key={gid} id={gid} cx="0.34" cy="0.3" r="0.8">
+          <stop offset="0" stopColor={shade(color, 0.45)} />
+          <stop offset="0.55" stopColor={color} />
+          <stop offset="1" stopColor={shade(color, -0.45)} />
+        </radialGradient>
+      ))
       out.push(
         <g key={c.k++}>
-          <defs>
-            <radialGradient id={gid} cx="0.34" cy="0.3" r="0.8">
-              <stop offset="0" stopColor={shade(color, 0.45)} />
-              <stop offset="0.55" stopColor={color} />
-              <stop offset="1" stopColor={shade(color, -0.45)} />
-            </radialGradient>
-          </defs>
           <circle cx={f(gx)} cy={f(gy)} r={r} fill={`url(#${gid})`} />
           <g fill="none" stroke="#ffffff" strokeWidth={1.1} opacity={0.5}>
             <ellipse cx={f(gx)} cy={f(gy)} rx={r} ry={r * 0.36} />
@@ -242,7 +284,7 @@ function build(kind: ModelKind, color: string, glyph: string, p: Proj): ReactNod
     case 'disc': {
       out.push(cyl(c, 1, 1, 0, 0.9, 0.9, 0.1, shade(color, -0.42)))
       out.push(cyl(c, 1, 1, 0.1, 0.76, 0.76, 0.34, color))
-      out.push(<polygon key={c.k++} points={poly(ring(c, 1, 1, 0.44, 0.6))} fill="none" stroke={lite} strokeWidth={1} opacity={0.45} />)
+      if (!plain) out.push(<polygon key={c.k++} points={poly(ring(c, 1, 1, 0.44, 0.6))} fill="none" stroke={lite} strokeWidth={1} strokeOpacity={0.45} />)
       out.push(decal(c, glyph, 1, 1, 0.44, 0.86))
       break
     }
@@ -254,24 +296,16 @@ function build(kind: ModelKind, color: string, glyph: string, p: Proj): ReactNod
       break
     }
   }
-  return out
+  return { shapes: out, defs: [...c.defs.values()] }
 }
 
-/**
- * Shared paint servers for every model: wall falloff, lid sheen and the soft
- * contact shadow. Any <svg> that draws models must include this once.
- */
+/** A model as it is drawn: its shapes, and the gradients they are filled with. */
+interface Built { shapes: ReactNode[]; defs: ReactNode[] }
+
+/** The soft contact shadow a theme may put under each component. Any <svg> drawn with such a theme must include this once. */
 export function SceneDefs() {
   return (
     <defs>
-      <linearGradient id="st-wall" x1="0" y1="0" x2="0" y2="1">
-        <stop offset="0" stopColor="#000" stopOpacity="0" />
-        <stop offset="1" stopColor="#000" stopOpacity="0.26" />
-      </linearGradient>
-      <linearGradient id="st-sheen" x1="0" y1="0" x2="1" y2="1">
-        <stop offset="0" stopColor="#fff" stopOpacity="0.2" />
-        <stop offset="0.55" stopColor="#fff" stopOpacity="0" />
-      </linearGradient>
       <radialGradient id="st-ao">
         <stop offset="0.45" stopColor="#000" stopOpacity="0.55" />
         <stop offset="1" stopColor="#000" stopOpacity="0" />
@@ -282,19 +316,36 @@ export function SceneDefs() {
 
 // A model is drawn in its own local space, so every component of one kind and colour
 // shares the same geometry under a given camera. Build it once per camera, not once per node.
-const built = new WeakMap<Proj, Map<string, ReactNode[]>>()
-function geometry(kind: ModelKind, color: string, glyph: string, proj: Proj): ReactNode[] {
+const built = new WeakMap<Proj, Map<string, Built>>()
+function geometry(kind: ModelKind, color: string, glyph: string, proj: Proj, plain = false): Built {
   let per = built.get(proj)
   if (!per) built.set(proj, (per = new Map()))
-  const key = kind + '|' + color + '|' + glyph
+  const key = kind + '|' + color + '|' + glyph + (plain ? '|plain' : '')
   let g = per.get(key)
-  if (!g) per.set(key, (g = build(kind, color, glyph, proj)))
+  if (!g) per.set(key, (g = build(kind, color, glyph, proj, plain)))
   return g
 }
 
-export const Model = memo(function Model({ type, color, proj }: { type: string; color?: string; proj: Proj }) {
+/**
+ * One component's body, at unit size with its back corner at the origin. `plain` draws it in flat colours with no
+ * small detail, for a view from very far out. Its gradients are not part of it: see `ModelDefs`.
+ */
+export const Model = memo(function Model({ type, color, proj, plain }: { type: string; color?: string; proj: Proj; plain?: boolean }) {
   const d = defOf(type)
-  return <>{geometry(d.model, color ?? d.color, d.glyph, proj)}</>
+  return <>{geometry(d.model, color ?? d.color, d.glyph, proj, plain).shapes}</>
+})
+
+/**
+ * The gradients that the given models are filled with, each once. Whatever draws a `Model` must have this in the same
+ * document for the same models (a `type` and the colour it is drawn in, the catalog's when none is given).
+ */
+export const ModelDefs = memo(function ModelDefs({ models, proj }: { models: readonly (readonly [type: string, color?: string])[]; proj: Proj }) {
+  const seen = new Map<string, ReactNode>()
+  for (const [type, color] of models) {
+    const d = defOf(type)
+    for (const def of geometry(d.model, color ?? d.color, d.glyph, proj).defs) seen.set((def as { key: string }).key, def)
+  }
+  return <defs>{[...seen.values()]}</defs>
 })
 
 /** Small standalone thumbnail of a component, used in the palette and menus. */
@@ -306,9 +357,10 @@ export const ModelIcon = memo(function ModelIcon({ type, proj, size = 56, color 
     xs.push(q[0]); ys.push(q[1])
   }
   const minX = Math.min(...xs), maxX = Math.max(...xs), minY = Math.min(...ys), maxY = Math.max(...ys)
+  const models = [[type, color] as const]
   return (
     <svg width={size} height={size} viewBox={`${minX - 2} ${minY - 2} ${maxX - minX + 4} ${maxY - minY + 4}`} style={{ display: 'block' }}>
-      <SceneDefs />
+      <ModelDefs models={models} proj={proj} />
       <Model type={type} proj={proj} color={color} />
     </svg>
   )

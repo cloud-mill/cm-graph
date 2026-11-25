@@ -121,7 +121,7 @@ test.describe('inspector', () => {
     await expect(page.locator('.insp-sub')).toHaveText('orders-db reads and writes web-1')
     let doc = await app.settled()
     expect(doc.edges).toMatchObject([{ from: 'b', to: 'a', label: 'SQL', style: 'dashed', arrow: 'both', width: 3.5 }])
-    await expect(page.locator('.canvas-svg .edge text')).toHaveText('SQL')
+    await expect(page.locator('.canvas-surface .edge-caption')).toHaveText('SQL')
 
     // the component lists its connection, and clicking it selects the connection
     await app.pick('a')
@@ -137,7 +137,7 @@ test.describe('inspector', () => {
     await page.keyboard.press('t')
     await app.click(await app.world(4, 4))
     await page.keyboard.press('Escape')
-    await page.locator('.canvas-svg').focus().catch(() => {})
+    await page.locator('.canvas-surface').focus().catch(() => {})
     await app.click(await app.world(4, -2))
     await app.mod('a')
     await expect(page.locator('.title-static')).toHaveText('4 items selected')
@@ -146,7 +146,7 @@ test.describe('inspector', () => {
     await expect(page.getByText('An empty plane.')).toBeVisible()
     await app.mod('z')
     await expect(app.nodes()).toHaveCount(3)
-    await expect(page.locator('.canvas-svg [data-kind="label"]')).toHaveCount(1)
+    await expect(page.locator('.canvas-surface [data-kind="label"]')).toHaveCount(1)
   })
 
   test('changes region and compares clouds; moving is a single undo step', async ({ page, app }) => {
@@ -190,10 +190,10 @@ test.describe('budget and advisor', () => {
     await expect(page.locator('.budget-sub .save')).toContainText('vs on-demand')
 
     await page.getByRole('switch', { name: 'Cost heatmap' }).click()
-    await expect(page.locator('.canvas-svg .nd-label').first()).toContainText('/mo')
-    await page.locator('.canvas-svg').hover({ position: { x: 300, y: 300 } })
+    await expect(page.locator('.canvas-surface .nd-label').first()).toContainText('/mo')
+    await page.locator('.canvas-surface').hover({ position: { x: 300, y: 300 } })
     await page.keyboard.press('h')
-    await expect(page.locator('.canvas-svg .nd-label').first()).not.toContainText('/mo')
+    await expect(page.locator('.canvas-surface .nd-label').first()).not.toContainText('/mo')
     await expect(page.getByRole('switch', { name: 'Cost heatmap' })).toHaveAttribute('aria-checked', 'false')
 
     await page.locator('.cost-row').first().click()
@@ -263,7 +263,7 @@ test.describe('budget and advisor', () => {
     }
     await app.tab('Budget').click()
     expect(await page.locator('.panel.right').innerText()).not.toMatch(/undefined|NaN/)
-    expect(await page.locator('.canvas-svg').innerHTML()).not.toMatch(/undefined|NaN/)
+    expect(await page.locator('.canvas-surface').innerHTML()).not.toMatch(/undefined|NaN/)
   })
 })
 

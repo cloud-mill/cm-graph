@@ -300,56 +300,114 @@ select.input {
 .cmdk-trigger span { flex: 1; text-align: left; }
 
 /* ---- the canvas ------------------------------------------------------------ */
-.canvas-wrap, .canvas-svg { position: absolute; inset: 0; width: 100%; height: 100%; }
-.canvas-svg { display: block; touch-action: none; user-select: none; -webkit-user-select: none; }
-.canvas-svg text { user-select: none; }
+.canvas-wrap, .canvas-surface { position: absolute; inset: 0; width: 100%; height: 100%; }
+/* the surface hears every pointer and shows the part of the diagram the view is on; the diagram itself is in the layer inside it */
+.canvas-surface { overflow: hidden; touch-action: none; user-select: none; -webkit-user-select: none; }
+/* The one thing that moves when the view pans. Promised to the compositor, so moving it draws nothing again: the
+   browser slides what it has already drawn. It is only ever moved, never scaled: a drawing shown at another size than it
+   was made at is a soft one. It has no size of its own; what is in it spills out of it */
+.canvas-pan { position: absolute; left: 0; top: 0; width: 0; height: 0; transform-origin: 0 0; will-change: transform; }
+/* While the view is zooming the promise is taken back. A layer with a surface of its own is kept drawn well past the
+   edges of the canvas, ready to be panned into, and every frame of a zoom would draw all of that again for nothing:
+   three to four times the work of drawing what can be seen. Drawn with the rest of the page, only what is on the
+   canvas is drawn. The promise is made again once the view has come to rest (see `rest` in Canvas.tsx) */
+.canvas-wrap[data-zooming] .canvas-pan { will-change: auto; }
+/* What carries the zoom (and the fraction of a pixel the view is off a whole one): inside the layer, so a change of
+   zoom is a change to what the layer holds, and the browser draws every shape again at the new scale */
+.canvas-zoom { position: absolute; left: 0; top: 0; width: 0; height: 0; transform-origin: 0 0; }
+/* see where it is drawn, in Canvas.tsx */
+.canvas-pin { position: absolute; left: 0; top: 0; width: 1px; height: 1px; background: rgb(0 0 0 / 0.004); pointer-events: none; }
+/* each layer of the diagram is an svg with its corner at the scene's origin, drawing as far out of its own box as the diagram goes */
+.canvas-layer { position: absolute; left: 0; top: 0; width: 1px; height: 1px; overflow: visible; display: block; }
+/* The layers share the one surface of the panning layer on purpose. A second surface anywhere among them (for the traffic,
+   say) makes the browser work out, for every shape drawn after it, which surface that shape belongs on, each time anything moves */
+.canvas-layer.flow, .canvas-fine { pointer-events: none; }
+/* What the fine dots of the grid are faded by: see where it is drawn, in Canvas.tsx. It is a group of its own to the
+   browser whatever its opacity (`isolation`). Without that it becomes one each time the opacity drops below 1 and stops
+   being one at 1, and Chrome lays the element out again for either change: one layout pass in the middle of a zoom,
+   which is all it takes for Chrome (to 149 at least) to lay out every word on the canvas on each frame after it. A
+   layout brings on a check of what is under the pointer, that check lays out any <svg> text whose scale has changed
+   since it was last laid out, and so on round until the zoom ends (measured: 0.8 layout passes a frame without this) */
+.canvas-fine { position: absolute; left: 0; top: 0; width: 0; height: 0; isolation: isolate; }
+.canvas-marquee { position: absolute; inset: 0; width: 100%; height: 100%; display: block; pointer-events: none; }
+/* Words on the canvas are set out once, at their own size, and drawn at whatever the zoom makes of that: letter by
+   letter in the same places at every zoom. The default is to set them out afresh for each size they are shown at,
+   which makes them shift about as the zoom changes, and (in Chrome) has every word on the canvas laid out again whenever
+   anything else there is, at about a hundredth of a second for a few hundred of them */
+.canvas-surface text { user-select: none; text-rendering: geometricPrecision; }
 
-/* a component under the pointer brightens. It never shifts: where it is drawn is where it is, before, during and after a drag */
-.nd-body { transition: filter 0.22s; }
-.canvas-wrap:not(.busy) .nd:hover .nd-body { filter: brightness(1.1) saturate(1.04); }
+/*
+ * Nothing inside the canvas is animated with `opacity`, `transform` or `filter`. The browser hands an element animated
+ * that way to the compositor as a surface of its own, and must then work out, for everything drawn after it, what goes
+ * over it and what under: in a diagram of hundreds of shapes that costs far more than the animation is worth, on every
+ * frame it runs. Marks fade in through `fill-opacity` and `stroke-opacity` instead, which only repaint the mark.
+ * The exceptions are the flourishes of a small blueprint (`.fx`), where there is too little on the canvas for it to matter.
+ */
+@keyframes ink { from { fill-opacity: 0; stroke-opacity: 0; } }
+
+/* a component under the pointer brightens. It never shifts: where it is drawn is where it is, before, during and after a drag.
+   Not while the view is moving (`data-viewing`): things pass under a pointer that is not pointing at them */
+.canvas-wrap:not(.busy):not([data-viewing]) .nd:hover .nd-body { filter: brightness(1.1) saturate(1.04); }
+.fx .nd-body { transition: filter 0.22s; }
 .nd-ao, .nd-glow { transition: opacity 0.22s; }
 .canvas-wrap:not(.busy) .nd:hover .nd-glow { opacity: 1.6; }
 .intro .nd-glow { animation: fade 0.9s both; animation-delay: calc(min(var(--i), 30) * 34ms + 400ms); }
 .canvas-wrap:not(.busy) .nd:hover .nd-ao { opacity: 0.6; }
 .canvas-wrap[data-tool='connect'] .nd { cursor: crosshair !important; }
 
-/* a blueprint assembles itself when it opens: far components first */
+/* a small blueprint assembles itself when it opens: far components first */
 .intro .nd-body { animation: nd-rise 0.7s var(--ease) both; animation-delay: calc(min(var(--i), 30) * 34ms + 60ms); }
 .intro .nd-ao, .intro .nd-label { animation: fade 0.5s both; animation-delay: calc(min(var(--i), 30) * 34ms + 260ms); }
-.intro .edge { animation: fade 0.7s 0.55s both; }
+.intro .edge, .intro .edge-caption { animation: fade 0.7s 0.55s both; }
+.intro .edge-flow { animation: flow 2.1s steps(63) infinite, fade 0.7s 0.55s both; }
 @keyframes nd-rise { from { opacity: 0; transform: translateY(-22px); } }
-.nd-new .nd-body { animation: nd-drop 0.25s both; }
-.nd-new .nd-ao { animation: fade 0.4s both; }
+.fx .nd-new .nd-body { animation: nd-drop 0.25s both; }
+.fx .nd-new .nd-ao { animation: fade 0.4s both; }
 /* a new component fades in exactly where it was put down */
 @keyframes nd-drop { from { opacity: 0; } }
 
-.edge-line { transition: stroke 0.16s, stroke-width 0.16s; }
+.fx .edge-line { transition: stroke 0.16s, stroke-width 0.16s; }
 /* following a flow: what is on its paths stays, the rest steps back without disappearing */
-.edge, .nd { transition: opacity 0.22s var(--ease); }
-.edge.off { opacity: 0.1; } .nd.off { opacity: 0.22; }
+.fx .edge, .fx .nd, .fx .edge-caption { transition: opacity 0.22s var(--ease); }
+.edge.off, .edge-caption.off { opacity: 0.1; } .nd.off { opacity: 0.22; }
 .edge.on .edge-line { stroke: var(--text); }
 .edge-flow.both { stroke-dasharray: 1.5 22; }
 /* a run of the selected connection: its grip wakes up under the pointer, and the whole run is the handle */
 .run-hit .run-grip { transition: stroke-width 0.12s; }
-.run-hit:hover .run-grip:last-child { stroke-width: 5.5px; vector-effect: non-scaling-stroke; }
-/* the area that selects a line is the same size on screen however far the view is zoomed out */
-.edge-hit { vector-effect: non-scaling-stroke; }
-@media (pointer: coarse) { .edge-hit { stroke-width: 32px; } }
-.edge:hover .edge-line { stroke: var(--text); }
-.edge-flow { stroke-dasharray: 1.5 46; animation: flow 2.1s linear infinite; }
-/* traffic holds still while the view or a component is being dragged, so every frame goes to the drag */
-.canvas-wrap.busy .edge-flow { animation-play-state: paused; }
+.run-hit:hover .run-grip:last-child { stroke-width: calc(5.5px / var(--k, 1)); }
+/* The band that selects a line is the same width on the screen however far the view is zoomed in or out: its width in
+   the scene is that many pixels divided by the zoom, which the canvas hands over as `--k` when the view comes to rest.
+   It is not done with `vector-effect: non-scaling-stroke`, which only knows of scaling inside the <svg>: the zoom is on
+   an element outside it (see Canvas.tsx), and under that such a stroke grows and shrinks with the zoom like any other
+   (measured: 4 px at 27%, 42 at 268%). Nor is that property used anywhere else on the page: going by Chrome's source
+   (not measured: no Chrome that new is to hand), with one of them in the document a newer Chrome marks every <svg>
+   under a scaled element for laying out again whenever the scale changes */
+.canvas-layer .edge-hit { stroke-width: calc(16px / var(--k, 1)); }
+@media (pointer: coarse) { .canvas-layer .edge-hit { stroke-width: calc(32px / var(--k, 1)); } }
+.canvas-wrap:not([data-viewing]) .edge:hover .edge-line { stroke: var(--text); }
+/* Traffic drifts at about 23 px a second, so it is moved thirty times a second and not sixty: each step is under a pixel
+   either way, and every step redraws everything it crosses. */
+.edge-flow { stroke-dasharray: 1.5 46; animation: flow 2.1s steps(63) infinite; }
+/* with more in view each step costs more to draw, so there are fewer of them: twenty a second, then twelve (see Canvas.tsx) */
+.flow-20 .edge-flow { animation-timing-function: steps(42); }
+.flow-12 .edge-flow { animation-timing-function: steps(25); }
+/* traffic holds still while the view or a component is being moved, so every frame goes to the move, and once nothing
+   has been touched for a while */
+.canvas-wrap.busy .edge-flow, .canvas-wrap[data-viewing] .edge-flow, .canvas-wrap[data-asleep] .edge-flow { animation-play-state: paused; }
 @keyframes flow { to { stroke-dashoffset: -47.5; } }
 .wire:not(.caught) path { animation: wire 0.5s linear infinite; }
 /* in the hand. It is drawn exactly where it is and where it will stay: not lifted, and not eased anywhere when it is let go */
 .nd.up { cursor: grabbing !important; }
-.drop-area, .picking, .hover-mark, .gap, .splice { animation: fade 0.12s both; }
-.splice { opacity: 0.9; }
+.drop-area, .picking, .hover-mark, .gap, .splice { animation: ink 0.12s both; }
+.splice { stroke-opacity: 0.9; }
 /* doors: quiet until the pointer is near, then plainly something to pull on */
-.door { animation: fade 0.16s 0.04s both; }
+.door circle { animation: ink 0.16s 0.04s both; }
 .door-dot { transition: r 0.12s var(--ease), fill 0.12s; }
+/* While the view is zooming a door's radius is rewritten on every frame, to keep it the same size on the screen. Eased,
+   each of those changes would trail the zoom by a tenth of a second, and the doors would swell and shrink as it went */
+.canvas-wrap[data-viewing] .door-dot { transition: none; }
 .door:hover .door-dot { fill: var(--accent); r: 6px; }
-.wire-target { animation: fade 0.1s both; }
+.wire-target > * { animation: ink 0.1s both; }
 
 /* what to connect to, asked where the line was let go */
 .quick-add {
@@ -367,16 +425,16 @@ select.input {
 .quick-add p { padding: 8px 9px; font-size: 12px; color: var(--dim); }
 @media (pointer: coarse) { .quick-add button { height: 42px; } .quick-add input { height: 40px; font-size: 16px; } }
 @keyframes wire { to { stroke-dashoffset: -11; } }
-.sel-mark { animation: fade 0.18s both; }
+.sel-mark > * { animation: ink 0.18s both; }
 .handle { transition: fill 0.12s; }
 .handle:hover { fill: var(--accent); }
-.connect-handle { animation: fade 0.2s 0.05s both; }
 @keyframes ping { from { transform: scale(0.6); opacity: 0.35; } to { transform: scale(1.25); opacity: 0; } }
-.ghost { animation: fade 0.12s both; }
 
 /* contextual actions, attached to the selection */
 .sel-bar {
-  position: absolute; z-index: 4; transform: translate(-50%, calc(-100% - 14px)); display: flex; align-items: center; gap: 1px; height: 34px; padding: 0 4px 0 10px;
+  /* at the canvas's corner, and carried to its place over the selection by `translate`, which the canvas writes on every
+     frame the view moves: on a layer of its own, so moving it lays nothing out and paints nothing */
+  position: absolute; left: 0; top: 0; z-index: 4; will-change: transform; transform: translate(-50%, calc(-100% - 14px)); display: flex; align-items: center; gap: 1px; height: 34px; padding: 0 4px 0 10px;
   border-radius: 10px; background: var(--glass-pop); backdrop-filter: var(--blur); box-shadow: var(--pop-shadow);
   white-space: nowrap; animation: bar-in 0.22s var(--ease) both;
 }
@@ -441,9 +499,18 @@ select.input {
 .zoom-ctl .icon-btn { width: 26px; height: 24px; border-radius: 6px; }
 .zoom-pct { position: relative; width: 44px; height: 24px; font-family: var(--mono); font-size: 10.5px; font-variant-numeric: tabular-nums; color: var(--dim); border-radius: 6px; transition: background 0.14s, color 0.14s; }
 .zoom-pct:hover { background: var(--hover); color: var(--text); }
-.minimap { width: 168px; height: 104px; border-radius: var(--r-md); background: var(--glass); backdrop-filter: var(--blur); box-shadow: var(--panel-shadow); cursor: crosshair; touch-action: none; opacity: 0.75; transition: opacity 0.2s; }
+/* Every figure the read-out can show is laid out once, one on top of the other, and only the current one is visible.
+   Showing another is then a change of visibility, which lays nothing out: see camera.ts for why that matters mid-zoom */
+.zoom-pct i { position: absolute; inset: 0; display: grid; place-items: center; font-style: normal; visibility: hidden; }
+.zoom-pct i.on { visibility: visible; }
+.minimap { position: relative; overflow: hidden; width: 168px; height: 104px; border-radius: var(--r-md); background: var(--glass); backdrop-filter: var(--blur); box-shadow: var(--panel-shadow); cursor: crosshair; touch-action: none; opacity: 0.75; transition: opacity 0.2s; }
 .minimap:hover { opacity: 1; }
-.mm-view { fill: var(--text); fill-opacity: 0.05; stroke: var(--text); stroke-opacity: 0.55; stroke-width: 1; vector-effect: non-scaling-stroke; }
+.minimap svg { display: block; width: 100%; height: 100%; }
+/* the frame of what is on screen: four sides and the wash between them, each a pixel at the map's corner that a transform
+   carries to its place and stretches to its length (see where it is placed, in Editor.tsx) */
+.mm-view { position: absolute; left: 0; top: 0; width: 0; height: 0; pointer-events: none; }
+.mm-view i { position: absolute; left: 0; top: 0; width: 1px; height: 1px; transform-origin: 0 0; background: color-mix(in srgb, var(--text) 55%, transparent); }
+.mm-view .mm-wash { background: color-mix(in srgb, var(--text) 5%, transparent); }
 
 .viewcube { position: absolute; right: calc(var(--ir) + 14px); top: calc(var(--top) + 22px); z-index: 5; display: flex; flex-direction: column; align-items: center; gap: 0; user-select: none; transition: right 0.32s var(--ease); animation: fade 0.5s 0.2s both; }
 .viewcube svg { cursor: grab; touch-action: none; overflow: visible; }
@@ -773,6 +840,8 @@ kbd { border-radius: 4px; box-shadow: inset 0 0 0 1px var(--line-strong); }
   background: color-mix(in srgb, var(--bg) 80%, transparent); backdrop-filter: blur(16px); box-shadow: inset 0 -1px 0 var(--line); }
 .brand { display: flex; align-items: center; gap: 9px; white-space: nowrap; font-weight: 600; font-size: 18px; letter-spacing: -0.03em; margin-right: 18px; }
 .dash-nav { display: flex; gap: 2px; }
+/* a button whose answer is on its way (the import dialog's code, fetched the first time it is asked for) */
+button[aria-busy='true'] { cursor: progress; }
 .dash-nav a, .text-btn { white-space: nowrap; height: 32px; padding: 0 11px; display: inline-flex; align-items: center; gap: 7px; border-radius: var(--r-sm); font-size: 14px; font-weight: 500; color: var(--dim); text-decoration: none; transition: color 0.14s, background 0.14s; }
 .dash-nav a:hover, .text-btn:hover { color: var(--text); }
 .dash-top .btn.primary { height: 34px; padding: 0 14px; font-size: 14px; margin-left: 6px; }

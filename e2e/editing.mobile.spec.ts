@@ -17,7 +17,8 @@ test.describe('phone: direct editing', () => {
     await fingers.tap(await app.world(1, 1))
     await expect(page.locator('.door[data-id="a"]')).toHaveCount(4)
     const size = await page.locator('.door[data-id="a"][data-side="e"] circle').first().evaluate((el) => el.getBoundingClientRect().width)
-    expect(size).toBeGreaterThanOrEqual(40)
+    // (forty pixels, less the last bit of a float: the radius is worked out in the scene's units and scaled back up)
+    expect(size).toBeGreaterThan(39.99)
   })
 
   test('one finger pulls a connection from a door to near another component, and the view stays put', async ({ page, app, fingers }) => {

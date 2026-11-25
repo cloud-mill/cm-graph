@@ -1,5 +1,5 @@
 import type { Page } from '@playwright/test'
-import { TRIO, expect, test as base } from './fixtures'
+import { TRIO, cornersOf, expect, test as base } from './fixtures'
 import { Fingers } from './touch'
 
 /**
@@ -16,9 +16,9 @@ const at = (page: Page, t = 0.5) => page.evaluate((t) => {
   const el = document.querySelector('.edge-hit[data-id="e"]') as SVGPathElement, m = el.getScreenCTM()!, p = el.getPointAtLength(el.getTotalLength() * t)
   return { x: p.x * m.a + p.y * m.c + m.e, y: p.x * m.b + p.y * m.d + m.f }
 }, t)
-const corner = (page: Page, id = 'a') => page.locator(`[data-kind="node"][data-id="${id}"]`).evaluate((el) => { const m = (el as unknown as SVGGElement).getScreenCTM()!; return [m.e, m.f] })
 const cells = async (page: Page, dx: number, dy: number) => {
-  const [a, b, c] = await Promise.all([corner(page, 'a'), corner(page, 'b'), corner(page, 'c')])
+  // the three read together, from one drawing of the page (see `cornersOf`)
+  const [a, b, c] = (await cornersOf(page, ['a', 'b', 'c'])).map((p) => [p.x, p.y])
   const uy = [(c[0] - a[0]) / 6, (c[1] - a[1]) / 6], ux = [(b[0] - a[0] - 3 * uy[0]) / 6, (b[1] - a[1] - 3 * uy[1]) / 6]
   return { x: ux[0] * dx + uy[0] * dy, y: ux[1] * dx + uy[1] * dy }
 }

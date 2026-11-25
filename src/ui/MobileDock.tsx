@@ -119,11 +119,16 @@ export function ViewFabs() {
   const flat = useStore((s) => s.flat)
   const yaw = useStore((s) => s.yaw)
   const pitch = useStore((s) => s.pitch)
-  const view = useStore((s) => s.view)
-  const doc = useStore((s) => s.doc)
   const [lost, setLost] = useState(false)
-  // checked once the camera has been still for a moment, not on every frame of a drag
-  useEffect(() => { const t = setTimeout(() => setLost(!inSight()), 260); return () => clearTimeout(t) }, [view, yaw, pitch, doc])
+  // Checked once the camera has been still for a moment, not on every frame of a drag. The view is listened to
+  // and not read: it changes on every frame of a pan, and nothing drawn here depends on it
+  useEffect(() => {
+    let t: ReturnType<typeof setTimeout> | undefined
+    const check = () => { clearTimeout(t); t = setTimeout(() => setLost(!inSight()), 260) }
+    check()
+    const off = useStore.subscribe((s, prev) => { if (s.view !== prev.view || s.yaw !== prev.yaw || s.pitch !== prev.pitch || s.doc !== prev.doc) check() })
+    return () => { off(); clearTimeout(t) }
+  }, [])
   const turned = isTurned(yaw, pitch)
   // with something selected the dock is showing its actions, so adding the next component gets its own button here
   const busy = useStore((s) => s.selection.length > 0 && s.tool === 'select')

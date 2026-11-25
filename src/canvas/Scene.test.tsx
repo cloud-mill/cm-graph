@@ -2,7 +2,7 @@
 import { render } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
 import { CATALOG_LIST, type ModelKind } from '../core/catalog'
-import { FLAT, ISO, makeCam } from '../core/iso'
+import { FLAT, ISO, makeCam, pt } from '../core/iso'
 import { docOf, edge, node } from '../test/helpers'
 import { GLYPHS } from './glyphs'
 import { Model, ModelIcon, SceneDefs } from './models'
@@ -63,7 +63,8 @@ describe('Scene', () => {
   })
   it('draws line styles, arrowheads, colour and traffic', () => {
     const two = [node('a'), node('b', 'ec2', 8, 0)]
-    const one = (e: Parameters<typeof edge>[3], flow = false) => draw(docOf(two, [edge('e', 'a', 'b', e)]), { flow }).querySelector('.edge')!
+    const all = (e: Parameters<typeof edge>[3], flow = false) => draw(docOf(two, [edge('e', 'a', 'b', e)]), { flow })
+    const one = (e: Parameters<typeof edge>[3]) => all(e).querySelector('.edge')!
     expect(one({}).querySelector('.edge-line')!.getAttribute('stroke-dasharray')).toBeNull()
     expect(one({ style: 'dashed' }).querySelector('.edge-line')!.getAttribute('stroke-dasharray')).toBe('5 5')
     expect(one({ style: 'dotted' }).querySelector('.edge-line')!.getAttribute('stroke-dasharray')).toBe('0.5 5')
@@ -72,9 +73,47 @@ describe('Scene', () => {
     expect(one({ arrow: 'both' }).querySelectorAll('polygon')).toHaveLength(2)
     expect(one({ color: '#123456' }).querySelector('.edge-line')!.getAttribute('stroke')).toBe('#123456')
     expect(one({}).querySelector('.edge-line')!.getAttribute('stroke')).toBe(THEMES.dark.edge)
+    // traffic and captions are layers of their own, over the lines: neither is part of the line's own group
+    expect(all({}).querySelector('.edge-flow')).toBeNull()
+    expect(all({}, true).querySelector('.edge-flow')).not.toBeNull()
     expect(one({}).querySelector('.edge-flow')).toBeNull()
-    expect(one({}, true).querySelector('.edge-flow')).not.toBeNull()
-    expect(one({}).querySelector('text')).toBeNull()
+    expect(all({}).querySelector('.edge-caption')).toBeNull()
+    expect(all({ label: 'sql' }).querySelector('.edge-caption')!.textContent).toBe('SQL')
+  })
+  it('given a window, draws only what touches it: components, lines with their captions and traffic, areas and labels', () => {
+    // two groups of everything, the second two hundred cells away
+    const both = docOf(
+      [node('a', 'ec2', 0, 0), node('b', 'rds', 6, 0), node('c', 'ec2', 200, 200), node('d', 'rds', 206, 200)],
+      [edge('near', 'a', 'b', { label: 'sql' }), edge('far', 'c', 'd', { label: 'sql' })],
+      {
+        areas: [{ id: 'A', x: -1, y: -1, w: 10, d: 4, name: 'Here', color: '#8F6FF2', kind: 'vpc' }, { id: 'B', x: 199, y: 199, w: 10, d: 4, name: 'There', color: '#8F6FF2', kind: 'vpc' }],
+        labels: [{ id: 'L', x: 0, y: -3, text: 'Here\nsecond', size: 20, dir: 'x' }, { id: 'M', x: 200, y: 197, text: 'There', size: 20, dir: 'y' }],
+      },
+    )
+    const ids = (c: HTMLElement, kind: string) => [...new Set([...c.querySelectorAll(`[data-kind="${kind}"]`)].map((el) => el.getAttribute('data-id')))].sort()
+    const all = draw(both, { flow: true })
+    expect(ids(all, 'node')).toEqual(['a', 'b', 'c', 'd'])
+    expect(ids(all, 'edge')).toEqual(['far', 'near'])
+    expect(all.querySelectorAll('.edge-flow')).toHaveLength(2)
+    // a window round the first group, a few hundred pixels each way
+    const [x, y] = pt(ISO, 3, 1)
+    const here = draw(both, { flow: true, within: { x0: x - 500, y0: y - 400, x1: x + 500, y1: y + 400 } })
+    expect(ids(here, 'node')).toEqual(['a', 'b'])
+    expect(ids(here, 'edge')).toEqual(['near'])
+    expect(ids(here, 'area')).toEqual(['A'])
+    expect(ids(here, 'label')).toEqual(['L'])
+    expect([...here.querySelectorAll('.edge-flow')].map((el) => el.getAttribute('data-edge'))).toEqual(['near'])
+    expect([...here.querySelectorAll('.edge-caption')].map((el) => el.getAttribute('data-edge'))).toEqual(['near'])
+    expect(here.textContent).not.toContain('THERE')
+    // and round the second
+    const [fx, fy] = pt(ISO, 203, 201)
+    const there = draw(both, { flow: true, within: { x0: fx - 500, y0: fy - 400, x1: fx + 500, y1: fy + 400 } })
+    expect(ids(there, 'node')).toEqual(['c', 'd'])
+    expect(ids(there, 'edge')).toEqual(['far'])
+    expect(ids(there, 'area')).toEqual(['B'])
+    expect(ids(there, 'label')).toEqual(['M'])
+    // a window on nothing draws nothing, and is not an error
+    expect(draw(both, { within: { x0: 1e6, y0: 1e6, x1: 1e6 + 10, y1: 1e6 + 10 } }).querySelectorAll('[data-kind]')).toHaveLength(0)
   })
   it('skips a connection whose end is missing instead of failing', () => {
     const c = draw(docOf([node('a')], [edge('e', 'a', 'gone')]))

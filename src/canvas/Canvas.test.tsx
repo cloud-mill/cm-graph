@@ -8,14 +8,14 @@ import { useStore } from '../core/store'
 import { MAX_SCALE, MIN_SCALE } from '../core/types'
 import { docOf, edge, node, resetStore } from '../test/helpers'
 import { COARSE, PHONE, stubMedia } from '../test/media'
-import { Canvas, HOLD_MS, heat } from './Canvas'
+import { Canvas, HOLD_MS, REST_MS, heat, settleView } from './Canvas'
 import { cam, flushFrame, hud, projNow } from './camera'
 
 // these render whole screens; leave headroom for a busy machine
 vi.setConfig({ testTimeout: 20_000 })
 
 const S = () => useStore.getState()
-const svg = () => document.querySelector('.canvas-svg') as SVGSVGElement
+const svg = () => document.querySelector('.canvas-surface') as HTMLElement
 const hit = (kind: string, id: string) => document.querySelector(`[data-kind="${kind}"][data-id="${id}"]`)!
 /** viewport position of a ground point under the current camera */
 const at = (wx: number, wy: number) => {
@@ -40,14 +40,15 @@ const label = (id: string, x: number, y: number) => ({ id, x, y, text: 'Note', s
 function mount(doc = docOf([node('a', 'ec2', 0, 0, { name: 'web' }), node('b', 'rds', 8, 0, { name: 'db' })]), state: object = {}) {
   resetStore({ doc, ...state })
   const r = render(<Canvas />)
-  act(() => { useStore.setState({ view: { x: 600, y: 300, k: 1 } }) })
+  // the scene is drawn at a new zoom once the view has come to rest: these tests look straight away, so it is told it has
+  act(() => { useStore.setState({ view: { x: 600, y: 300, k: 1 } }); settleView() })
   return r
 }
 
 beforeEach(() => {
   // jsdom lays nothing out: give the canvas a real box at the page origin
   vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(function (this: Element) {
-    const box = this.classList?.contains('canvas-svg') ? { left: 0, top: 0, right: 1200, bottom: 800, width: 1200, height: 800 } : { left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0 }
+    const box = this.classList?.contains('canvas-surface') ? { left: 0, top: 0, right: 1200, bottom: 800, width: 1200, height: 800 } : { left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0 }
     return { ...box, x: box.left, y: box.top, toJSON() {} } as DOMRect
   })
   vi.spyOn(document, 'elementFromPoint').mockImplementation(() => svg())
@@ -67,12 +68,13 @@ describe('empty canvas', () => {
   })
   it('draws the grid only when it is on, fading it out when zoomed far away', () => {
     mount(docOf())
-    expect(document.querySelector('rect[fill="url(#grid)"]')).toHaveAttribute('opacity', '1')
-    act(() => { useStore.setState({ view: { x: 0, y: 0, k: 0.475 } }) })
-    expect(document.querySelector('rect[fill="url(#grid)"]')).toHaveAttribute('opacity', '0.5')
+    const fine = () => document.querySelector<HTMLElement>('.canvas-fine')
+    expect(fine()!.style.opacity).toBe('1')
+    act(() => { useStore.setState({ view: { x: 0, y: 0, k: 0.475 } }); settleView() })
+    expect(Number(fine()!.style.opacity)).toBeCloseTo(0.5, 6)
     // fully faded, the fine dots are left out altogether rather than painted invisibly; the coarse ones stay
-    act(() => { useStore.setState({ view: { x: 0, y: 0, k: 0.2 } }) })
-    expect(document.querySelector('rect[fill="url(#grid)"]')).toBeNull()
+    act(() => { useStore.setState({ view: { x: 0, y: 0, k: 0.2 } }); settleView() })
+    expect(fine()).toBeNull()
     expect(document.querySelector('rect[fill="url(#grid-major)"]')).not.toBeNull()
     act(() => { useStore.setState({ showGrid: false }) })
     expect(document.querySelector('rect[fill="url(#grid-major)"]')).toBeNull()
@@ -147,7 +149,7 @@ describe('selecting', () => {
     const a = at(-3, -3), b = at(4, 4)
     fireEvent.pointerDown(svg(), { pointerId: 1, button: 0, shiftKey: true, clientX: a.clientX - 150, clientY: a.clientY })
     fireEvent.pointerMove(svg(), { pointerId: 1, clientX: b.clientX + 150, clientY: b.clientY })
-    expect(svg().querySelector(':scope > rect[rx="3"]')).not.toBeNull()
+    expect(svg().querySelector('.canvas-marquee rect[rx="3"]')).not.toBeNull()
     fireEvent.pointerUp(svg(), { pointerId: 1, clientX: b.clientX + 150, clientY: b.clientY })
     expect(S().selection.sort()).toEqual(['a', 'in', 'l'])
     expect(svg().querySelector(':scope > rect[rx="3"]')).toBeNull()
@@ -1406,13 +1408,13 @@ describe('touch targets and the phone layout', () => {
   it('targets keep their size on screen at any zoom', () => {
     stubMedia(COARSE)
     mount(undefined, { selection: ['a'] })
-    act(() => { useStore.setState({ view: { x: 600, y: 300, k: 2 } }) })
+    act(() => { useStore.setState({ view: { x: 600, y: 300, k: 2 } }); settleView() })
     expect(Number(document.querySelector('g[data-handle="n0"] circle')!.getAttribute('r'))).toBeCloseTo(7.5)
   })
   it('leaves the resize corners out when the component is too small on screen for fingers to tell them apart', () => {
     stubMedia(COARSE)
     mount(undefined, { selection: ['a'] })
-    act(() => { useStore.setState({ view: { x: 600, y: 300, k: 0.5 } }) })
+    act(() => { useStore.setState({ view: { x: 600, y: 300, k: 0.5 } }); settleView() })
     expect(handles('n')).toHaveLength(0)
     expect(document.querySelector('[data-handle="connect"]')).not.toBeNull()
     // a bigger component earns them back at the same zoom
@@ -1729,7 +1731,8 @@ describe('shaping a connection', () => {
     bent()
     const bar = document.querySelector<HTMLElement>('.edge-bar')!
     const top = Math.min(at(2, 1).clientY, at(8, 5).clientY)
-    expect(parseFloat(bar.style.top)).toBeLessThan(top)
+    // it is carried to its place by `translate`: across, then down
+    expect(parseFloat(bar.style.translate.split(' ')[1])).toBeLessThan(top)
     down(handle('s1'), 5, 3); move(3, 3)
     expect(document.querySelector('.edge-bar')).toBeNull()
     up(3, 3)
@@ -1857,8 +1860,8 @@ describe('following a flow on the canvas', () => {
     expect(nodeEl('a')).not.toHaveClass('off'); expect(nodeEl('b')).not.toHaveClass('off')
     expect(nodeEl('c')).toHaveClass('off'); expect(nodeEl('z')).toHaveClass('off')
     expect(edgeEl('e')).toHaveClass('on'); expect(edgeEl('f')).toHaveClass('off')
-    expect(edgeEl('e').querySelector('.edge-flow')).not.toBeNull()
-    expect(edgeEl('f').querySelector('.edge-flow')).toBeNull()
+    expect(document.querySelector('.edge-flow[data-edge="e"]')).not.toBeNull()
+    expect(document.querySelector('.edge-flow[data-edge="f"]')).toBeNull()
   })
   it('a dependency never shows movement, because nothing travels along it', () => {
     mount(docOf([node('a'), node('b', 'rds', 8, 0)], [edge('e', 'a', 'b', { kind: 'dependency' })]), { trace: 'a', flow: true })
@@ -1874,7 +1877,7 @@ describe('following a flow on the canvas', () => {
 describe('what a connection shows', () => {
   it('writes its label, protocol and port along the line', () => {
     mount(docOf([node('a'), node('b', 'rds', 8, 0)], [edge('e', 'a', 'b', { label: 'orders', protocol: 'PostgreSQL', port: '5432' })]))
-    expect(hit('edge', 'e').closest('.edge')!.querySelector('text')).toHaveTextContent('ORDERS · POSTGRESQL 5432')
+    expect(document.querySelector('.edge-caption[data-edge="e"]')).toHaveTextContent('ORDERS · POSTGRESQL 5432')
   })
   it('previews a new connection along the route it would take', () => {
     mount(docOf([node('a'), node('b', 'rds', 8, 0), node('w', 's3', 4, 0)]), { selection: ['a'] })
@@ -1902,6 +1905,40 @@ describe('doors', () => {
     expect(doorsOf('b').map((d) => d.getAttribute('data-side')).sort()).toEqual(['e', 'n', 's', 'w'])
     expect(document.querySelector('.hover-mark')).not.toBeNull()
     expect(S().selection).toEqual([])
+  })
+  it('are put away for as long as a zoom lasts and are back when the view comes to rest, on whatever is then under the pointer', () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance', 'Date'] })
+    try {
+      mount()
+      const frame = () => act(() => { vi.advanceTimersByTime(20) })
+      frame(); frame()
+      hover(hit('node', 'b'), 9, 1)
+      expect(doorsOf('b')).toHaveLength(4)
+      // a pan leaves them be: nothing about them goes by the view, and they ride along with the component
+      act(() => { useStore.setState({ view: { x: 640, y: 320, k: 1 } }) })
+      frame(); frame()
+      expect(doorsOf('b')).toHaveLength(4)
+      // A zoom does not. Doors keep their size on the screen, so each is drawn at a size worked out from the zoom: left
+      // there, the wheel turned over a component would have them drawn again on every frame
+      act(() => { useStore.setState({ view: { x: 640, y: 320, k: 1.3 } }) })
+      frame()
+      expect(document.querySelectorAll('.door')).toHaveLength(0)
+      expect(document.querySelector('.hover-mark')).toBeNull()
+      // the pointer "moves" as the picture moves under it (a browser says so): it is not answered until the view has stopped
+      vi.mocked(document.elementFromPoint).mockReturnValue(hit('node', 'b'))
+      hover(hit('node', 'a'), 1, 1)
+      expect(document.querySelectorAll('.door')).toHaveLength(0)
+      // at rest, whatever is under the pointer where it now is gets its answer
+      act(() => { vi.advanceTimersByTime(REST_MS + 20) })
+      expect(doorsOf('b')).toHaveLength(4)
+      expect(document.querySelector('.hover-mark')).not.toBeNull()
+      // and if nothing of the canvas is under it by then (it has moved onto a panel), nothing is
+      act(() => { useStore.setState({ view: { x: 640, y: 320, k: 1.5 } }) })
+      frame()
+      vi.mocked(document.elementFromPoint).mockReturnValue(document.body)
+      act(() => { vi.advanceTimersByTime(REST_MS + 20) })
+      expect(document.querySelectorAll('.door')).toHaveLength(0)
+    } finally { vi.useRealTimers() }
   })
   it('stay while the pointer leaves the body to reach one, and go when it moves away', () => {
     mount()
@@ -2343,5 +2380,449 @@ describe('placing from the library, continued', () => {
     expect(document.querySelector('.splice')).toBeNull()
     fireEvent.pointerUp(window, at(9, 1))
     expect(S().doc.edges).toHaveLength(1)
+  })
+})
+
+describe('the layer the scene is drawn in', () => {
+  const layer = () => document.querySelector<HTMLElement>('.canvas-pan')!.style.transform
+  const zoom = () => document.querySelector<HTMLElement>('.canvas-zoom')!.style.transform
+  const wrap = () => document.querySelector('.canvas-wrap')!
+  const frame = () => act(() => { vi.advanceTimersByTime(20) })
+  const clocked = (run: () => void) => { vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance', 'Date'] }); try { run() } finally { vi.useRealTimers() } }
+  /** How many times anything inside the scene was changed, by React or anyone else, while `run` ran. */
+  const drawnAgain = (run: () => void) => {
+    const seen: MutationRecord[] = []
+    const watch = new MutationObserver((list) => { seen.push(...list) })
+    for (const el of document.querySelectorAll('.canvas-layer')) watch.observe(el, { attributes: true, childList: true, characterData: true, subtree: true })
+    run()
+    seen.push(...watch.takeRecords())
+    watch.disconnect()
+    return seen.length
+  }
+
+  it('is moved in the frame after the view changes, and by a transform alone', () => clocked(() => {
+    mount()
+    frame(); frame()
+    expect(layer()).toBe('translate(600px, 300px)')
+    expect(zoom()).toBe('scale(1)')
+    const changes = drawnAgain(() => {
+      act(() => { useStore.setState({ view: { x: 640, y: 325, k: 1 } }) })
+      // not as the change is made: at the browser's next frame, so nothing can come between the move and its drawing.
+      // The first frame of a move is waited out (what stops answering the pointer has to be drawn first), the layer goes in the second
+      expect(layer()).toBe('translate(600px, 300px)')
+      frame(); frame()
+      expect(layer()).toBe('translate(640px, 325px)')
+    })
+    // and through all of it nothing inside the layer was drawn again, and the zoom was left alone
+    expect(changes).toBe(0)
+    expect(zoom()).toBe('scale(1)')
+    expect(wrap().hasAttribute('data-zooming')).toBe(false)
+  }))
+
+  it('a zoom is drawn at its own scale in the frame it happens: the layer is moved, never stretched', () => clocked(() => {
+    mount()
+    frame(); frame()
+    for (const k of [1.2, 1.44, 0.7, 2.5, 0.33]) {
+      act(() => { useStore.setState({ view: { x: 640, y: 325, k } }) })
+      frame()
+      // the zoom is on the element inside the layer, which is a change to what the layer holds: the browser draws it again
+      expect(zoom()).toBe(`scale(${k})`)
+      // and the layer itself is only ever moved. Scaled, it would be the picture it already had, stretched
+      expect(layer()).toBe('translate(640px, 325px)')
+      expect(layer()).not.toContain('scale')
+    }
+  }))
+
+  it('a zoom between pixels is put exactly where the view has it, every frame', () => clocked(() => {
+    mount()
+    frame(); frame()
+    act(() => { useStore.setState({ view: { x: 640.4, y: 324.75, k: 1.3 } }) })
+    frame()
+    // whole pixels on the layer, the fraction with the zoom: together, the view exactly
+    expect(layer()).toBe('translate(640px, 325px)')
+    const m = /translate\(([-\d.e]+)px, ([-\d.e]+)px\) scale\(1\.3\)/.exec(zoom())!
+    expect(Number(m[1])).toBeCloseTo(0.4, 6)
+    expect(Number(m[2])).toBeCloseTo(-0.25, 6)
+  }))
+
+  it('gives up its own surface for as long as a zoom lasts, and has it back when the view comes to rest', () => clocked(() => {
+    mount()
+    frame(); frame()
+    expect(wrap().hasAttribute('data-zooming')).toBe(false)
+    act(() => { useStore.setState({ view: { x: 600, y: 300, k: 1.1 } }) })
+    frame()
+    expect(wrap().hasAttribute('data-zooming')).toBe(true)
+    // a pan in the same gesture is drawn the same way: nothing changes hands in the middle of it
+    act(() => { useStore.setState({ view: { x: 612, y: 300, k: 1.1 } }) })
+    frame()
+    expect(wrap().hasAttribute('data-zooming')).toBe(true)
+    expect(layer()).toBe('translate(612px, 300px)')
+    act(() => { vi.advanceTimersByTime(REST_MS + 20) })
+    expect(wrap().hasAttribute('data-zooming')).toBe(false)
+    expect(wrap().hasAttribute('data-viewing')).toBe(false)
+    // and coming to rest moves nothing: what was on screen in the last frame of the zoom is what stays
+    expect(layer()).toBe('translate(612px, 300px)')
+    expect(zoom()).toBe('scale(1.1)')
+  }))
+
+  it('a frame at exactly 100% is drawn on the layer\'s own surface, as it will be at rest', () => clocked(() => {
+    mount()
+    frame(); frame()
+    act(() => { useStore.setState({ view: { x: 600, y: 300, k: 1.3 } }) })
+    frame()
+    expect(wrap().hasAttribute('data-zooming')).toBe(true)
+    // (drawn with the page at its natural size, words would be given subpixel antialiasing, and lose it again at rest)
+    act(() => { useStore.setState({ view: { x: 600, y: 300, k: 1 } }) })
+    frame()
+    expect(zoom()).toBe('scale(1)')
+    expect(wrap().hasAttribute('data-zooming')).toBe(false)
+    // the same a hair off 100%, where arithmetic leaves a zoom that went there and back
+    act(() => { useStore.setState({ view: { x: 600, y: 300, k: 1.3 } }) })
+    frame()
+    act(() => { useStore.setState({ view: { x: 600, y: 300, k: 0.9999999999999998 } }) })
+    frame()
+    expect(wrap().hasAttribute('data-zooming')).toBe(false)
+    // and on from there it is a zoom like any other
+    act(() => { useStore.setState({ view: { x: 600, y: 300, k: 0.9 } }) })
+    frame()
+    expect(wrap().hasAttribute('data-zooming')).toBe(true)
+  }))
+
+  it('React draws nothing for a zoom while nothing on the canvas is sized by it, and catches up at rest', () => clocked(() => {
+    mount()
+    frame(); frame()
+    const changes = drawnAgain(() => {
+      for (const k of [1.05, 1.1, 1.16, 1.22]) { act(() => { useStore.setState({ view: { x: 600, y: 300, k } }) }); frame() }
+    })
+    expect(changes).toBe(0)
+    expect(zoom()).toBe('scale(1.22)')
+  }))
+
+  it('the band that takes a click on a line is sized for the zoom the view came to rest at, and not on the frames between', () => clocked(() => {
+    mount(docOf([node('a', 'ec2', 0, 0), node('b', 'rds', 8, 0)], [edge('e', 'a', 'b')]), { selection: ['a'] })
+    frame(); frame()
+    const sizedFor = () => [...document.querySelectorAll<SVGElement>('.canvas-layer.ground, .canvas-layer .overlay')].map((el) => el.style.getPropertyValue('--k'))
+    expect(sizedFor()).toEqual(['1', '1'])
+    // something is selected, so the handles are drawn again on each frame of the zoom: the band nobody can see is not
+    act(() => { useStore.setState({ view: { x: 600, y: 300, k: 1.5 } }) })
+    frame()
+    expect(Number(document.querySelector('.door-dot')!.getAttribute('r'))).toBeCloseTo(4.2 / 1.5, 6)
+    expect(sizedFor()).toEqual(['1', '1'])
+    act(() => { vi.advanceTimersByTime(REST_MS + 20) })
+    expect(sizedFor()).toEqual(['1.5', '1.5'])
+  }))
+
+  it('marks that keep their size on screen are drawn again in the same frame as the zoom', () => clocked(() => {
+    mount(undefined, { selection: ['a'] })
+    frame(); frame()
+    const door = () => Number(document.querySelector('.door-dot')!.getAttribute('r'))
+    const at1 = door()
+    act(() => { useStore.setState({ view: { x: 600, y: 300, k: 2 } }) })
+    frame()
+    // half the size in the scene at twice the zoom, so the same size on screen: and already, not once the zoom has ended
+    expect(zoom()).toBe('scale(2)')
+    expect(door()).toBeCloseTo(at1 / 2, 6)
+    act(() => { useStore.setState({ view: { x: 600, y: 300, k: 0.8 } }) })
+    frame()
+    expect(door()).toBeCloseTo(at1 / 0.8, 6)
+  }))
+
+  it('the fine dots of the grid fade with the zoom frame by frame, and are left out or put back as it crosses the point where they go', () => clocked(() => {
+    mount(docOf())
+    frame(); frame()
+    const fine = () => document.querySelector<HTMLElement>('.canvas-fine')
+    act(() => { useStore.setState({ view: { x: 600, y: 300, k: 0.475 } }) })
+    frame()
+    expect(Number(fine()!.style.opacity)).toBeCloseTo(0.5, 6)
+    act(() => { useStore.setState({ view: { x: 600, y: 300, k: 0.37 } }) })
+    frame()
+    expect(Number(fine()!.style.opacity)).toBeCloseTo(0.2, 6)
+    act(() => { useStore.setState({ view: { x: 600, y: 300, k: 0.25 } }) })
+    frame()
+    expect(fine()).toBeNull()
+    act(() => { useStore.setState({ view: { x: 600, y: 300, k: 0.4 } }) })
+    frame()
+    expect(Number(fine()!.style.opacity)).toBeCloseTo(0.1 / 0.35, 6)
+  }))
+
+  it('goes with the scene at once when the camera turns: the two are never a frame apart', () => {
+    mount()
+    const a = () => hit('node', 'a').getAttribute('transform'), b = () => hit('node', 'b').getAttribute('transform')
+    const was = { layer: layer(), b: b() }
+    // a turn about a point moves the view too, to keep that point where it is: one change to the store
+    act(() => { useStore.setState({ yaw: S().yaw + 12, view: { x: 655, y: 280, k: 1 } }) })
+    expect(b()).not.toBe(was.b) // drawn for the new angle
+    expect(layer()).toBe('translate(655px, 280px)') // and already where that drawing belongs
+    expect(a()).toBe('translate(0 0)')
+    // the same when it tilts
+    act(() => { useStore.setState({ pitch: S().pitch + 6, view: { x: 610, y: 305, k: 1 } }) })
+    expect(layer()).toBe('translate(610px, 305px)')
+  })
+
+  it('is drawn for exactly where a turn leaves the view, there and then: nothing steps into place afterwards', () => {
+    mount()
+    const inner = () => { const m = /translate\(([-\d.e]+)px, ([-\d.e]+)px\) scale\(1\)/.exec(zoom()); return m ? [Number(m[1]), Number(m[2])] : [0, 0] }
+    // a turn about a point leaves the view between pixels, as it nearly always does
+    act(() => { useStore.setState({ yaw: S().yaw + 12, view: { x: 655.4, y: 280.25, k: 1 } }) })
+    // the layer is on whole pixels, where nothing in it is soft, and the fraction is in the drawing: together, the view exactly
+    expect(layer()).toBe('translate(655px, 280px)')
+    expect(inner()[0]).toBeCloseTo(0.4, 6)
+    expect(inner()[1]).toBeCloseTo(0.25, 6)
+    const was = { layer: layer(), inner: inner() }
+    // coming to rest has nothing left to do
+    act(() => settleView())
+    expect(layer()).toBe(was.layer)
+    expect(inner()).toEqual(was.inner)
+    // a pan is another matter: it draws nothing as it goes, so the fraction waits for the view to come to rest
+    act(() => { useStore.setState({ view: { x: 700.3, y: 300, k: 1 } }) })
+    expect(inner()).toEqual(was.inner)
+    act(() => settleView())
+    expect(inner()[0]).toBeCloseTo(0.3, 6)
+    expect(inner()[1]).toBeCloseTo(0, 6)
+    expect(layer()).toBe('translate(700px, 300px)')
+  })
+})
+
+describe('on another screen', () => {
+  it('a window moved to a screen with more device pixels to the pixel has the scene put on that screen\'s pixels', () => {
+    const media = stubMedia()
+    const was = Object.getOwnPropertyDescriptor(window, 'devicePixelRatio')
+    try {
+      Object.defineProperty(window, 'devicePixelRatio', { value: 1, configurable: true })
+      mount()
+      const layer = () => document.querySelector<HTMLElement>('.canvas-pan')!.style.transform
+      const fraction = () => { const m = /translate\(([-\d.e]+)px, ([-\d.e]+)px\)/.exec(document.querySelector<HTMLElement>('.canvas-zoom')!.style.transform); return m ? [Number(m[1]), Number(m[2])] : [0, 0] }
+      act(() => { useStore.setState({ view: { x: 600.4, y: 300.3, k: 1 } }); settleView() })
+      // one device pixel to the pixel: whole pixels, and the rest with the zoom
+      expect(layer()).toBe('translate(600px, 300px)')
+      expect(fraction()[0]).toBeCloseTo(0.4, 6)
+      // two to the pixel: a half is a whole device pixel there, and where the layer sat is not what is nearest any more
+      Object.defineProperty(window, 'devicePixelRatio', { value: 2, configurable: true })
+      act(() => { media.set(() => false) })
+      expect(layer()).toBe('translate(600.5px, 300.5px)')
+      expect(fraction()[0]).toBeCloseTo(-0.1, 6)
+      expect(fraction()[1]).toBeCloseTo(-0.2, 6)
+      // and back again: the query being watched is by now the one for two
+      Object.defineProperty(window, 'devicePixelRatio', { value: 1, configurable: true })
+      act(() => { media.set(() => false) })
+      expect(layer()).toBe('translate(600px, 300px)')
+    } finally { if (was) Object.defineProperty(window, 'devicePixelRatio', was); else delete (window as { devicePixelRatio?: number }).devicePixelRatio }
+  })
+})
+
+describe('where the zoom is written in Firefox', () => {
+  // Firefox draws what is under a transform that script keeps changing at the next power of two above its scale, and
+  // shrinks it to size: soft. The box an <svg> shows (its viewBox) scales its drawing as well and is drawn exactly
+  const layers = () => [...document.querySelectorAll('.canvas-zoom .canvas-layer')]
+  const frame = () => act(() => { vi.advanceTimersByTime(20) })
+  const clocked = (run: () => void) => { vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance', 'Date'] }); try { run() } finally { vi.useRealTimers() } }
+  beforeEach(() => { vi.stubGlobal('CSS', { supports: (prop: string) => prop === '-moz-appearance' }) })
+
+  it('each layer shows the square of the scene that the zoom puts on its one pixel, and no element is scaled', () => clocked(() => {
+    mount()
+    frame(); frame()
+    expect(layers().length).toBeGreaterThan(4)
+    for (const l of layers()) expect(l.getAttribute('viewBox')).toBe('0 0 1 1')
+    act(() => { useStore.setState({ view: { x: 640, y: 325, k: 1.6 } }) })
+    frame()
+    for (const l of layers()) expect(l.getAttribute('viewBox')).toBe('0 0 0.625 0.625')
+    expect(document.querySelector<HTMLElement>('.canvas-zoom')!.style.transform).toBe('')
+    expect(document.querySelector<HTMLElement>('.canvas-pan')!.style.transform).toBe('translate(640px, 325px)')
+  }))
+
+  it('the fraction of a pixel the view is off by goes into the same box', () => clocked(() => {
+    mount()
+    frame(); frame()
+    act(() => { useStore.setState({ view: { x: 640.25, y: 324.75, k: 2 } }) })
+    frame()
+    // a quarter of a pixel on at twice the zoom is an eighth of a scene px: the box starts that much short of the scene's corner
+    const [x, y, w, h] = layers()[0].getAttribute('viewBox')!.split(' ').map(Number)
+    expect(document.querySelector<HTMLElement>('.canvas-pan')!.style.transform).toBe('translate(640px, 325px)')
+    expect(x).toBeCloseTo(-0.125, 9)
+    expect(y).toBeCloseTo(0.125, 9)
+    expect([w, h]).toEqual([0.5, 0.5])
+  }))
+
+  it('a layer added later is told the zoom as it arrives', () => clocked(() => {
+    mount()
+    frame(); frame()
+    act(() => { useStore.setState({ view: { x: 600, y: 300, k: 0.8 } }) })
+    frame()
+    act(() => { vi.advanceTimersByTime(REST_MS + 20) })
+    const before = layers().length
+    // a component far in front of the others is drawn in a band of its own: one more layer
+    act(() => { S().addNode('s3', 40, 40) })
+    expect(layers().length).toBeGreaterThanOrEqual(before)
+    for (const l of layers()) expect(l.getAttribute('viewBox')).toBe('0 0 1.25 1.25')
+  }))
+})
+
+describe('what is on screen when a pan is let go is what stays', () => {
+  const layer = () => document.querySelector<HTMLElement>('.canvas-pan')!.style.transform
+  const inner = () => { const m = /translate\(([-\d.e]+)px, ([-\d.e]+)px\)/.exec(document.querySelector<HTMLElement>('.canvas-zoom')!.style.transform); return m ? [Number(m[1]), Number(m[2])] : [0, 0] }
+  const frames = () => act(() => { vi.advanceTimersByTime(40) })
+
+  it('a pan that pauses on the way is not put in place under the hand, so nothing steps when the hand lets go', () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance', 'Date'] })
+    try {
+      mount()
+      frames()
+      expect([layer(), inner()]).toEqual(['translate(600px, 300px)', [0, 0]])
+      // a pointer between pixels, as a fine one or a finger is: the view is part of a pixel along, the layer on whole ones
+      fireEvent.pointerDown(svg(), { pointerId: 1, button: 0, clientX: 100, clientY: 100 })
+      fireEvent.pointerMove(svg(), { pointerId: 1, clientX: 112.4, clientY: 107.7 })
+      frames()
+      expect(S().view.x).toBeCloseTo(612.4, 6)
+      expect(layer()).toBe('translate(612px, 308px)')
+      // the hand pauses there, long enough for the view to count as at rest
+      act(() => { vi.advanceTimersByTime(400) })
+      expect(document.querySelector('.canvas-wrap')!.hasAttribute('data-viewing')).toBe(false)
+      // nothing was drawn again for the pause: the scene is as it was drawn before the pan
+      expect([layer(), inner()]).toEqual(['translate(612px, 308px)', [0, 0]])
+      // it goes on to a whole number of pixels from where it started, and is exactly there
+      fireEvent.pointerMove(svg(), { pointerId: 1, clientX: 129, clientY: 117 })
+      frames()
+      expect([layer(), inner()]).toEqual(['translate(629px, 317px)', [0, 0]])
+      const held = [layer(), inner()]
+      fireEvent.pointerUp(svg(), { pointerId: 1, clientX: 129, clientY: 117 })
+      act(() => { vi.advanceTimersByTime(600) })
+      expect([layer(), inner()]).toEqual(held)
+    } finally { vi.useRealTimers() }
+  })
+
+  it('one let go between pixels is put exactly in place once, when the hand has gone', () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance', 'Date'] })
+    try {
+      mount()
+      frames()
+      fireEvent.pointerDown(svg(), { pointerId: 1, button: 0, clientX: 100, clientY: 100 })
+      fireEvent.pointerMove(svg(), { pointerId: 1, clientX: 112.4, clientY: 107.7 })
+      frames()
+      act(() => { vi.advanceTimersByTime(400) })
+      // still in the hand: on whole pixels, not yet put right
+      expect([layer(), inner()]).toEqual(['translate(612px, 308px)', [0, 0]])
+      fireEvent.pointerUp(svg(), { pointerId: 1, clientX: 112.4, clientY: 107.7 })
+      act(() => { vi.advanceTimersByTime(20) })
+      // let go: the fraction goes with the zoom, and the two together are the view exactly
+      expect(layer()).toBe('translate(612px, 308px)')
+      expect(inner()[0]).toBeCloseTo(0.4, 6)
+      expect(inner()[1]).toBeCloseTo(-0.3, 6)
+    } finally { vi.useRealTimers() }
+  })
+})
+
+describe('a large blueprint', () => {
+  // past a few hundred components and lines, only what is near the view is in the page at all
+  const grid = (side: number) => docOf(Array.from({ length: side * side }, (_, i) => node('n' + i, 'ec2', (i % side) * 4, Math.floor(i / side) * 4)))
+  const drawn = () => document.querySelectorAll('.canvas-surface [data-kind="node"]').length
+  /** the ids of the components that are on the canvas (1200 by 800 here) under the view as it stands */
+  const onScreen = () => S().doc.nodes.filter((n) => { const p = at(n.x + 1, n.y + 1); return p.clientX > 0 && p.clientX < 1200 && p.clientY > 0 && p.clientY < 800 }).map((n) => n.id)
+
+  it('draws what is on the screen and a margin round it, and no more', () => {
+    mount(grid(30))
+    expect(S().doc.nodes).toHaveLength(900)
+    expect(drawn()).toBeGreaterThan(20)
+    expect(drawn()).toBeLessThan(600)
+    for (const id of onScreen()) expect(document.querySelector(`[data-kind="node"][data-id="${id}"]`), id).not.toBeNull()
+  })
+
+  it('draws more as the view comes to the edge of what is drawn, and everything on the screen is always there', () => {
+    mount(grid(30))
+    const before = new Set([...document.querySelectorAll('.canvas-surface [data-kind="node"]')].map((el) => el.getAttribute('data-id')))
+    // a long way down the blueprint: none of what was on the screen still is
+    act(() => { useStore.setState({ view: { x: 600, y: -2600, k: 1 } }) })
+    const now = onScreen()
+    expect(now.length).toBeGreaterThan(5)
+    expect(now.some((id) => !before.has(id))).toBe(true)
+    for (const id of now) expect(document.querySelector(`[data-kind="node"][data-id="${id}"]`), id).not.toBeNull()
+  })
+
+  it('keeps what is drawn while the view closes in, and lets go of what is far outside it once the view is at rest', () => {
+    mount(grid(30))
+    const wide = drawn()
+    // twice as close, about the middle of the canvas: what is drawn reaches well past the screen now, and will do while the view moves
+    act(() => { useStore.setState({ view: { x: 600, y: 200, k: 2 } }) })
+    expect(drawn()).toBe(wide)
+    act(() => settleView())
+    expect(drawn()).toBeLessThan(wide * 0.6)
+    expect(drawn()).toBeGreaterThan(0)
+    for (const id of onScreen()) expect(document.querySelector(`[data-kind="node"][data-id="${id}"]`), id).not.toBeNull()
+    // a pan that stays inside what is drawn is not a reason to draw anything again, moving or at rest
+    const kept = drawn()
+    act(() => { useStore.setState({ view: { x: 520, y: 150, k: 2 } }); settleView() })
+    expect(drawn()).toBe(kept)
+  })
+
+  it('lights only the selected lines that are drawn, and a great many of them plainly', () => {
+    // a line from every component to the next along its row and to the one below: 1,740 of them, a small part in view
+    const big = grid(30)
+    for (let i = 0; i < 899; i++) if ((i + 1) % 30) big.edges.push(edge('e' + i, 'n' + i, 'n' + (i + 1)))
+    for (let i = 0; i < 870; i++) big.edges.push(edge('v' + i, 'n' + i, 'n' + (i + 30)))
+    mount(big)
+    const lit = () => document.querySelectorAll('.edge-sel')
+    const drawnLines = document.querySelectorAll('.canvas-surface [data-kind="edge"]').length
+    expect(drawnLines).toBeGreaterThan(60)
+    expect(drawnLines).toBeLessThan(900)
+    // one line: a soft halo round it (three strokes), the line, and a mark at each end
+    act(() => S().select(['e0']))
+    expect(lit()).toHaveLength(1)
+    expect(lit()[0].querySelectorAll('g[pointer-events="none"] > path')).toHaveLength(3 + 1 + 2)
+    // every line in the blueprint: only those in view are lit at all, and each by its own line alone
+    act(() => S().select(big.edges.map((e) => e.id)))
+    expect(S().selection).toHaveLength(1740)
+    expect(lit().length).toBeGreaterThan(60)
+    expect(lit().length).toBeLessThanOrEqual(drawnLines)
+    for (const el of [...lit()].slice(0, 5)) expect(el.querySelectorAll('g[pointer-events="none"] > path')).toHaveLength(1)
+    // a line that is selected but far out of view has nothing drawn for it
+    act(() => S().select(['e898']))
+    expect(lit()).toHaveLength(0)
+  })
+
+  it('is still edited whole: everything is selected and moved, drawn or not', () => {
+    mount(grid(30))
+    act(() => S().select(S().doc.nodes.map((n) => n.id)))
+    expect(S().selection).toHaveLength(900)
+    act(() => S().nudge(1, 0))
+    expect(S().doc.nodes.every((n, i) => n.x === (i % 30) * 4 + 1)).toBe(true)
+    // and the canvas shows the move on what it draws, which is still only what is near the view
+    expect(drawnAt('n0')).toEqual([1, 0])
+    expect(drawn()).toBeLessThan(600)
+  })
+})
+
+describe('traffic', () => {
+  const wrap = () => document.querySelector('.canvas-wrap')!
+  const row = (n: number) => docOf(Array.from({ length: n }, (_, i) => node('n' + i, 'ec2', (i % 12) * 4, Math.floor(i / 12) * 4)))
+
+  // each step of it has the browser draw the whole picture again, so the more there is to draw the fewer steps it takes
+  it('steps less often the more there is drawn', () => {
+    mount(row(30))
+    expect(wrap().className).not.toMatch(/flow-\d/)
+    cleanup()
+    mount(row(60))
+    expect(wrap().classList.contains('flow-20')).toBe(true)
+    cleanup()
+    mount(row(150))
+    expect(wrap().classList.contains('flow-12')).toBe(true)
+  })
+
+  it('stops when nothing has been touched for two minutes, and picks up at the first sign of life', () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance', 'Date'] })
+    try {
+      mount(docOf([node('a'), node('b', 'rds', 8, 0)], [edge('e', 'a', 'b')]), { flow: true })
+      act(() => { vi.advanceTimersByTime(119_000) })
+      expect(wrap().hasAttribute('data-asleep')).toBe(false)
+      // anything the user does puts it off for another two minutes
+      fireEvent.keyDown(window, { key: 'Shift' })
+      act(() => { vi.advanceTimersByTime(119_000) })
+      expect(wrap().hasAttribute('data-asleep')).toBe(false)
+      act(() => { vi.advanceTimersByTime(2_000) })
+      expect(wrap().hasAttribute('data-asleep')).toBe(true)
+      fireEvent.pointerMove(window, { clientX: 5, clientY: 5 })
+      expect(wrap().hasAttribute('data-asleep')).toBe(false)
+      // and it goes back to sleep the same way
+      act(() => { vi.advanceTimersByTime(121_000) })
+      expect(wrap().hasAttribute('data-asleep')).toBe(true)
+    } finally { vi.useRealTimers() }
   })
 })

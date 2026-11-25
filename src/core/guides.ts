@@ -28,7 +28,8 @@ export function spacingGaps(nodes: NodeT[], moving: Set<string>): Gap[] {
   const mv = nodes.filter((n) => moving.has(n.id)), still = nodes.filter((n) => !moving.has(n.id))
   if (!mv.length || !still.length) return []
   const size = (n: NodeT) => 2 * (n.scale ?? 1)
-  const box = { x0: Math.min(...mv.map((n) => n.x)), y0: Math.min(...mv.map((n) => n.y)), x1: Math.max(...mv.map((n) => n.x + size(n))), y1: Math.max(...mv.map((n) => n.y + size(n))) }
+  const box = { x0: Infinity, y0: Infinity, x1: -Infinity, y1: -Infinity }
+  for (const n of mv) { box.x0 = Math.min(box.x0, n.x); box.y0 = Math.min(box.y0, n.y); box.x1 = Math.max(box.x1, n.x + size(n)); box.y1 = Math.max(box.y1, n.y + size(n)) }
   const out: Gap[] = []
   for (const axis of ['x', 'y'] as const) {
     const lo = (n: NodeT) => (axis === 'x' ? n.x : n.y), hi = (n: NodeT) => lo(n) + size(n)
@@ -54,20 +55,24 @@ export function spacingGaps(nodes: NodeT[], moving: Set<string>): Gap[] {
  * as "these are in line". Moving components are never aligned with each other.
  */
 export function alignGuides(nodes: NodeT[], moving: Set<string>, tolerance = 0.01): Guide[] {
-  const still = nodes.filter((n) => !moving.has(n.id))
+  const mv: NodeT[] = [], still: NodeT[] = []
+  for (const n of nodes) (moving.has(n.id) ? mv : still).push(n)
   const out = new Map<string, Guide>()
-  for (const m of nodes) {
-    if (!moving.has(m.id)) continue
+  if (!mv.length || !still.length) return []
+  // this runs on every frame of a carry and looks at every pair, so the centres of what is standing still are worked out once
+  const sx = new Float64Array(still.length), sy = new Float64Array(still.length)
+  still.forEach((s, i) => { const c = centerOf(s); sx[i] = c[0]; sy[i] = c[1] })
+  const add = (axis: 'x' | 'y', at: number, a: number, b: number) => {
+    const key = axis + at.toFixed(2)
+    const g = out.get(key) ?? { axis, at, from: Math.min(a, b), to: Math.max(a, b) }
+    g.from = Math.min(g.from, a, b); g.to = Math.max(g.to, a, b)
+    out.set(key, g)
+  }
+  for (const m of mv) {
     const [mx, my] = centerOf(m)
-    for (const s of still) {
-      const [sx, sy] = centerOf(s)
-      for (const [axis, at, a, b] of [['x', mx, my, sy], ['y', my, mx, sx]] as const) {
-        if (Math.abs((axis === 'x' ? sx : sy) - at) > tolerance) continue
-        const key = axis + at.toFixed(2)
-        const g = out.get(key) ?? { axis, at, from: Math.min(a, b), to: Math.max(a, b) }
-        g.from = Math.min(g.from, a, b); g.to = Math.max(g.to, a, b)
-        out.set(key, g)
-      }
+    for (let i = 0; i < still.length; i++) {
+      if (Math.abs(sx[i] - mx) <= tolerance) add('x', mx, my, sy[i])
+      if (Math.abs(sy[i] - my) <= tolerance) add('y', my, mx, sx[i])
     }
   }
   return [...out.values()]

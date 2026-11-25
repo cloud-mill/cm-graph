@@ -162,7 +162,7 @@ test.describe('import', () => {
     expect(doc.edges).toMatchObject([{ from: 'a', to: 'b', style: 'solid', arrow: 'end', width: 2 }])
     expect(doc.areas).toMatchObject([{ w: 1, d: 4, kind: 'group' }])
     expect(await page.evaluate(() => (window as any).__pwned)).toBeUndefined()
-    await expect(page.locator('.canvas-svg script, .canvas-svg img')).toHaveCount(0)
+    await expect(page.locator('.canvas-surface script, .canvas-surface img')).toHaveCount(0)
   })
 })
 
@@ -181,7 +181,7 @@ test.describe('share, history, shortcuts and command palette', () => {
     const other = await context.newPage()
     await other.goto(url)
     await expect(other).toHaveURL(/#\/d\/(?!e2edoc)[\w-]+$/)
-    await expect(other.locator('.canvas-svg [data-kind="node"]')).toHaveCount(3)
+    await expect(other.locator('.canvas-surface [data-kind="node"]')).toHaveCount(3)
     await expect(other.locator('.toast')).toContainText('Opened a copy of the shared blueprint')
     await expect(other.getByLabel('Blueprint name')).toHaveValue('E2E blueprint')
 
@@ -258,7 +258,7 @@ test.describe('share, history, shortcuts and command palette', () => {
     await page.keyboard.press('Enter')
     await expect(palette).toHaveCount(0)
     await expect(app.tool('Grid')).toHaveAttribute('aria-pressed', 'false')
-    await expect(page.locator('.canvas-svg rect[fill="url(#grid)"]')).toHaveCount(0)
+    await expect(page.locator('.canvas-surface rect[fill="url(#grid)"]')).toHaveCount(0)
 
     await app.mod('k')
     await page.keyboard.type('orders')
@@ -302,21 +302,21 @@ test.describe('browser Back on a desktop', () => {
     await expect(page.getByRole('dialog', { name: 'Export' })).toBeVisible()
     await page.goBack()
     await expect(page.getByRole('dialog', { name: 'Export' })).toHaveCount(0)
-    await expect(page.locator('.canvas-svg')).toBeVisible()
+    await expect(page.locator('.canvas-surface')).toBeVisible()
 
     await app.pick('b')
     await page.locator('.panel.right .select').first().click()
     await expect(page.locator('.select-list')).toBeVisible()
     await page.goBack()
     await expect(page.locator('.select-list')).toHaveCount(0)
-    await expect(page.locator('.canvas-svg')).toBeVisible()
+    await expect(page.locator('.canvas-surface')).toBeVisible()
 
     const ground = await app.world(4, 4)
     await page.mouse.click(ground.x, ground.y, { button: 'right' })
     await expect(page.locator('.ctx-menu')).toBeVisible()
     await page.goBack()
     await expect(page.locator('.ctx-menu')).toHaveCount(0)
-    await expect(page.locator('.canvas-svg')).toBeVisible()
+    await expect(page.locator('.canvas-surface')).toBeVisible()
     expect((await app.settled()).nodes).toHaveLength(3)
   })
   test('the side panels are part of the page, not layers: Back with them open leaves as usual, and Forward returns', async ({ page, app }) => {

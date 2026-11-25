@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { docOf, edge, node } from '../test/helpers'
-import { along, facing, findPath, nearestSide, planKey, routeAll, routePair, routerOwns, straightBetween, tidy, type W, withPlans } from './router'
+import { along, facing, findPath, Ground, nearestSide, planKey, routeAll, routePair, routerOwns, straightBetween, tidy, type W, withPlans } from './router'
 import type { Doc, EdgeT, NodeT } from './types'
 
 const rect = (n: NodeT) => ({ x0: n.x, y0: n.y, x1: n.x + 2 * (n.scale ?? 1), y1: n.y + 2 * (n.scale ?? 1) })
@@ -477,5 +477,68 @@ describe('review regressions', () => {
     const ports = (ids: string[]) => { const r = routeAll(nodes, ids.map((id) => edge(id, 'a', 'b'))); return ids.map((id) => r.get(id)!.pts[0][1]) }
     expect(ports(['m', '~wire'])).toEqual(ports(['m', '0abc']))
     expect(ports(['m', '~wire'])).toEqual(ports(['m', 'zzzz']))
+  })
+})
+
+describe('what stands where', () => {
+  const list = (all: { x0: number; y0: number; x1: number; y1: number }[], x0: number, y0: number, x1: number, y1: number) => all.filter((b) => b.x1 > x0 && b.x0 < x1 && b.y1 > y0 && b.y0 < y1)
+  // a seeded sequence, so a failure can be had again
+  const rnd = (seed: number) => () => ((seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296)
+
+  it('answers as the whole list would, for boxes of every size and place', () => {
+    const r = rnd(7)
+    const all = Array.from({ length: 400 }, () => { const x = r() * 240 - 60, y = r() * 240 - 60, s = 1 + r() * 5; return { x0: x, y0: y, x1: x + s, y1: y + s } })
+    const ground = new Ground(all)
+    for (let i = 0; i < 600; i++) {
+      const x = r() * 300 - 90, y = r() * 300 - 90, w = i % 9 === 0 ? r() * 400 : r() * 30, h = i % 7 === 0 ? 0 : r() * 30
+      expect(ground.near(x, y, x + w, y + h)).toEqual(list(all, x, y, x + w, y + h))
+    }
+    // touching is not overlapping, on either side
+    const one = all[0]
+    expect(ground.near(one.x1, one.y0, one.x1 + 1, one.y1)).not.toContain(one)
+    expect(ground.near(one.x0 - 1, one.y0, one.x0, one.y1)).not.toContain(one)
+  })
+
+  it('files nothing it cannot count to: a component anywhere a number can be, and a box of any kind', () => {
+    const odd = [
+      { x0: 1e300, y0: 0, x1: 1e300 + 2, y1: 2 }, { x0: -1e300, y0: -1e300, x1: 1e300, y1: 1e300 }, { x0: NaN, y0: 0, x1: NaN, y1: 2 },
+      { x0: 0, y0: 0, x1: Infinity, y1: 2 }, { x0: 5, y0: 5, x1: 3, y1: 3 }, { x0: 2 ** 53, y0: 2 ** 53, x1: 2 ** 53 + 2, y1: 2 ** 53 + 2 }, { x0: 0, y0: 0, x1: 900, y1: 2 },
+    ]
+    const all = [...odd, ...Array.from({ length: 40 }, (_, i) => ({ x0: i * 4, y0: 0, x1: i * 4 + 2, y1: 2 }))]
+    const ground = new Ground(all)
+    const boxes = [[0, 0, 10, 10], [-1e300, -1e300, 1e300, 1e300], [1e300, 0, 1e300 + 2, 2], [NaN, 0, 1, 1], [-Infinity, -Infinity, Infinity, Infinity], [10, 10, 0, 0], [2 ** 53, 2 ** 53, 2 ** 53 + 4, 2 ** 53 + 4], [0, 0.5, 1e9, 1]]
+    for (const [x0, y0, x1, y1] of boxes) expect(ground.near(x0, y0, x1, y1), String([x0, y0, x1, y1])).toEqual(list(all, x0, y0, x1, y1))
+  })
+
+  it('routes a large blueprint that has a component an absurd distance away, and the same as without it', () => {
+    const side = 18, nodes = Array.from({ length: side * side }, (_, i) => ({ id: 'n' + i, type: 'ec2', x: (i % side) * 4, y: Math.floor(i / side) * 4, props: {} }))
+    const edges: EdgeT[] = []
+    for (let i = 0; i < nodes.length - 1; i++) if ((i + 1) % side) edges.push({ id: 'e' + i, from: 'n' + i, to: 'n' + (i + 1), style: 'solid', arrow: 'end', width: 2 })
+    const plainly = routeAll(nodes, edges)
+    const withFar = routeAll([...nodes, { id: 'far', type: 'ec2', x: 1e300, y: -1e300, props: {} }, { id: 'lost', type: 'ec2', x: 2 ** 60, y: 3, props: {} }], edges)
+    expect(withFar.size).toBe(edges.length)
+    for (const e of edges) expect(withFar.get(e.id)!.pts, e.id).toEqual(plainly.get(e.id)!.pts)
+  })
+})
+
+describe('routing many lines at once', () => {
+  // Past a certain size the router files components by where they stand instead of looking at each one for every line.
+  // That is only a quicker way to the same answer: every line must come out exactly as it does the slow way.
+  it('gives every line the same path whether components are looked up in a list or by where they stand', () => {
+    const side = 24, types = ['ec2', 'rds', 's3', 'lambda']
+    const nodes = Array.from({ length: side * side }, (_, i) => ({ id: 'n' + i, type: types[i % 4], x: (i % side) * 4 + (i % 7 === 0 ? 0.37 : 0), y: Math.floor(i / side) * 4 + (i % 5 === 0 ? 1.2 : 0), props: {}, ...(i % 11 === 0 ? { scale: 1.5 } : {}) }))
+    const edges: EdgeT[] = []
+    for (let i = 0; i < nodes.length - 1; i++) if ((i + 1) % side) edges.push({ id: 'e' + i, from: 'n' + i, to: 'n' + (i + 1), style: 'solid', arrow: 'end', width: 2 })
+    for (let i = 0; i + side * 2 + 3 < nodes.length; i += 5) edges.push({ id: 'x' + i, from: 'n' + i, to: 'n' + (i + side * 2 + 3), style: 'solid', arrow: 'end', width: 2 })
+    // all at once: enough lines for the components to be filed by where they stand
+    const together = routeAll(nodes, edges)
+    expect(together.size).toBe(edges.length)
+    // a few at a time, with the rest standing as planned: too few lines for that, so each is looked up in the list
+    const planned = withPlans({ id: 'd', name: '', region: 'us-east-1', nodes, edges, areas: [], labels: [], createdAt: 0, updatedAt: 0 })
+    for (let from = 0; from < edges.length; from += 97) {
+      const some = planned.edges.map((e, i) => (i >= from && i < from + 3 ? edges[i] : e))
+      const again = routeAll(nodes, some)
+      for (let i = from; i < Math.min(edges.length, from + 3); i++) expect(again.get(edges[i].id)!.pts, edges[i].id).toEqual(together.get(edges[i].id)!.pts)
+    }
   })
 })

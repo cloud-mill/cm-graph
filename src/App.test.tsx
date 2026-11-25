@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, render, screen, waitFor } from '@testing-library/react'
+import { act, configure, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import App from './App'
 import { encodeShare, listDocs, loadDoc, saveDoc } from './core/storage'
@@ -8,6 +8,8 @@ import { docOf, node, resetStore } from './test/helpers'
 
 // these render whole screens; leave headroom for a busy machine
 vi.setConfig({ testTimeout: 20_000 })
+// a screen's code is fetched the first time it is shown, which here means the test runner compiling it: give that time
+configure({ asyncUtilTimeout: 10_000 })
 
 const S = () => useStore.getState()
 const goto = (hash: string) => act(() => { location.hash = hash; window.dispatchEvent(new HashChangeEvent('hashchange')) })
@@ -18,33 +20,34 @@ beforeEach(() => {
 })
 
 describe('App', () => {
-  it('shows the list of blueprints by default and applies the theme', () => {
+  // each screen's code is fetched when it is first shown, so what a screen holds is waited for, not read at once
+  it('shows the list of blueprints by default and applies the theme', async () => {
     resetStore({ theme: 'light' })
     render(<App />)
-    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Infrastructure')
+    expect(await screen.findByRole('heading', { level: 1 })).toHaveTextContent('Infrastructure')
     expect(document.documentElement.dataset.theme).toBe('light')
     act(() => S().setTheme('dark'))
     expect(document.documentElement.dataset.theme).toBe('dark')
   })
-  it('follows the address between the list and a blueprint', () => {
+  it('follows the address between the list and a blueprint', async () => {
     saveDoc(docOf([node('a')], [], { name: 'Shop' }))
     render(<App />)
     goto('#/d/doc1')
-    expect(screen.getByLabelText('Blueprint name')).toHaveValue('Shop')
+    expect(await screen.findByLabelText('Blueprint name')).toHaveValue('Shop')
     goto('#/')
-    expect(screen.getByRole('heading', { level: 1 })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { level: 1 })).toBeInTheDocument()
     expect(document.querySelector('.editor')).toBeNull()
   })
-  it('opens straight into a blueprint when loaded on its address', () => {
+  it('opens straight into a blueprint when loaded on its address', async () => {
     saveDoc(docOf([node('a')], [], { name: 'Shop' }))
     location.hash = '#/d/doc1'
     render(<App />)
-    expect(screen.getByLabelText('Blueprint name')).toHaveValue('Shop')
+    expect(await screen.findByLabelText('Blueprint name')).toHaveValue('Shop')
   })
-  it('falls back to the list for an address it does not know', () => {
+  it('falls back to the list for an address it does not know', async () => {
     location.hash = '#/nonsense'
     render(<App />)
-    expect(screen.getByRole('heading', { level: 1 })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { level: 1 })).toBeInTheDocument()
   })
   it('opens a shared link as a new local copy', async () => {
     const shared = docOf([node('a', 'ec2', 0, 0, { name: 'web' }), node('b', 'rds', 8, 0)], [], { name: 'Shared design' })
@@ -58,7 +61,7 @@ describe('App', () => {
     expect(loadDoc(id)!.nodes.map((n) => n.name)).toEqual(['web', undefined])
     expect(S().toasts.at(-1)!.text).toBe('Opened a copy of the shared blueprint')
     goto(location.hash)
-    expect(screen.getByLabelText('Blueprint name')).toHaveValue('Shared design')
+    expect(await screen.findByLabelText('Blueprint name')).toHaveValue('Shared design')
     expect(screen.getByText('Opened a copy of the shared blueprint')).toHaveClass('toast', 'ok')
   })
   it('says so when a shared link is damaged, and returns to the list', async () => {
@@ -78,13 +81,13 @@ describe('App', () => {
     expect(listDocs()).toHaveLength(0)
     expect(S().toasts).toHaveLength(0)
   })
-  it('shows a way out instead of a blank page when a screen fails to draw', () => {
+  it('shows a way out instead of a blank page when a screen fails to draw', async () => {
     const quiet = vi.spyOn(console, 'error').mockImplementation(() => {})
     // the blueprint in memory is in a shape the editor cannot draw
     useStore.setState({ doc: { ...docOf(), id: 'bad', nodes: 'oops' as any } })
     location.hash = '#/d/bad'
     render(<App />)
-    expect(screen.getByText('Something broke while drawing this screen.')).toBeInTheDocument()
+    expect(await screen.findByText('Something broke while drawing this screen.')).toBeInTheDocument()
     expect(screen.getByText(/Your blueprints are saved in this browser/)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Reload' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Back to all blueprints' })).toBeInTheDocument()
@@ -92,7 +95,37 @@ describe('App', () => {
     expect(quiet).toHaveBeenCalled()
     // leaving for another screen clears the failure
     goto('#/')
-    expect(screen.getByRole('heading', { level: 1 })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { level: 1 })).toBeInTheDocument()
+  })
+  it('a screen whose code cannot be fetched shows the way out, and is fetched again the next time it is asked for', async () => {
+    // a copy of the app that has fetched nothing yet, on a connection that drops the editor's code
+    vi.resetModules()
+    vi.doMock('./ui/editing', () => { throw new Error('the editor could not be fetched') })
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const fresh = await import('./App')
+      // (the test runner reports a module that failed to load in its own words)
+      await expect(fresh.loadScreen('Editor')).rejects.toThrow(/error when mocking a module/)
+      // nothing of the failure is kept: the list of blueprints is unaffected
+      await expect(fresh.loadScreen('Dashboard')).resolves.toBeUndefined()
+      // drawn on a blueprint's address, it says so and offers the way back, with no blank page
+      saveDoc(docOf([node('a')], [], { name: 'Shop' }))
+      location.hash = '#/d/doc1'
+      const { unmount } = render(<fresh.default />)
+      expect(await screen.findByText('Something broke while drawing this screen.')).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: 'Back to all blueprints' })).toBeInTheDocument()
+      unmount()
+      // the connection is back: asking again fetches it, and the blueprint opens
+      vi.doUnmock('./ui/editing')
+      await expect(fresh.loadScreen('Editor')).resolves.toBeUndefined()
+      render(<fresh.default />)
+      expect(await screen.findByLabelText('Blueprint name')).toHaveValue('Shop')
+    } finally {
+      vi.doUnmock('./ui/editing')
+      vi.resetModules()
+      errors.mockRestore()
+      location.hash = ''
+    }
   })
   it('shows toasts and lets them expire', () => {
     vi.useFakeTimers()

@@ -43,13 +43,71 @@ export const projNow = (): Proj => {
   return makeCam(s.yaw, s.pitch)
 }
 
+// ---- drawing that follows the view outside React ------------------------------------
+//
+// The view changes on every frame of a pan or a zoom, so nothing that shows it is drawn by React: the canvas moves its
+// layer, the minimap its frame and the zoom read-out its figure, each by writing straight to the page.
+//
+// What they may write is narrow, and the reason is in how Chrome draws. The canvas's layer is moved by a transform, which
+// the browser carries out on the graphics card without drawing anything again. But if anything on the page is laid out
+// in the same frame (a line of text that changed, an element that moved by `left` or `width`), Chrome takes the long way
+// round for the transform too: every piece of SVG text under it is laid out again and the whole layer repainted, which on
+// a large diagram is the difference between a frame that costs nothing and one that is dropped. So a follower only ever
+// changes a `transform` (or `translate`) on a layer of its own, or what is visible. Never text, size or position.
+// When the canvas writes matters as much as what. Between an input event and the frame it is drawn in, Chrome may look up
+// what is under the pointer, and to do that it settles every change made so far, the layer's transform among them, the
+// long way round. So the canvas is not told of a change as it happens but in the browser's own frame callback, after
+// input and after that look-up, when nothing can come between the write and the drawing. A change made inside a frame
+// callback already (the camera's own animations, below) is passed on at once: the frame is already under way.
+type Follower = (v: View) => void
+const followers = new Set<Follower>()
+let stage: ((v: View) => boolean | void) | null = null
+let stageRaf = 0
+let inFrame = false
+const tellStage = () => {
+  stageRaf = 0
+  // `false` from the canvas means not in this frame: ask again in the next
+  if (stage && stage(useStore.getState().view) === false) stageRaf = requestAnimationFrame(tellStage)
+}
+const showView = (v: View) => {
+  for (const f of followers) f(v)
+  if (!stage) return
+  if (inFrame) { cancelAnimationFrame(stageRaf); tellStage() } else if (!stageRaf) stageRaf = requestAnimationFrame(tellStage)
+}
+useStore.subscribe((s, prev) => { if (s.view !== prev.view) showView(s.view) })
+/**
+ * Keep something in step with the view: `fn` is called now and on every change, as it happens. If it draws, see above
+ * for what it may change. Returns the way to stop.
+ */
+export function followView(fn: Follower) {
+  followers.add(fn)
+  fn(useStore.getState().view)
+  return () => { followers.delete(fn) }
+}
+/**
+ * The canvas's own drawing of the view: there is one canvas, so one of these, and null takes it away. It is called once
+ * for each frame in which the view has changed, at the last moment before the frame is drawn, with the view as it then
+ * is. Returning false puts it off to the next frame.
+ */
+export function stageView(fn: ((v: View) => boolean | void) | null) {
+  stage = fn
+  if (!fn) { cancelAnimationFrame(stageRaf); stageRaf = 0 }
+}
+/** Run `fn` in the browser's next frame, as `requestAnimationFrame` does, with the canvas following any change of view it makes at once. */
+export function inNextFrame(fn: (now: number) => void) {
+  return requestAnimationFrame((now) => {
+    inFrame = true
+    try { fn(now) } finally { inFrame = false }
+  })
+}
+
 // ---- one update per frame ---------------------------------------------------------
 let frameJob: (() => void) | null = null
 let frameRaf = 0
 /** Run `job` before the next paint. A newer job replaces one still waiting, so several finger reports in a frame cost one redraw. */
 export function onFrame(job: () => void) {
   frameJob = job
-  if (!frameRaf) frameRaf = requestAnimationFrame(flushFrame)
+  if (!frameRaf) frameRaf = inNextFrame(() => flushFrame())
 }
 /** Run the waiting update now. */
 export function flushFrame() {
@@ -73,9 +131,9 @@ export function glide(vx: number, vy: number) {
     useStore.setState({ view: { ...view, x: view.x + vx * dt, y: view.y + vy * dt } })
     const slow = Math.exp(-dt / 280)
     vx *= slow; vy *= slow
-    glideRaf = Math.hypot(vx, vy) > 0.02 ? requestAnimationFrame(step) : 0
+    glideRaf = Math.hypot(vx, vy) > 0.02 ? inNextFrame(step) : 0
   }
-  glideRaf = requestAnimationFrame(step)
+  glideRaf = inNextFrame(step)
 }
 /** Stop every camera movement in flight: a finger on the glass always wins. */
 export function holdStill() {
@@ -108,10 +166,10 @@ export function animateView(to: View, ms = 420) {
     const e = easeInOut(t)
     // land exactly on the target: the eased sum can be a hair off
     useStore.setState({ view: t < 1 ? { x: from.x + (to.x - from.x) * e, y: from.y + (to.y - from.y) * e, k: from.k + (to.k - from.k) * e } : { ...to } })
-    if (t < 1) raf = requestAnimationFrame(step)
+    if (t < 1) raf = inNextFrame(step)
     else heading = null
   }
-  raf = requestAnimationFrame(step)
+  raf = inNextFrame(step)
 }
 
 /**
@@ -202,11 +260,11 @@ export function orbitTo(yaw: number, pitch: number, ms = 560) {
     const t = Math.min(1, (now - t0) / ms)
     const e = easeInOut(t)
     setCam(t < 1 ? y0 + dy * e : normYaw(y0 + dy), p0 + dp * e, pivot, at)
-    if (t < 1) { orbitRaf = requestAnimationFrame(step); return }
+    if (t < 1) { orbitRaf = inNextFrame(step); return }
     orbitActive = false
     if (pendingFit) { const [ids, maxK] = pendingFit; pendingFit = null; fitView(ids, true, maxK) }
   }
-  orbitRaf = requestAnimationFrame(step)
+  orbitRaf = inNextFrame(step)
 }
 
 /** Turn the scene by a quarter (or any angle), snapping onto the 45° grid of views. */
@@ -299,7 +357,7 @@ export function smoothZoom(factor: number, cx: number, cy: number) {
     const done = Math.abs(gap) < 0.0005
     const k = done ? zoomTarget : view.k * Math.exp(gap * (1 - Math.exp(-dt / ZOOM_EASE_MS)))
     useStore.setState({ view: { k, x: zoomAt[0] - ((zoomAt[0] - view.x) * k) / view.k, y: zoomAt[1] - ((zoomAt[1] - view.y) * k) / view.k } })
-    zoomRaf = done ? 0 : requestAnimationFrame(step)
+    zoomRaf = done ? 0 : inNextFrame(step)
   }
-  zoomRaf = requestAnimationFrame(step)
+  zoomRaf = inNextFrame(step)
 }

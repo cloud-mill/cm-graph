@@ -10,6 +10,17 @@ import { useStore } from '../core/store'
  * number, an open list). The one exception is the focus request further down, which listens to the store.
  */
 
+/** Three stacked planes: the product is literally layers of infrastructure. */
+export function Logo({ size = 22 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 32 32" aria-hidden className="logo">
+      <path d="M16 4.5 28 11 16 17.5 4 11z" fill="currentColor" />
+      <path d="M4 16l12 6.5L28 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" opacity=".55" />
+      <path d="M4 21l12 6.5L28 21" fill="none" stroke="currentColor" strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" opacity=".25" />
+    </svg>
+  )
+}
+
 /** A row of mutually exclusive choices, announced as a radio group. */
 export function Segmented<T extends string>({ value, options, onChange, size }: {
   value: T
@@ -100,8 +111,14 @@ export function Modal({ title, subtitle, onClose, children, width = 560, footer 
 // the last request honoured: a name field that mounts later with the same number does not take focus again
 let handledFocus = 0
 let focusAskedAt = -Infinity
-/** True for a moment after a field was asked to take focus, so typing meant for it is not read as shortcuts. */
-export const focusPending = () => performance.now() - focusAskedAt < 250
+// fields that have been handed a request and have not taken focus yet
+let answering = 0
+/**
+ * True from the moment a field is asked to take focus until it has, so typing meant for it is not read as shortcuts.
+ * For a moment after the request on trust, and from then on for as long as a field is on its way to answering it:
+ * however busy the page is, nothing typed in between is dropped.
+ */
+export const focusPending = () => answering > 0 || performance.now() - focusAskedAt < 250
 let typedAhead = ''
 /** Keep what was typed before the field was ready; it is entered as soon as focus lands. */
 export const typeAhead = (ch: string) => { typedAhead += ch }
@@ -119,15 +136,21 @@ export function TextInput({ value, onChange, placeholder, className, autoFocusKe
   list?: string; inputMode?: 'text' | 'numeric'
 }) {
   const ref = useRef<any>(null)
-  useEffect(() => {
+  // A layout effect, so the field is counted as answering before the next key can arrive: the render that hands it the
+  // request is finished inside the event that made it
+  useLayoutEffect(() => {
     // focus once per request, and after the pointer event that caused it has settled
     if (!autoFocusKey || autoFocusKey === handledFocus) return
+    answering++
+    let open = true
+    const answered = () => { if (open) { open = false; answering-- } }
     const t = setTimeout(() => {
+      answered()
       handledFocus = autoFocusKey; focusAskedAt = -Infinity
       ref.current?.focus(); ref.current?.select()
       if (typedAhead) { document.execCommand('insertText', false, typedAhead); typedAhead = '' }
     }, 30)
-    return () => clearTimeout(t)
+    return () => { clearTimeout(t); answered() }
   }, [autoFocusKey])
   const props = {
     ref, value, placeholder, 'aria-label': label, className: 'input ' + (mono ? 'mono ' : '') + (className ?? ''),

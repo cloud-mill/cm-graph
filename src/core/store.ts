@@ -451,6 +451,33 @@ export function reended(e: EdgeT, end: 'from' | 'to', node: string, side?: Side)
  */
 export function moveItems(doc: Doc, base: Doc, sel: Set<string>, dx: number, dy: number): Doc {
   if (!dx && !dy && doc === base) return doc
+  const { carried, bn, ba, bl, be, shaped } = carryOf(base, sel)
+  // a list that nothing in it moves is handed back as it is, so whatever draws from it has nothing to do
+  const moved = <T extends { id: string; x: number; y: number }>(list: T[], from: Map<string, T>) => {
+    let any = false
+    const out = list.map((v) => { const b = carried.has(v.id) ? from.get(v.id) : undefined; if (!b) return v; any = true; return { ...v, x: r3(b.x + dx), y: r3(b.y + dy) } })
+    return any ? out : list
+  }
+  return {
+    ...doc,
+    nodes: moved(doc.nodes, bn),
+    areas: moved(doc.areas, ba),
+    labels: moved(doc.labels, bl),
+    // a hand-shaped line whose two ends move together goes with them; one whose ends part company keeps its track where it was laid
+    edges: shaped || doc !== base ? doc.edges.map((e) => {
+      const b = be.get(e.id)
+      return b && (b.via || b.runs) && carried.has(e.from) && carried.has(e.to) ? { ...e, ...shifted(b, dx, dy) } : e
+    }) : doc.edges,
+  }
+}
+
+type Carry = { sel: Set<string>; carried: Set<string>; bn: Map<string, NodeT>; ba: Map<string, AreaT>; bl: Map<string, LabelT>; be: Map<string, EdgeT>; shaped: boolean }
+// What a selection carries with it, and where everything stood, is fixed by the blueprint as it was picked up. A drag asks
+// for it on every frame with the same blueprint and the same selection, so it is worked out once and kept while both last
+const carries = new WeakMap<Doc, Carry>()
+function carryOf(base: Doc, sel: Set<string>): Carry {
+  const was = carries.get(base)
+  if (was && (was.sel === sel || (was.sel.size === sel.size && [...sel].every((id) => was.sel.has(id))))) return was
   const carried = new Set(sel)
   for (const a of base.areas) {
     if (!sel.has(a.id)) continue
@@ -458,21 +485,11 @@ export function moveItems(doc: Doc, base: Doc, sel: Set<string>, dx: number, dy:
     for (const l of base.labels) if (l.x >= a.x && l.x <= a.x + a.w && l.y >= a.y && l.y <= a.y + a.d) carried.add(l.id)
     for (const c of base.areas) if (c.id !== a.id && c.x >= a.x && c.y >= a.y && c.x + c.w <= a.x + a.w && c.y + c.d <= a.y + a.d) carried.add(c.id)
   }
-  const bn = new Map(base.nodes.map((n) => [n.id, n]))
-  const ba = new Map(base.areas.map((n) => [n.id, n]))
-  const bl = new Map(base.labels.map((n) => [n.id, n]))
-  const be = new Map(base.edges.map((e) => [e.id, e]))
-  return {
-    ...doc,
-    nodes: doc.nodes.map((n) => (carried.has(n.id) && bn.has(n.id) ? { ...n, x: r3(bn.get(n.id)!.x + dx), y: r3(bn.get(n.id)!.y + dy) } : n)),
-    areas: doc.areas.map((a) => (carried.has(a.id) && ba.has(a.id) ? { ...a, x: r3(ba.get(a.id)!.x + dx), y: r3(ba.get(a.id)!.y + dy) } : a)),
-    labels: doc.labels.map((l) => (carried.has(l.id) && bl.has(l.id) ? { ...l, x: r3(bl.get(l.id)!.x + dx), y: r3(bl.get(l.id)!.y + dy) } : l)),
-    // a hand-shaped line whose two ends move together goes with them; one whose ends part company keeps its track where it was laid
-    edges: doc.edges.map((e) => {
-      const b = be.get(e.id)
-      return b && (b.via || b.runs) && carried.has(e.from) && carried.has(e.to) ? { ...e, ...shifted(b, dx, dy) } : e
-    }),
-  }
+  const index = <T extends { id: string }>(list: T[]) => { const m = new Map<string, T>(); for (const v of list) m.set(v.id, v); return m }
+  const be = index(base.edges)
+  const made: Carry = { sel, carried, bn: index(base.nodes), ba: index(base.areas), bl: index(base.labels), be, shaped: base.edges.some((e) => (e.via || e.runs) && carried.has(e.from) && carried.has(e.to)) }
+  carries.set(base, made)
+  return made
 }
 
 // ---- autosave ---------------------------------------------------------------

@@ -14,8 +14,8 @@ const test = base.extend<{ fingers: Fingers }>({
 
 const dock = (page: Page) => page.locator('.dock')
 const route = (page: Page) => page.evaluate(() => location.hash)
-const inEditor = async (page: Page) => { await expect(page.locator('.canvas-svg')).toBeVisible(); expect(await route(page)).toBe('#/d/e2edoc') }
-const onDashboard = async (page: Page) => { await expect(page.getByRole('button', { name: 'New blueprint' })).toBeVisible(); await expect(page.locator('.canvas-svg')).toHaveCount(0) }
+const inEditor = async (page: Page) => { await expect(page.locator('.canvas-surface')).toBeVisible(); expect(await route(page)).toBe('#/d/e2edoc') }
+const onDashboard = async (page: Page) => { await expect(page.getByRole('button', { name: 'New blueprint' })).toBeVisible(); await expect(page.locator('.canvas-surface')).toHaveCount(0) }
 const layers = (page: Page) => page.locator('.sheet, .modal, .cmdk, .ctx-menu, .select-list, .gestures, .dock.prompt')
 const back = async (page: Page) => { await page.goBack(); await page.waitForTimeout(250) }
 const menu = async (page: Page, q?: string) => { await dock(page).getByRole('button', { name: 'Menu' }).tap(); if (q) { await page.getByLabel('Search commands').fill(q); await page.keyboard.press('Enter') } }
@@ -274,7 +274,9 @@ test.describe('phone: pages and history', () => {
     await page.goto('/')
     await page.getByRole('button', { name: /Import/ }).first().tap()
     const dialog = page.getByRole('dialog', { name: 'Import' })
-    await expect(dialog).toBeVisible()
+    // The dialog's code comes with the editor's, and is fetched when it is first asked for. The built app has that in one
+    // file; the development server hands it over a module at a time, which on a machine busy with other tests can take a while
+    await expect(dialog).toBeVisible({ timeout: 20_000 })
     await back(page)
     await expect(dialog).toHaveCount(0)
     await onDashboard(page)

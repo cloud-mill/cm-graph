@@ -656,6 +656,19 @@ export interface NodeCost {
  * they are all marked as estimates, at the same amount: nothing is scaled by region.
  */
 export function costOf(n: NodeT, region: string, model: PricingModel = 'ondemand'): NodeCost {
+  // What a component costs depends on its type and settings, the region and the pricing model: not on where it stands.
+  // A component that is moved keeps the same settings object, so its cost is remembered against that, and a blueprint of
+  // thousands is not priced again from nothing each time one of them is nudged. What is handed back is shared: read it, never change it
+  const settings: unknown = n.props
+  if (!settings || typeof settings !== 'object') return priceOf(n, region, model)
+  const was = priced.get(settings)
+  if (was && was.type === n.type && was.region === region && was.model === model) return was.cost
+  const cost = priceOf(n, region, model)
+  priced.set(settings, { type: n.type, region, model, cost })
+  return cost
+}
+const priced = new WeakMap<object, { type: string; region: string; model: PricingModel; cost: NodeCost }>()
+function priceOf(n: NodeT, region: string, model: PricingModel): NodeCost {
   const d = defOf(n.type)
   if (!d.cost) return { lines: [], monthly: 0 }
   const props = { ...defaultProps(n.type), ...n.props }

@@ -1,5 +1,5 @@
 import type { Page } from '@playwright/test'
-import { type App, expect, makeDoc, test } from './fixtures'
+import { type App, expect, makeDoc, rested, test } from './fixtures'
 
 /**
  * A connection in the hand does what the hand does. It goes exactly as far as the pointer goes, stays where it
@@ -34,7 +34,7 @@ const centre = async (page: Page, handle: string) => { const b = (await page.loc
 const select = async (page: Page, t = 0.5, id = 'e') => { const p = await at(page, t, id); await page.mouse.click(p.x, p.y); await expect(page.locator('.edge-bar')).toBeVisible() }
 const saved = async (app: App, id = 'e') => (await app.settled()).edges.find((e) => e.id === id) as any
 const bar = (page: Page, name: string) => page.locator('.edge-bar').getByRole('button', { name, exact: true })
-const plan = async (page: Page) => { await page.keyboard.press('2'); await page.waitForTimeout(800) }
+const plan = async (page: Page) => { await page.keyboard.press('2'); await page.waitForTimeout(800); await rested(page) }
 const open = async (page: Page, app: App, d = doc()) => { await app.open(d); await plan(page) }
 
 test.describe('the line goes where the pointer goes', () => {

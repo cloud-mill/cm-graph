@@ -50,6 +50,27 @@ export const TRIO = () => makeDoc([
   { id: 'c', type: 's3', x: 0, y: 6, name: 'assets' },
 ])
 
+/**
+ * The camera has stopped and the scene has been drawn for where it stopped. A turn, a fit or a glide takes a set time by
+ * the clock, but its last frames come when the machine gets to them, and the scene is put exactly in place a moment
+ * after the view comes to rest (see Canvas.tsx): on a machine busy with other tests, a fixed wait is sometimes too short
+ * by a frame, and what is measured then is a fraction of a pixel from where it ends up. Call it after the wait that
+ * covers the animation itself: until the view has started to move there is nothing here to wait for.
+ */
+export async function rested(page: Page) {
+  await expect(page.locator('.canvas-wrap[data-viewing]')).toHaveCount(0)
+  await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(() => done(null)))))
+}
+
+/** Where the origin corners of these components are drawn, read together at the browser's next frame: see `App.corners`. */
+export async function cornersOf(page: Page, ids: string[]): Promise<{ x: number; y: number }[]> {
+  await Promise.all(ids.map((id) => page.locator(`[data-kind="node"][data-id="${id}"]`).waitFor({ state: 'attached' })))
+  return page.evaluate((list) => new Promise<{ x: number; y: number }[]>((done) => requestAnimationFrame(() => done(list.map((id) => {
+    const m = (document.querySelector(`[data-kind="node"][data-id="${id}"]`) as unknown as SVGGElement).getScreenCTM()!
+    return { x: m.e, y: m.f }
+  })))), ids)
+}
+
 /** Drives one page of the app: navigation, locators and screen measurements. It keeps no state beyond the page. */
 export class App {
   constructor(readonly page: Page) {}
@@ -83,7 +104,7 @@ export class App {
    * blueprint opens (the `intro` class on the canvas), and a body measured during that is not where it will stand.
    */
   async ready() {
-    await expect(this.page.locator('.canvas-svg')).toBeVisible()
+    await expect(this.page.locator('.canvas-surface')).toBeVisible()
     await expect(this.page.locator('.canvas-wrap.intro')).toHaveCount(0, { timeout: 5000 })
   }
 
@@ -113,8 +134,8 @@ export class App {
   }
 
   node(id: string): Locator { return this.page.locator(`[data-kind="node"][data-id="${id}"]`) }
-  nodes(): Locator { return this.page.locator('.canvas-svg [data-kind="node"]') }
-  edges(): Locator { return this.page.locator('.canvas-svg [data-kind="edge"]') }
+  nodes(): Locator { return this.page.locator('.canvas-surface [data-kind="node"]') }
+  edges(): Locator { return this.page.locator('.canvas-surface [data-kind="edge"]') }
   // the desktop toolbar only: the phone layout has a dock in its place
   tool(name: string): Locator { return this.page.locator('.toolbar').getByRole('button', { name, exact: true }) }
   // matched from the start of the name only: a tab can carry a badge count after it
@@ -127,8 +148,16 @@ export class App {
    * while one is being carried, this is the copy in the hand.
    */
   async corner(id: string): Promise<{ x: number; y: number }> {
-    return this.node(id).evaluate((el) => { const m = (el as unknown as SVGGElement).getScreenCTM()!; return { x: m.e, y: m.f } })
+    return (await this.corners([id]))[0]
   }
+
+  /**
+   * The same for several components, read together and at the browser's next frame: all from one drawing of the page,
+   * the one about to be shown. The canvas moves its view when a frame is drawn, not at the moment the change is made
+   * (see camera.ts), so two readings taken a moment apart can fall either side of a move and not agree with each
+   * other. Anything worked out from more than one corner (a direction, a distance, `world`) has to come from here.
+   */
+  async corners(ids: string[]): Promise<{ x: number; y: number }[]> { return cornersOf(this.page, ids) }
 
   /**
    * Screen position (pixels) of the ground point (wx, wy), given in cells. Fractions are fine. Measured from where
@@ -138,7 +167,7 @@ export class App {
    * it themselves.
    */
   async world(wx: number, wy: number): Promise<{ x: number; y: number }> {
-    const [a, b, c] = await Promise.all([this.corner('a'), this.corner('b'), this.corner('c')])
+    const [a, b, c] = await this.corners(['a', 'b', 'c'])
     const ux = { x: (b.x - a.x) / 6, y: (b.y - a.y) / 6 }, uy = { x: (c.x - a.x) / 6, y: (c.y - a.y) / 6 }
     return { x: a.x + ux.x * wx + uy.x * wy, y: a.y + ux.y * wx + uy.y * wy }
   }

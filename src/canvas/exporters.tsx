@@ -1,10 +1,10 @@
 /**
  * Image exports: the blueprint as a standalone SVG string, and that SVG rasterised to a PNG.
- * This module pulls in React's server renderer, so it is loaded on demand; the text exports
- * (the budget CSV) and the download helper live in `core/files`. It lives beside <Scene/> because it is the renderer run
- * off screen; nothing in `core` depends on it.
+ * The text exports (the budget CSV) and the download helper live in `core/files`. It lives beside <Scene/> because it is
+ * the renderer run off screen; nothing in `core` depends on it. Browser only: it draws into an element and reads it back.
  */
-import { renderToStaticMarkup } from 'react-dom/server'
+import { flushSync } from 'react-dom'
+import { createRoot } from 'react-dom/client'
 import { Scene, THEMES, sceneBounds } from './Scene'
 import { makeCam, makeProj } from '../core/iso'
 import type { Doc } from '../core/types'
@@ -22,20 +22,33 @@ export interface RenderOpts {
   labels?: boolean
 }
 
-/** The whole blueprint as one self-contained SVG document, with its size in pixels (the diagram's bounds plus a 48 px margin). */
+/**
+ * The whole blueprint as one self-contained SVG document, with its size in pixels (the diagram's bounds plus a 48 px margin).
+ *
+ * It is drawn by the renderer the page itself uses, into an <svg> that is never put on the page, and read back as text.
+ * (React's server renderer would give the same text, but it is as big again as the rest of the app, and everyone
+ * would download it for the sake of an export.)
+ */
 export function svgString(doc: Doc, o: RenderOpts = {}): { svg: string; w: number; h: number } {
   const proj = o.cam ? makeCam(o.cam.yaw, o.cam.pitch) : makeProj(o.flat ? 1 : 0)
   const theme = THEMES[o.theme ?? 'light']
   const b = sceneBounds(doc, proj, 48)
-  // rendered inside an <svg> root so React resolves SVG element names correctly
-  const svg = renderToStaticMarkup(
-    <svg xmlns="http://www.w3.org/2000/svg" viewBox={`${b.x} ${b.y} ${b.w} ${b.h}`} width={Math.round(b.w)} height={Math.round(b.h)}>
+  const host = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
+  host.setAttribute('viewBox', `${b.x} ${b.y} ${b.w} ${b.h}`)
+  host.setAttribute('width', String(Math.round(b.w)))
+  host.setAttribute('height', String(Math.round(b.h)))
+  const root = createRoot(host)
+  // drawn here and now, not when React next gets round to it: the text is read on the next line
+  flushSync(() => root.render(
+    <>
       {o.background !== false && <rect x={b.x} y={b.y} width={b.w} height={b.h} fill={theme.bg} />}
       <Scene doc={doc} proj={proj} theme={theme} showLabels={o.labels ?? true} />
-    </svg>,
-  )
+    </>,
+  ))
+  const svg = new XMLSerializer().serializeToString(host)
+  root.unmount()
   // hit-testing attributes and pointer cursors only mean something inside the editor
-  return { svg: svg.replace(/ data-(kind|id)="[^"]*"/g, '').replace(/ style="cursor:[^"]*"/g, ''), w: b.w, h: b.h }
+  return { svg: svg.replace(/ data-(kind|id|edge)="[^"]*"/g, '').replace(/ style="cursor:[^"]*"/g, ''), w: b.w, h: b.h }
 }
 
 /**

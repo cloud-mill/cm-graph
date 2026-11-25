@@ -170,7 +170,7 @@ test.describe('canvas editing', () => {
     await app.click(await app.world(4, 4))
     await page.keyboard.type('Edge tier')
     await expect(page.locator('.right textarea')).toHaveValue('Edge tier')
-    await expect(page.locator('.canvas-svg [data-kind="label"]')).toHaveText('Edge tier')
+    await expect(page.locator('.canvas-surface [data-kind="label"]')).toHaveText('Edge tier')
     const doc = await app.settled()
     expect(doc.labels).toMatchObject([{ x: 4, y: 4, text: 'Edge tier', size: 20, dir: 'x' }])
     // typing a tool letter in the field did not switch tools
@@ -266,7 +266,7 @@ test.describe('canvas editing', () => {
     await app.click(await app.world(4, 4), { button: 'right' })
     await expect(menu.getByRole('button')).toHaveText([/Paste/, /Add label here/, /Select all/, /Zoom to fit/, /Tidy layout/])
     await menu.getByRole('button', { name: /Add label here/ }).click()
-    await expect(page.locator('.canvas-svg [data-kind="label"]')).toHaveCount(1)
+    await expect(page.locator('.canvas-surface [data-kind="label"]')).toHaveCount(1)
 
     await app.click(await app.world(4, -3), { button: 'right' })
     await expect(menu).toBeVisible()
@@ -336,13 +336,13 @@ test.describe('library', () => {
     await page.mouse.move(tile.x, tile.y)
     await page.mouse.down()
     await page.mouse.move(drop.x, drop.y, { steps: 8 })
-    await expect(page.locator('.canvas-svg .ghost')).toBeVisible()
+    await expect(page.locator('.canvas-surface .ghost')).toBeVisible()
     await expect(page.locator('.hint-pill')).toContainText('Release on the canvas to place')
     await page.mouse.up()
     await expect(app.nodes()).toHaveCount(5)
     const doc = await app.settled()
     expect(doc.nodes[4]).toMatchObject({ type: 'lambda', x: 3, y: 3, name: 'lambda-1' })
-    await expect(page.locator('.canvas-svg .ghost')).toHaveCount(0)
+    await expect(page.locator('.canvas-surface .ghost')).toHaveCount(0)
   })
 
   test('holding shift keeps placing, Escape stops, and releasing over a panel places nothing', async ({ page, app }) => {

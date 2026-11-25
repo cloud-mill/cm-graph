@@ -73,6 +73,32 @@ describe('what the canvas does about a wheel event', () => {
     // Cmd with a trackpad scroll asks for the same
     expect(readWheel(ev({ deltaY: -2, wheelDeltaY: 6, metaKey: true }))).toMatchObject({ kind: 'zoom', eased: false })
   })
+  it('a pinch as Chrome and Edge report one is a pinch: a whole notch in the legacy value, a sliver in the delta', () => {
+    // what Chrome's own input pipeline sent for a pinch of 1.7 times, and for one of 0.6: every event claims a notch
+    const zoomIn = [-1.665063738822937, -1.6236575841903687, -1.5634347200393677, -3.141209125518799, -2.888993740081787]
+    let k = 1
+    for (const deltaY of zoomIn) {
+      const act = readWheel(ev({ deltaY, wheelDeltaY: 120, ctrlKey: true }))
+      // followed at once, and by exactly what the fingers did: the delta is a hundred times the log of their change of scale
+      expect(act).toMatchObject({ kind: 'zoom', eased: false })
+      k *= (act as { factor: number }).factor
+    }
+    expect(k).toBeCloseTo(Math.exp(-zoomIn.reduce((a, b) => a + b, 0) / 100), 12)
+    // five events of a pinch are a tenth between them, not five notches of a wheel (which would be six tenths)
+    expect(k).toBeGreaterThan(1.1)
+    expect(k).toBeLessThan(1.12)
+    const out = readWheel(ev({ deltaY: 0.5509985089302063, wheelDeltaY: -120, ctrlKey: true }))
+    expect(out).toMatchObject({ kind: 'zoom', eased: false })
+    expect((out as { factor: number }).factor).toBeCloseTo(Math.exp(-0.005509985089302063), 12)
+    expect(notchesOf(ev({ deltaY: -1.665063738822937, wheelDeltaY: 120, ctrlKey: true }))).toBeNull()
+  })
+  it('a real notch with Ctrl held is still a notch, down to a Windows set to scroll one line at a time', () => {
+    for (const deltaY of [-100, -120, -166.66666666666666, -33.333333333333336]) {
+      expect(readWheel(ev({ deltaY, wheelDeltaY: 120, ctrlKey: true })), `deltaY ${deltaY}`).toEqual({ kind: 'zoom', factor: NOTCH_ZOOM, eased: true })
+    }
+    // and without Ctrl the legacy value is believed whatever the delta, as a mouse on a Mac needs it to be
+    expect(readWheel(ev({ deltaY: -4.000244140625, wheelDeltaY: 120 }))).toEqual({ kind: 'zoom', factor: NOTCH_ZOOM, eased: true })
+  })
   it('two fingers sliding on a trackpad pan, pixel for pixel, however fast', () => {
     expect(readWheel(ev({ deltaX: 30, deltaY: 12.5, wheelDeltaY: -37.5 }))).toEqual({ kind: 'pan', dx: -30, dy: -12.5 })
     expect(readWheel(ev({ deltaY: 120, wheelDeltaY: -360 }))).toEqual({ kind: 'pan', dx: -0, dy: -120 })

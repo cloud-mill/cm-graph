@@ -1,5 +1,5 @@
 import type { Page } from '@playwright/test'
-import { type App, expect, makeDoc, test } from './fixtures'
+import { type App, expect, makeDoc, rested, test } from './fixtures'
 
 /**
  * A run of a connection brought all but level with the next one along is level: the turn between them is gone and
@@ -24,7 +24,7 @@ const at = (page: Page, t = 0.5) => page.evaluate((t) => {
 }, t)
 const saved = async (app: App) => (await app.settled()).edges.find((e) => e.id === 'e') as any
 const open = async (page: Page, app: App, d = doc()) => {
-  await app.open(d); await page.keyboard.press('2'); await page.waitForTimeout(800)
+  await app.open(d); await page.keyboard.press('2'); await page.waitForTimeout(800); await rested(page)
   const p = await at(page); await page.mouse.click(p.x, p.y); await expect(page.locator('.edge-bar')).toBeVisible()
 }
 /**
@@ -125,7 +125,7 @@ test.describe('a run let go a hair short of level is level', () => {
     await open(page, app)
     await lift(page, app, 3)
     const e = await saved(app), drawn = await path(page)
-    await page.reload(); await app.ready(); await page.keyboard.press('2'); await page.waitForTimeout(800)
+    await page.reload(); await app.ready(); await page.keyboard.press('2'); await page.waitForTimeout(800); await rested(page)
     expect(await saved(app)).toEqual(e)
     expect(await path(page)).toBe(drawn)
   })

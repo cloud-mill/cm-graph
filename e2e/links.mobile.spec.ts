@@ -71,7 +71,7 @@ test.describe('phone: connections', () => {
     }
     await page.goBack()
     await expect(bar).toHaveCount(0)
-    await expect(page.locator('.canvas-svg')).toBeVisible()
+    await expect(page.locator('.canvas-surface')).toBeVisible()
     await expect(page.locator('.nd.off')).toHaveCount(0)
   })
 
@@ -85,7 +85,7 @@ test.describe('phone: connections', () => {
     await sheet.getByLabel('Port', { exact: true }).fill('5432')
     await page.keyboard.press('Enter')
     expect(await E(app)).toMatchObject({ kind: 'data', port: '5432' })
-    await expect(page.locator('.edge text')).toHaveText('5432')
+    await expect(page.locator('.edge-caption')).toHaveText('5432')
     // nothing in the sheet spills sideways
     expect(await sheet.evaluate((el) => el.scrollWidth - el.clientWidth)).toBeLessThanOrEqual(0)
   })

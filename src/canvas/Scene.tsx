@@ -5,11 +5,16 @@ import { type Routed, routeAll } from '../core/router'
 import { captionAnchor, drawingOf } from '../core/linePath'
 import { nodeColor, nodeName } from '../core/catalog'
 import { type AreaT, type Doc, type EdgeT, type LabelT, type NodeT, centerOf, footOf } from '../core/types'
-import { Model, SceneDefs } from './models'
+import { Model, ModelDefs, SceneDefs } from './models'
 
-// The diagram as SVG: areas, then connections, then labels, then components from far to near. It draws a `Doc` through a
-// `Proj` and nothing else: no store, no pointer handling, no pan or zoom (whoever uses it wraps it in a transform).
-// Coordinates out are scene px: ground cells through `pt`, at zoom 1.
+// The diagram as SVG: areas, then connections, then the traffic on them, then captions and labels, then components from
+// far to near. It draws a `Doc` through a `Proj` and nothing else: no store, no pointer handling, no pan or zoom (whoever
+// uses it wraps it in a transform). Coordinates out are scene px: ground cells through `pt`, at zoom 1.
+//
+// It comes in three layers, bottom to top: <SceneGround/> (areas and connections), <SceneFlow/> (the moving traffic) and
+// <SceneTop/> (captions, labels and components). <Scene/> is all three in one group, which is what a thumbnail or an
+// export wants. The editor draws each in an <svg> of its own, because the browser redraws an <svg> as a whole: kept
+// apart, traffic that moves sixty times a second redraws only itself, and a component that moves leaves the lines alone.
 //
 // What can be pressed carries `data-kind` (node, edge, area, label) and `data-id`; the canvas reads those to tell what a
 // press landed on. Each kind of thing is a memoised view, so a drag that renders the scene every frame leaves alone
@@ -56,7 +61,45 @@ export interface SceneProps {
   lifted?: Set<string> | null
   /** a connection that steps back while one of its ends is being moved somewhere else */
   dim?: string | null
+  /** only what touches this part of the scene is drawn, for a diagram too large to be worth drawing whole. Scene px */
+  within?: Box | null
+  /** drawn from too far out for detail to show: components in flat colours, no names or captions, lines without their channel */
+  plain?: boolean
+  /** components are told their place from far to near, which is what staggers them as a blueprint opens */
+  stagger?: boolean
 }
+
+/** A rectangle in scene px. */
+export interface Box { x0: number; y0: number; x1: number; y1: number }
+const touches = (a: Box, b: Box) => a.x0 <= b.x1 && a.x1 >= b.x0 && a.y0 <= b.y1 && a.y1 >= b.y0
+
+// Roughly where each thing is drawn, generously: it only decides what is worth drawing at all when the diagram is far larger
+// than the screen, and what is asked for reaches well past the screen's edge. Kept against the object it was worked out
+// from, which is never changed in place, so asking again on the next frame costs a look-up
+const seen = new WeakMap<object, { proj: Proj; box: Box }>()
+function boxOf(key: object, proj: Proj, make: () => Box): Box {
+  const hit = seen.get(key)
+  if (hit && hit.proj === proj) return hit.box
+  const box = make()
+  seen.set(key, { proj, box })
+  return box
+}
+const around = (pts: Pt[], pad: number): Box => {
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity
+  for (const q of pts) { x0 = Math.min(x0, q[0]); x1 = Math.max(x1, q[0]); y0 = Math.min(y0, q[1]); y1 = Math.max(y1, q[1]) }
+  return { x0: x0 - pad, y0: y0 - pad, x1: x1 + pad, y1: y1 + pad }
+}
+/** Where a component is drawn, with room for its height and for its name: scene px. */
+export const nodeBox = (n: NodeT, proj: Proj): Box => boxOf(n, proj, () => { const s = footOf(n); return around([pt(proj, n.x + s / 2, n.y + s / 2)], s * U * 2.2 + 90) })
+/** Where a connection is drawn, with room for its caption: scene px. */
+export const routeBox = (r: Routed, proj: Proj): Box => boxOf(r, proj, () => around(r.pts.map((p) => pt(proj, p[0], p[1])), 70))
+const areaBox = (a: AreaT, proj: Proj): Box => boxOf(a, proj, () => around([pt(proj, a.x, a.y), pt(proj, a.x + a.w, a.y), pt(proj, a.x + a.w, a.y + a.d), pt(proj, a.x, a.y + a.d)], 40))
+const labelBox = (l: LabelT, proj: Proj): Box => boxOf(l, proj, () => {
+  // as long as its longest line and as deep as its lines, along whichever ground axis it runs
+  const lines = l.text.split('\n'), len = (Math.max(...lines.map((t) => t.length)) * l.size * 0.7) / U, rows = (lines.length * l.size * 1.2) / U
+  const c: Pt[] = l.dir === 'x' ? [pt(proj, l.x, l.y), pt(proj, l.x + len, l.y + rows), pt(proj, l.x - len, l.y - rows)] : [pt(proj, l.x, l.y), pt(proj, l.x + rows, l.y - len), pt(proj, l.x - rows, l.y + len)]
+  return around(c, l.size * 2 + 20)
+})
 
 /**
  * Routes for a diagram that keep their identity while they keep their shape, so
@@ -70,7 +113,7 @@ export function useRoutes(doc: Doc): Map<string, Routed> {
     const next = routeAll(doc.nodes, doc.edges)
     for (const [id, r] of next) {
       const was = keep.last.get(id)
-      if (was && was.shape === r.shape && was.manual === r.manual && was.fromSide === r.fromSide && was.toSide === r.toSide && was.pts.length === r.pts.length && was.pts.every((p, i) => p[0] === r.pts[i][0] && p[1] === r.pts[i][1]) && was.leg.join() === r.leg.join()) next.set(id, was)
+      if (was && was !== r && was.shape === r.shape && was.manual === r.manual && was.fromSide === r.fromSide && was.toSide === r.toSide && was.pts.length === r.pts.length && was.pts.every((p, i) => p[0] === r.pts[i][0] && p[1] === r.pts[i][1]) && was.leg.join() === r.leg.join()) next.set(id, was)
     }
     keep.last = next
     return next
@@ -109,50 +152,54 @@ const AreaView = memo(function AreaView({ a, proj }: { a: AreaT; proj: Proj; the
   )
 })
 
+type EdgeState = 'on' | 'off' | undefined
 /**
  * A connection's caption, lying on the ground and reading upright from wherever the camera is. On a curve it is centred
  * on the line, with a halo of the background colour that parts the line around it. The canvas draws it a second time
  * over a selected curve's highlight, which would otherwise run straight through the words.
  */
-export const EdgeCaption = memo(function EdgeCaption({ e, r, proj, theme }: { e: EdgeT; r: Routed; proj: Proj; theme: SceneTheme }) {
+export const EdgeCaption = memo(function EdgeCaption({ e, r, proj, theme, state }: { e: EdgeT; r: Routed; proj: Proj; theme: SceneTheme; state?: EdgeState }) {
   const caption = captionOf(e)
   if (!caption || r.pts.length < 2) return null
   const la = captionAnchor(r), lb = uprightAlong(proj, la.dir)
   return (
-    <text transform={planeMatrixUV(proj, la.at[0], la.at[1], 0, 1 / U, lb.u, lb.v)} fontFamily={MONO} fontSize={8.5} fontWeight={500} letterSpacing={0.5} fill={theme.textDim}
+    <text className={'edge-caption' + (state ? ' ' + state : '')} data-edge={e.id} transform={planeMatrixUV(proj, la.at[0], la.at[1], 0, 1 / U, lb.u, lb.v)} fontFamily={MONO} fontSize={8.5} fontWeight={500} letterSpacing={0.5} fill={theme.textDim}
       textAnchor="middle" y={la.on ? 3 : -7} stroke={theme.bg} strokeWidth={la.on ? 6 : 4} paintOrder="stroke" strokeLinejoin="round" pointerEvents="none">
       {caption.toUpperCase()}
     </text>
   )
 })
 
-const EdgeView = memo(function EdgeView({ e, r, proj, theme, flow, state }: { e: EdgeT; r: Routed; proj: Proj; theme: SceneTheme; flow?: boolean; state?: 'on' | 'off' }) {
+/** A line on a path being followed always shows its direction; a dependency never moves, because nothing travels along it; and while a flow is being followed, only its own lines move. */
+const moves = (e: EdgeT, flow: boolean | undefined, state: EdgeState) => (state ? state === 'on' : !!flow) && e.kind !== 'dependency' && e.arrow !== 'none'
+
+const EdgeView = memo(function EdgeView({ e, r, proj, theme, state, plain }: { e: EdgeT; r: Routed; proj: Proj; theme: SceneTheme; state?: EdgeState; plain?: boolean }) {
   const pts = r.pts
   const n = pts.length
   if (n < 2) return null
   const color = e.color || theme.edge
-  const hasStart = e.arrow === 'both'
   // every layer below is drawn from this one geometry, so none of them can stray from the others
   const { full, line: d, heads } = drawingOf(proj, r, e.arrow)
   const dash = e.style === 'dashed' ? '5 5' : e.style === 'dotted' ? '0.5 5' : undefined
-  // a line on a path being followed always shows its direction; a dependency never moves, because nothing travels along it
-  // and while a flow is being followed, only its own lines move
-  const moving = (state ? state === 'on' : !!flow) && e.kind !== 'dependency' && e.arrow !== 'none'
   return (
     <g className={'edge' + (state ? ' ' + state : '')}>
       {/* a dark channel under the line keeps it legible where it crosses areas and other lines */}
-      <path d={full} fill="none" stroke={theme.bg} strokeOpacity={0.85} strokeWidth={e.width + 5} strokeLinecap="round" strokeLinejoin="round" pointerEvents="none" />
+      {!plain && <path d={full} fill="none" stroke={theme.bg} strokeOpacity={0.85} strokeWidth={e.width + 5} strokeLinecap="round" strokeLinejoin="round" pointerEvents="none" />}
       <path d={d} className="edge-line" fill="none" stroke={color} strokeWidth={e.width * 0.75} strokeDasharray={dash} strokeLinecap="round" strokeLinejoin="round" pointerEvents="none" />
-      {moving && <path d={full} className={'edge-flow' + (hasStart ? ' both' : '')} fill="none" stroke={e.color || theme.flow} strokeWidth={e.width + 0.4} strokeLinecap="round" pointerEvents="none" />}
       {heads.map((h, i) => <polygon key={i} points={poly(h.map((q) => pt(proj, q[0], q[1]) as Pt))} fill={color} stroke={color} strokeWidth={1} strokeLinejoin="round" pointerEvents="none" />)}
       <path d={full} className="edge-hit" fill="none" stroke="transparent" strokeWidth={16} strokeLinejoin="round" data-kind="edge" data-id={e.id} style={{ cursor: 'pointer' }} />
-      <EdgeCaption e={e} r={r} proj={proj} theme={theme} />
     </g>
   )
 })
 
-const NodeView = memo(function NodeView({ n, proj, theme, showLabels, color, note, fresh, order, off, up }: {
-  n: NodeT; proj: Proj; theme: SceneTheme; showLabels?: boolean; color?: string; note?: string; fresh?: boolean; order: number; off?: boolean; up?: boolean
+/** The traffic on one connection: dots that travel its whole path, end to end. */
+const FlowView = memo(function FlowView({ e, r, proj, theme }: { e: EdgeT; r: Routed; proj: Proj; theme: SceneTheme }) {
+  if (r.pts.length < 2) return null
+  return <path d={drawingOf(proj, r, e.arrow).full} className={'edge-flow' + (e.arrow === 'both' ? ' both' : '')} data-edge={e.id} fill="none" stroke={e.color || theme.flow} strokeWidth={e.width + 0.4} strokeLinecap="round" pointerEvents="none" />
+})
+
+const NodeView = memo(function NodeView({ n, proj, theme, showLabels, color, note, fresh, order, off, up, plain }: {
+  n: NodeT; proj: Proj; theme: SceneTheme; showLabels?: boolean; color?: string; note?: string; fresh?: boolean; order?: number; off?: boolean; up?: boolean; plain?: boolean
 }) {
   const [tx, ty] = pt(proj, n.x, n.y)
   const k = n.scale ?? 1 // the body is drawn at unit size and scaled; the name stays the same size
@@ -163,7 +210,7 @@ const NodeView = memo(function NodeView({ n, proj, theme, showLabels, color, not
   const gid = 'nl' + tint.replace('#', '')
   const count = n.props.count > 1 ? n.props.count : n.props.tasks > 1 && n.type === 'ecs' ? n.props.tasks : 0
   return (
-    <g transform={`translate(${f(tx)} ${f(ty)})`} data-kind="node" data-id={n.id} className={'nd' + (fresh ? ' nd-new' : '') + (off ? ' off' : '') + (up ? ' up' : '')} style={{ cursor: 'grab', ['--i' as any]: order }}>
+    <g transform={`translate(${f(tx)} ${f(ty)})`} data-kind="node" data-id={n.id} className={'nd' + (fresh ? ' nd-new' : '') + (off ? ' off' : '') + (up ? ' up' : '')} style={order === undefined ? GRAB : { cursor: 'grab', ['--i' as any]: order }}>
       {/* each component throws a faint pool of its own colour on the ground, then a soft contact shadow */}
       {theme.glow > 0 && (
         <>
@@ -178,8 +225,8 @@ const NodeView = memo(function NodeView({ n, proj, theme, showLabels, color, not
       )}
       {theme.ao > 0 && <circle className="nd-ao" r={1} fill="url(#st-ao)" opacity={theme.ao}
         transform={`matrix(${f(proj.a * R)} ${f(proj.c * R)} ${f(proj.b * R)} ${f(proj.d * R)} ${f(cx)} ${f(cy)})`} />}
-      <g className="nd-body">{k === 1 ? <Model type={n.type} color={tint} proj={proj} /> : <g transform={`scale(${k})`}><Model type={n.type} color={tint} proj={proj} /></g>}</g>
-      {showLabels && (
+      <g className="nd-body">{k === 1 ? <Model type={n.type} color={tint} proj={proj} plain={plain} /> : <g transform={`scale(${k})`}><Model type={n.type} color={tint} proj={proj} plain={plain} /></g>}</g>
+      {showLabels && !plain && (
         <text className="nd-label" transform={planeMatrixUV(proj, k + lv[0] * (k + 0.22), k + lv[1] * (k + 0.22), 0, 1 / U, lu, lv)} fontFamily={FONT} fontSize={10.5} textAnchor="middle" dominantBaseline="hanging"
           stroke={theme.bg} strokeWidth={3.5} paintOrder="stroke" strokeLinejoin="round">
           <tspan fill={theme.text} fontWeight={600} letterSpacing={0.1}>{nodeName(n)}</tspan>
@@ -190,6 +237,7 @@ const NodeView = memo(function NodeView({ n, proj, theme, showLabels, color, not
     </g>
   )
 })
+const GRAB = { cursor: 'grab' }
 
 const LabelView = memo(function LabelView({ l, proj, theme }: { l: LabelT; proj: Proj; theme: SceneTheme }) {
   const lines = l.text.split('\n')
@@ -211,28 +259,131 @@ const LabelView = memo(function LabelView({ l, proj, theme }: { l: LabelT; proj:
 
 // areas are drawn outermost kind first, and within a kind the larger first, so one that sits inside another is on top of it
 const KIND_ORDER = { vpc: 0, zone: 1, group: 2, subnet: 3 }
+const stateOf = (id: string, focus: Flow | null | undefined, dim: string | null | undefined): EdgeState => (dim === id ? 'off' : focus ? (focus.edges.has(id) ? 'on' : 'off') : undefined)
 
-/** The diagram itself: pure, so it is reused for the editor, thumbnails and exports. */
-export const Scene = memo(function Scene({ doc, proj, theme, showLabels = true, flow, lens, fresh, routes, focus, lifted, dim }: SceneProps) {
-  const own = useRoutes(doc)
-  const paths = routes ?? own
-  // painter's order: far to near along the camera's ground direction
-  // (depth is compared to a thousandth of a cell: components level with each other must not swap places over rounding noise while they are carried)
-  const sorted = useMemo(() => { const depth = (n: NodeT) => { const p = centerOf(n); return Math.round((p[0] * proj.c + p[1] * proj.d) * 1000) }; return [...doc.nodes].sort((a, b) => depth(a) - depth(b) || a.x - b.x || (a.id < b.id ? -1 : 1)) }, [doc.nodes, proj])
+/** What every layer is drawn from. `routes` is where each connection runs, worked out once by whoever draws the layers. */
+interface LayerProps extends SceneProps { routes: Map<string, Routed> }
+
+/** The bottom layer: areas, then connections (the line, its arrowheads and the area that takes a press). */
+export const SceneGround = memo(function SceneGround({ doc, proj, theme, routes, focus, dim, within, plain }: LayerProps) {
   const areas = useMemo(() => [...doc.areas].sort((a, b) => KIND_ORDER[a.kind] - KIND_ORDER[b.kind] || b.w * b.d - a.w * a.d), [doc.areas])
   return (
     <g>
-      <SceneDefs />
-      {areas.map((a) => <AreaView key={a.id} a={a} proj={proj} theme={theme} />)}
+      {areas.map((a) => (within && !touches(areaBox(a, proj), within) ? null : <AreaView key={a.id} a={a} proj={proj} theme={theme} />))}
       {doc.edges.map((e) => {
-        const r = paths.get(e.id)
-        return r ? <EdgeView key={e.id} e={e} r={r} proj={proj} theme={theme} flow={flow} state={dim === e.id ? 'off' : focus ? (focus.edges.has(e.id) ? 'on' : 'off') : undefined} /> : null
+        const r = routes.get(e.id)
+        return r && !(within && !touches(routeBox(r, proj), within)) ? <EdgeView key={e.id} e={e} r={r} proj={proj} theme={theme} state={stateOf(e.id, focus, dim)} plain={plain} /> : null
       })}
-      {doc.labels.map((l) => <LabelView key={l.id} l={l} proj={proj} theme={theme} />)}
-      {sorted.map((n, i) => {
+    </g>
+  )
+})
+
+/** The middle layer: the traffic moving along connections. Nothing at all unless traffic is on or a flow is being followed. */
+export const SceneFlow = memo(function SceneFlow({ doc, proj, theme, routes, flow, focus, dim, within }: LayerProps) {
+  if (!flow && !focus) return null
+  return (
+    <g>
+      {doc.edges.map((e) => {
+        const r = routes.get(e.id)
+        return r && moves(e, flow, stateOf(e.id, focus, dim)) && !(within && !touches(routeBox(r, proj), within)) ? <FlowView key={e.id} e={e} r={r} proj={proj} theme={theme} /> : null
+      })}
+    </g>
+  )
+})
+
+/** How deep a band of components is, in cells along the way the camera looks. */
+const BAND = 2
+/** Components that stand at about the same distance from the camera, far to near within the band. `first` is the place of its first among all that are drawn. */
+export interface Band { key: number; nodes: NodeT[]; first: number }
+/**
+ * The components to draw, in painter's order (far to near along the camera's ground direction), cut into bands of depth.
+ *
+ * Bands are what keeps one component's move from being everyone's business. Each is drawn by a memoised <NodeBand/>,
+ * and a band that holds the same components as last time is handed back as the very same list, so React looks at the
+ * band a component is in and no other. The editor goes further and gives each band an <svg> of its own, which the browser
+ * repaints separately. Bands are fixed slices of depth, not so many components each, so that a component carried across
+ * the canvas changes band now and then, and nothing else ever does.
+ */
+export function useBands(all: NodeT[], proj: Proj, within?: Box | null): Band[] {
+  const [keep] = useState(() => ({ last: new Map<number, NodeT[]>() }))
+  return useMemo(() => {
+    // depth is compared to a thousandth of a cell: components level with each other must not swap places over rounding noise while they are carried
+    const placed: { n: NodeT; d: number }[] = []
+    for (const n of all) { if (within && !touches(nodeBox(n, proj), within)) continue; const p = centerOf(n); placed.push({ n, d: Math.round((p[0] * proj.c + p[1] * proj.d) * 1000) }) }
+    placed.sort((a, b) => a.d - b.d || a.n.x - b.n.x || (a.n.id < b.n.id ? -1 : 1))
+    const out: Band[] = [], next = new Map<number, NodeT[]>()
+    for (let i = 0; i < placed.length;) {
+      const key = Math.floor(placed[i].d / (BAND * 1000))
+      // (always at least the one it starts on: a depth that is not a number is equal to nothing, itself included)
+      let j = i + 1
+      while (j < placed.length && Math.floor(placed[j].d / (BAND * 1000)) === key) j++
+      let nodes = placed.slice(i, j).map((q) => q.n)
+      const was = keep.last.get(key)
+      if (was && was.length === nodes.length && was.every((n, k) => n === nodes[k])) nodes = was
+      next.set(key, nodes)
+      out.push({ key, nodes, first: i })
+      i = j
+    }
+    keep.last = next
+    return out
+  }, [all, proj, within, keep])
+}
+
+interface BandProps extends Pick<SceneProps, 'proj' | 'theme' | 'showLabels' | 'lens' | 'fresh' | 'focus' | 'lifted' | 'plain'> { nodes: NodeT[]; first?: number }
+/** One band of components. `first`, when given, staggers them as a blueprint opens. */
+export const NodeBand = memo(function NodeBand({ nodes, first, proj, theme, showLabels = true, lens, fresh, focus, lifted, plain }: BandProps) {
+  return (
+    <>
+      {nodes.map((n, i) => {
         const o = lens?.get(n.id)
-        return <NodeView key={n.id} n={n} proj={proj} theme={theme} showLabels={showLabels} color={o?.color} note={o?.note} fresh={fresh === n.id} order={i} off={!!focus && !focus.start.has(n.id) && !focus.up.has(n.id) && !focus.down.has(n.id)} up={!!lifted?.has(n.id)} />
+        return <NodeView key={n.id} n={n} proj={proj} theme={theme} showLabels={showLabels} color={o?.color} note={o?.note} fresh={fresh === n.id} order={first === undefined ? undefined : first + i} off={!!focus && !focus.start.has(n.id) && !focus.up.has(n.id) && !focus.down.has(n.id)} up={!!lifted?.has(n.id)} plain={plain} />
       })}
+    </>
+  )
+})
+
+/** What lies over the lines and under the components: captions on connections and labels, with the gradients the components are filled with. */
+export const SceneText = memo(function SceneText({ doc, proj, theme, lens, routes, focus, dim, within, plain, bands }: LayerProps & { bands: Band[] }) {
+  // each kind of component in each colour it is drawn in, once. The list is the same object for as long as it holds the same
+  // things, so the gradients are not gone over again on every frame of a drag
+  const uses = new Map<string, readonly [string, string]>()
+  if (!plain) for (const b of bands) for (const n of b.nodes) { const tint = lens?.get(n.id)?.color ?? nodeColor(n), k = n.type + '|' + tint; if (!uses.has(k)) uses.set(k, [n.type, tint]) }
+  const key = [...uses.keys()].sort().join()
+  const models = useMemo(() => [...uses.values()], [key])
+  return (
+    <g>
+      <SceneDefs />
+      {!plain && <ModelDefs models={models} proj={proj} />}
+      {!plain && doc.edges.map((e) => {
+        const r = routes.get(e.id)
+        return r && (e.label || e.protocol || e.port) && !(within && !touches(routeBox(r, proj), within)) ? <EdgeCaption key={e.id} e={e} r={r} proj={proj} theme={theme} state={stateOf(e.id, focus, dim)} /> : null
+      })}
+      {doc.labels.map((l) => (within && !touches(labelBox(l, proj), within) ? null : <LabelView key={l.id} l={l} proj={proj} theme={theme} />))}
+    </g>
+  )
+})
+
+/** The top layer in one group: captions and labels, then every band of components from far to near. */
+export const SceneTop = memo(function SceneTop(props: LayerProps) {
+  const { doc, proj, within, stagger } = props
+  const bands = useBands(doc.nodes, proj, within)
+  return (
+    <g>
+      <SceneText {...props} bands={bands} />
+      {bands.map((b) => <NodeBand key={b.key} nodes={b.nodes} first={stagger ? b.first : undefined} proj={proj} theme={props.theme} showLabels={props.showLabels} lens={props.lens} fresh={props.fresh} focus={props.focus} lifted={props.lifted} plain={props.plain} />)}
+    </g>
+  )
+})
+
+/** The diagram itself, every layer in one group: pure, so it is reused for thumbnails and exports. */
+export const Scene = memo(function Scene(props: SceneProps) {
+  const own = useRoutes(props.doc)
+  const routes = props.routes ?? own
+  return (
+    <g>
+      <SceneGround {...props} routes={routes} />
+      <SceneFlow {...props} routes={routes} />
+      <SceneTop {...props} routes={routes} />
     </g>
   )
 })

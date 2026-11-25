@@ -9,6 +9,10 @@ import { TRIO, expect, test } from './fixtures'
 
 /** Automated WCAG 2.1 A/AA checks. Anything rated serious or critical fails the build. */
 async function audit(page: import('@playwright/test').Page, include?: string) {
+  // Whatever is still fading or sliding in has no settled colours to judge, so anything on its way in is let arrive first.
+  // (Things that never stop, like traffic on a line, are left to run.)
+  await page.evaluate((sel) => Promise.all(((sel ? document.querySelector(sel) : document.body)?.getAnimations({ subtree: true }) ?? [])
+    .filter((a) => a.effect?.getComputedTiming().iterations !== Infinity).map((a) => a.finished.catch(() => null))), include)
   let axe = new AxeBuilder({ page }).withTags(['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa'])
   if (include) axe = axe.include(include)
   const { violations } = await axe.analyze()
@@ -74,6 +78,8 @@ test.describe('accessibility', () => {
 
   test('the dashboard can be used from the keyboard with a visible focus mark', async ({ page, app }) => {
     await page.goto('/')
+    // the page is there to be tabbed through once it has been drawn
+    await expect(page.getByRole('heading', { level: 1 })).toBeVisible()
     const seen: string[] = []
     for (let i = 0; i < 12; i++) {
       await page.keyboard.press('Tab')

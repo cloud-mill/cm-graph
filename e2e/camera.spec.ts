@@ -17,7 +17,7 @@ test.describe('camera and view', () => {
     await expect.poll(() => app.hud('EL')).toBe('90°')
     await expect(page.getByRole('radio', { name: '2D' })).toHaveAttribute('aria-checked', 'true')
     // in plan view x runs straight across the screen
-    const a = await app.corner('a'), b = await app.corner('b')
+    const [a, b] = await app.corners(['a', 'b'])
     expect(Math.abs(a.y - b.y)).toBeLessThan(1)
     expect(b.x).toBeGreaterThan(a.x)
     await page.keyboard.press('3')
@@ -96,7 +96,7 @@ test.describe('camera and view', () => {
     await page.getByRole('button', { name: 'Zoom in' }).click()
     await expect.poll(() => zoom(page)).toBeGreaterThan(start)
     await pct(page).click()
-    await expect(pct(page)).toHaveText(/^100%/)
+    await expect(pct(page).locator('.on')).toHaveText('100%')
     await page.keyboard.press('-')
     await expect.poll(() => zoom(page)).toBe(77)
     await page.keyboard.press('f')
@@ -130,7 +130,7 @@ test.describe('camera and view', () => {
     await page.getByRole('button', { name: 'Fit', exact: true }).click()
     await expect.poll(() => zoom(page)).toBe(all)
     // everything is inside the visible canvas again
-    const box = (await page.locator('.canvas-svg').boundingBox())!
+    const box = (await page.locator('.canvas-surface').boundingBox())!
     for (const id of ['a', 'b', 'c']) {
       const b = (await app.node(id).boundingBox())!
       expect(b.x).toBeGreaterThan(box.x)
@@ -152,29 +152,29 @@ test.describe('camera and view', () => {
     const before = await app.corner('a')
     const map = (await page.locator('.minimap').boundingBox())!
     await page.mouse.click(map.x + map.width * 0.2, map.y + map.height * 0.8)
-    const after = await app.corner('a')
-    expect(Math.hypot(after.x - before.x, after.y - before.y)).toBeGreaterThan(40)
+    // the canvas moves with the next frame it draws, not inside the click itself
+    await expect.poll(async () => { const after = await app.corner('a'); return Math.hypot(after.x - before.x, after.y - before.y) }).toBeGreaterThan(40)
   })
 
   test('grid, names and traffic toggles change the canvas', async ({ page, app }) => {
     await page.keyboard.press('g')
-    await expect(page.locator('.canvas-svg rect[fill="url(#grid)"]')).toHaveCount(0)
+    await expect(page.locator('.canvas-surface rect[fill="url(#grid)"]')).toHaveCount(0)
     await page.keyboard.press('g')
-    await expect(page.locator('.canvas-svg rect[fill="url(#grid)"]')).toHaveCount(1)
-    await expect(page.locator('.canvas-svg .nd-label')).toHaveCount(3)
+    await expect(page.locator('.canvas-surface rect[fill="url(#grid)"]')).toHaveCount(1)
+    await expect(page.locator('.canvas-surface .nd-label')).toHaveCount(3)
     await page.keyboard.press('l')
-    await expect(page.locator('.canvas-svg .nd-label')).toHaveCount(0)
+    await expect(page.locator('.canvas-surface .nd-label')).toHaveCount(0)
     await app.tool('Component names').click()
-    await expect(page.locator('.canvas-svg .nd-label')).toHaveCount(3)
+    await expect(page.locator('.canvas-surface .nd-label')).toHaveCount(3)
 
     await page.keyboard.press('c')
     await app.drag(await app.world(1, 1), await app.world(7, 1))
-    await expect(page.locator('.canvas-svg .edge-flow')).toHaveCount(1)
+    await expect(page.locator('.canvas-surface .edge-flow')).toHaveCount(1)
     await app.tool('Traffic animation').click()
-    await expect(page.locator('.canvas-svg .edge-flow')).toHaveCount(0)
+    await expect(page.locator('.canvas-surface .edge-flow')).toHaveCount(0)
     await page.reload()
     await app.ready()
-    await expect(page.locator('.canvas-svg .edge')).toHaveCount(1)
+    await expect(page.locator('.canvas-surface .edge')).toHaveCount(1)
   })
 
   test('panels hide and show with their keys and buttons', async ({ page }) => {

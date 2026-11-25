@@ -272,6 +272,36 @@ without them is a plain automatic one. A line that an older version bent through
 points is still drawn through them, and becomes a track the first time one of
 its runs is moved.
 
+## Large blueprints
+
+A blueprint of a few thousand components pans as smoothly as one of thirty,
+zooms without ever going soft, and shows a change to one of its components in
+about a tenth of a second. Five things make that so, and each can be seen if you
+look for it.
+
+- **A pan draws nothing.** It slides the picture that is already there, by whole
+  pixels. Traffic and the glow under the pointer stand still while the view
+  moves.
+- **A zoom draws everything, at its own size, on every frame.** The picture is
+  never stretched to a zoom it was not drawn at, so nothing is soft while a zoom
+  is under way and nothing sharpens when it ends: the frame in the middle of a
+  pinch is the picture you would get by stopping there. This is the one thing a
+  large blueprint pays for by the frame, and what it pays is the graphics
+  card's time, not the page's.
+- **Only what is near the screen is drawn.** Past a few hundred components and
+  lines, the rest of the blueprint is not on the page until the view comes near
+  it. It is still selected, moved, priced and exported with everything else.
+- **From far out, components are drawn plainly.** With hundreds in view at a
+  small scale, each is drawn in flat colours with no name and no fine detail,
+  none of which could be made out at that size. The same goes for a busy view
+  while the camera turns.
+- **Traffic is paced.** Each step of it redraws every part of the picture a dot
+  crosses, so it steps thirty times a second on a small blueprint, twenty or
+  twelve with more in view, and stops once nothing has been touched for two
+  minutes, until the pointer moves or a key is pressed.
+
+`npm run bench` measures all of it (see [Testing](#testing)).
+
 ## On a phone
 
 A narrow screen gets its own layout rather than a squeezed desktop one.
@@ -334,6 +364,7 @@ Three layers, all run by `npm run verify`.
 | `npm run test:e2e`                      | End-to-end tests in Google Chrome (Playwright), against the dev server                |
 | `npm run test:e2e:prod`                 | The same tests against the production build                                           |
 | `npm run test:perf`                     | Only the performance and stability tests                                              |
+| `npm run bench`                         | Measures frame times and edit latency on blueprints of 30 to 2,000 components         |
 | `npm run test:e2e -- --project=android` | Only the phone tests on one profile (`android`, `iphone`, `small-phone`, `landscape`) |
 | `npm run test:e2e:ui`                   | Playwright's interactive runner, for debugging                                        |
 | `npm run verify`                        | Everything above, in order                                                            |
@@ -352,9 +383,25 @@ on a separate port, so their saved blueprints never mix with yours. Every test
 also fails if the page logs an error. They cover the dashboard, canvas editing,
 the library, every panel and dialog, the camera, persistence and failure
 handling, six screen sizes from 320 to 1920 pixels wide, automated WCAG 2.1 AA
-checks (axe) in both themes, and performance: frame time on a 300-component
-blueprint, no redrawing of components that did not change, and no growth in
-listeners, DOM or memory across repeated open and close cycles.
+checks (axe) in both themes, and performance: frame time while panning, zooming
+and carrying on blueprints of 300 and 1,000 components, no redrawing of
+components that did not change, nothing changed by the app while the view moves,
+an idle page that does no work, a first load that fetches only its own screen,
+and no growth in listeners, DOM or memory across repeated open and close cycles.
+
+Sharpness is tested by looking at the screen (`e2e/sharp.spec.ts`, and
+`e2e/sharp.mobile.spec.ts` for two fingers on a phone). The page's clock is held
+still, so a zoom can be stopped while it is still under way and photographed,
+then let come to rest and photographed again: the two pictures must be the same,
+pixel for pixel but for the odd edge, and neither softer than the other. That is
+done for a trackpad pinch (slow, fast, and in and out by turns), the wheel, the
+buttons and the keys, at one and at two device pixels to the pixel, and on every
+phone profile.
+
+`npm run bench` is for measuring by hand, before and after a change: it builds
+the app, drives it in headless Chrome and prints what each interaction costs at
+four sizes of blueprint. `--gpu`, `--cpu 4` and `--phone` change the machine it
+pretends to be; every option is listed at the top of `scripts/bench.mjs`.
 
 The phone tests run on four device profiles (Pixel 7, iPhone 15, iPhone SE and a
 phone held sideways) and send real multi-touch input through Chrome, so pinch,

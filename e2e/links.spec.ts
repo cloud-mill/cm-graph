@@ -1,5 +1,5 @@
 import type { Page } from '@playwright/test'
-import { expect, makeDoc, test } from './fixtures'
+import { expect, makeDoc, rested, test } from './fixtures'
 
 /**
  * Connections, driven with a real mouse: every check either reads the line as
@@ -18,11 +18,11 @@ const lineOf = (page: Page, id = 'e', n = 60) => page.evaluate(([id, n]) => {
 const middle = async (page: Page, id = 'e') => { const pts = await lineOf(page, id, 2); return pts[1] }
 const handle = (page: Page, name: string) => page.locator(`[data-handle="${name}"]`).last()
 const centre = async (page: Page, name: string) => { const b = (await handle(page, name).boundingBox())!; return { x: b.x + b.width / 2, y: b.y + b.height / 2 } }
-const plan = async (page: Page) => { await page.keyboard.press('2'); await page.waitForTimeout(800) }
+const plan = async (page: Page) => { await page.keyboard.press('2'); await page.waitForTimeout(800); await rested(page) }
 const E = async (app: any) => (await app.settled()).edges.find((x: any) => x.id === 'e')
 /** screen offset for a move of (dx, dy) cells, measured from this layout: b is 8 cells along x from a, c is 6 along y from b */
 const cells = async (app: any, dx: number, dy: number) => {
-  const [a, b, c] = await Promise.all([app.corner('a'), app.corner('b'), app.corner('c')])
+  const [a, b, c] = await app.corners(['a', 'b', 'c'])
   return { x: ((b.x - a.x) / 8) * dx + ((c.x - b.x) / 6) * dy, y: ((b.y - a.y) / 8) * dx + ((c.y - b.y) / 6) * dy }
 }
 const box = async (app: any, id: string) => (await app.node(id).locator('.nd-body').boundingBox())!
@@ -174,7 +174,7 @@ test.describe('connections: meaning and flow', () => {
     await page.getByLabel('Protocol', { exact: true }).fill('PostgreSQL')
     await page.getByLabel('Port', { exact: true }).fill('5432')
     await page.getByLabel('Port', { exact: true }).press('Enter')
-    await expect(page.locator('.edge text')).toHaveText('POSTGRESQL 5432')
+    await expect(page.locator('.edge-caption')).toHaveText('POSTGRESQL 5432')
     await expect(page.locator('.insp-sub').first()).toHaveText('web reads and writes db over PostgreSQL 5432')
     expect(await E(app)).toMatchObject({ kind: 'data', protocol: 'PostgreSQL', port: '5432' })
     await page.getByLabel('Port', { exact: true }).fill('nonsense')

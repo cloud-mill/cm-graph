@@ -55,6 +55,10 @@ const CLEAR = 0.3
 const BEND = 1.6
 
 const rectOf = (n: Box): Rect => { const s = footOf(n); return { x0: n.x, y0: n.y, x1: n.x + s, y1: n.y + s } }
+// A component in a blueprint is never changed in place, so its rectangle is worked out once for as long as that object lives.
+// Routing runs on every frame of a drag, and all but the components in the hand are the same objects as the frame before
+const boxes = new WeakMap<object, Rect>()
+const boxOf = (n: NodeT): Rect => { let r = boxes.get(n); if (!r) boxes.set(n, (r = rectOf(n))); return r }
 const mid = (r: Rect): W => [(r.x0 + r.x1) / 2, (r.y0 + r.y1) / 2]
 const horizontal = (s: Side) => s === 'e' || s === 'w'
 // every coordinate a route is made of is kept to a thousandth of a cell, so two that should be equal compare equal
@@ -99,6 +103,61 @@ export function tidy(pts: W[]): W[] {
 }
 const between = (b: W, a: W, q: W) => (a[0] - b[0]) * (q[0] - a[0]) >= 0 && (a[1] - b[1]) * (q[1] - a[1]) >= 0
 
+// ---- what stands where ----------------------------------------------------------------
+
+/** How far across a square of the index is, in cells: a few components' worth. */
+const SQUARE = 8
+/** How far out the index files things, in squares either way from the origin: some four million cells. */
+const REACH = 524288
+/** The most squares one rectangle may stand on, each way, and still be filed: the largest component stands on four. */
+const WIDEST = 8
+const overlaps = (b: Rect, x0: number, y0: number, x1: number, y1: number) => b.x1 > x0 && b.x0 < x1 && b.y1 > y0 && b.y0 < y1
+/**
+ * Every component's rectangle, filed by the squares of ground it stands on, so that "what is near here" does not mean
+ * looking at each one. `near` answers exactly as going through the whole list would, in the same order: the rectangles
+ * that overlap the given box, edges not counting. Worth building when many lines are to be routed at once (a blueprint
+ * opened without plans, everything moved together); for the few lines of one component in the hand, the list is quicker.
+ *
+ * A blueprint read from a file can put a component anywhere a number can be, so nothing here counts on positions being
+ * sensible. A rectangle that is not near the origin and of an ordinary size is not filed: it is kept aside and looked at
+ * every time. A box that is not is answered from the whole list. Either way the answer is the list's, and it is reached
+ * in a bounded number of steps (counting squares up to a number too large to count by ones would never end).
+ */
+export class Ground {
+  private squares = new Map<number, number[]>()
+  private aside: number[] = []
+  constructor(readonly all: Rect[]) {
+    all.forEach((b, i) => {
+      const x0 = Math.floor(b.x0 / SQUARE), x1 = Math.floor(b.x1 / SQUARE), y0 = Math.floor(b.y0 / SQUARE), y1 = Math.floor(b.y1 / SQUARE)
+      // written so that a position that is not a number at all fails it too
+      const filed = Math.abs(x0) < REACH && Math.abs(y0) < REACH && x1 >= x0 && y1 >= y0 && x1 - x0 < WIDEST && y1 - y0 < WIDEST
+      if (!filed) { this.aside.push(i); return }
+      for (let x = x0; x <= x1; x++) for (let y = y0; y <= y1; y++) {
+        const k = Ground.key(x, y), list = this.squares.get(k)
+        if (list) list.push(i); else this.squares.set(k, [i])
+      }
+    })
+  }
+  private static key = (x: number, y: number) => (x + REACH) * (2 * REACH) + (y + REACH)
+  near(x0: number, y0: number, x1: number, y1: number): Rect[] {
+    const sx0 = Math.floor(x0 / SQUARE), sx1 = Math.floor(x1 / SQUARE), sy0 = Math.floor(y0 / SQUARE), sy1 = Math.floor(y1 / SQUARE)
+    // a box that takes in more squares than there are rectangles is quicker gone through one by one, and so is the only
+    // way to answer for one that is far out, inside out or not made of numbers
+    const local = Math.abs(sx0) < REACH && Math.abs(sx1) < REACH && Math.abs(sy0) < REACH && Math.abs(sy1) < REACH && (sx1 - sx0 + 1) * (sy1 - sy0 + 1) <= this.all.length
+    if (!local) return this.all.filter((b) => overlaps(b, x0, y0, x1, y1))
+    const found = new Set<number>()
+    for (const i of this.aside) if (overlaps(this.all[i], x0, y0, x1, y1)) found.add(i)
+    for (let x = sx0; x <= sx1; x++) for (let y = sy0; y <= sy1; y++) {
+      for (const i of this.squares.get(Ground.key(x, y)) ?? []) if (overlaps(this.all[i], x0, y0, x1, y1)) found.add(i)
+    }
+    return [...found].sort((a, b) => a - b).map((i) => this.all[i])
+  }
+}
+/** Components to keep clear of: all of them in a list, or filed by where they stand. */
+type Blocks = Rect[] | Ground
+const nearTo = (blocks: Blocks, x0: number, y0: number, x1: number, y1: number) =>
+  (blocks instanceof Ground ? blocks.near(x0, y0, x1, y1) : blocks.filter((b) => overlaps(b, x0, y0, x1, y1)))
+
 // ---- automatic routing ---------------------------------------------------------------
 
 // two generations: when the young one fills up it becomes the old one, so routes still in use are never all forgotten at once
@@ -114,10 +173,10 @@ let cache = new Map<string, W[]>(), aged = new Map<string, W[]>()
  * is A* over a sparse grid: the lines through the two ends, the middle channel,
  * and one line `STUB` outside each side of every nearby component.
  */
-export function findPath(s: W, sd: W, t: W, td: W, blocks: Rect[], lane = 0): W[] {
+export function findPath(s: W, sd: W, t: W, td: W, blocks: Blocks, lane = 0): W[] {
   // only components that reach within three cells of the box round the two ends are looked at: it keeps the search and the cache key small
   const lo: W = [Math.min(s[0], t[0]) - 3, Math.min(s[1], t[1]) - 3], hi: W = [Math.max(s[0], t[0]) + 3, Math.max(s[1], t[1]) + 3]
-  const near = blocks.filter((b) => b.x1 > lo[0] && b.x0 < hi[0] && b.y1 > lo[1] && b.y0 < hi[1])
+  const near = nearTo(blocks, lo[0], lo[1], hi[0], hi[1])
   // the same arrangement anywhere on the ground has the same route, so it is remembered relative to where it starts:
   // a whole group carried across the canvas costs nothing to re-route
   const onGrid = (v: number) => Math.abs(v * 2 - Math.round(v * 2)) < 1e-6
@@ -247,9 +306,12 @@ const put = (end: End, r: Rect, c: number) => {
 }
 
 /** Nothing but the two components themselves stands on the straight run from `p` to `q`. */
-function clearRun(p: W, q: W, blocks: Rect[], skip: Rect[]): boolean {
+function clearRun(p: W, q: W, blocks: Blocks, skip: Rect[]): boolean {
   const x0 = Math.min(p[0], q[0]), x1 = Math.max(p[0], q[0]), y0 = Math.min(p[1], q[1]), y1 = Math.max(p[1], q[1])
-  return blocks.every((b) => skip.includes(b) || !(b.x1 + CLEAR > x0 && b.x0 - CLEAR < x1 && b.y1 + CLEAR > y0 && b.y0 - CLEAR < y1))
+  // The index only narrows down what to look at (everything within the room a route keeps, and a hair more); the test
+  // itself is the one made on the whole list, to the last digit, so the answer cannot differ by how it was reached
+  const about = blocks instanceof Ground ? blocks.near(x0 - CLEAR - 0.01, y0 - CLEAR - 0.01, x1 + CLEAR + 0.01, y1 + CLEAR + 0.01) : blocks
+  return about.every((b) => skip.includes(b) || !(b.x1 + CLEAR > x0 && b.x0 - CLEAR < x1 && b.y1 + CLEAR > y0 && b.y0 - CLEAR < y1))
 }
 
 /** Where the straight line from the middle of `r` towards `t` leaves it. */
@@ -293,6 +355,25 @@ export function planKey(e: EdgeT, a: Box, b: Box): string {
 /** The router owns this line's path: it is right-angled and the user has not given it a track of their own. */
 export const routerOwns = (e: EdgeT) => !e.shape && !e.runs && !e.via?.length
 
+// Whether a line's plan was made for the two components it now joins. Asked of every line on every frame of a drag and at
+// every edit, so the answer is remembered against the three objects it depends on: none of them is ever changed in place,
+// so while they are the same objects the answer is the same, and no key has to be spelt out to find it
+const keyed = new WeakMap<EdgeT, { a: NodeT; b: NodeT; ok: boolean }>()
+function keyStands(e: EdgeT, a: NodeT, b: NodeT): boolean {
+  const was = keyed.get(e)
+  if (was && was.a === a && was.b === b) return was.ok
+  const ok = e.plan?.key === planKey(e, a, b)
+  keyed.set(e, { a, b, ok })
+  return ok
+}
+// a plan as it is drawn: the same object every time it is asked for, so a line that has not changed is not drawn again
+const drawnPlans = new WeakMap<object, Routed>()
+function routeOfPlan(plan: NonNullable<EdgeT['plan']>): Routed {
+  let r = drawnPlans.get(plan)
+  if (!r) drawnPlans.set(plan, (r = { pts: plan.pts.map((p) => [p[0], p[1]] as W), leg: plan.pts.slice(1).map(() => 0), fromSide: plan.fromSide, toSide: plan.toSide, manual: false, shape: 'ortho' }))
+  return r
+}
+
 /**
  * The diagram with every line the router owns carrying the path planned for it. A line whose plan still stands is
  * not touched, so a path once planned stays as it is until one of its own two components moves or changes size.
@@ -303,8 +384,9 @@ export const routerOwns = (e: EdgeT) => !e.shape && !e.runs && !e.via?.length
  * Lines planned in the same pass are routed together, and an end whose plan stands keeps its place on its side.
  */
 export function withPlans(doc: Doc): Doc {
-  const byId = new Map(doc.nodes.map((n) => [n.id, n]))
-  const stale = (e: EdgeT) => { const a = byId.get(e.from), b = byId.get(e.to); return !!a && !!b && e.from !== e.to && routerOwns(e) && e.plan?.key !== planKey(e, a, b) }
+  const byId = new Map<string, NodeT>()
+  for (const n of doc.nodes) byId.set(n.id, n)
+  const stale = (e: EdgeT) => { const a = byId.get(e.from), b = byId.get(e.to); return !!a && !!b && e.from !== e.to && routerOwns(e) && !keyStands(e, a, b) }
   if (!doc.edges.some(stale)) return doc
   const routes = routeAll(doc.nodes, doc.edges)
   return {
@@ -325,19 +407,28 @@ export function withPlans(doc: Doc): Doc {
  * while it is being dragged, before `withPlans` stores the new path on release.
  */
 export function routeAll(nodes: NodeT[], edges: EdgeT[]): Map<string, Routed> {
-  const byId = new Map(nodes.map((n) => [n.id, n]))
-  const rects = new Map(nodes.map((n) => [n.id, rectOf(n)]))
+  const byId = new Map<string, NodeT>()
+  for (const n of nodes) byId.set(n.id, n)
+  const rectAt = (id: string) => boxOf(byId.get(id)!)
   const live = edges.filter((e) => byId.has(e.from) && byId.has(e.to) && e.from !== e.to)
   const sided = live.filter((e) => e.shape !== 'direct')
   const viaOf = (e: EdgeT) => (e.shape || e.runs ? [] : e.via ?? [])
   // a plan that still stands is the line: it is drawn as it was planned, whatever has happened elsewhere since
   const plans = new Map<string, NonNullable<EdgeT['plan']>>()
-  for (const e of sided) if (routerOwns(e) && e.plan && e.plan.pts.length >= 2 && e.plan.key === planKey(e, byId.get(e.from)!, byId.get(e.to)!)) plans.set(e.id, e.plan)
+  // Components with a line on them that has to be worked out now. Only the ends on those matter below: a line whose plan stands
+  // is drawn from the plan alone, and its ends are looked at only for the room they take up beside a line that is being routed.
+  // So a diagram in which every plan stands costs one look at each line, and a drag costs the lines of what is in the hand
+  const busy = new Set<string>()
+  for (const e of sided) {
+    if (routerOwns(e) && e.plan && e.plan.pts.length >= 2 && keyStands(e, byId.get(e.from)!, byId.get(e.to)!)) plans.set(e.id, e.plan)
+    else { busy.add(e.from); busy.add(e.to) }
+  }
 
   // 1. which side each end uses
   const ends = new Map<string, { a: End; b: End }>()
   for (const e of sided) {
-    const ra = rects.get(e.from)!, rb = rects.get(e.to)!
+    if (!busy.has(e.from) && !busy.has(e.to)) continue
+    const ra = rectAt(e.from), rb = rectAt(e.to)
     const via = viaOf(e), plan = plans.get(e.id)
     const ta = via.length ? via[0] : mid(rb), tb = via.length ? via[via.length - 1] : mid(ra)
     const sa = plan?.fromSide ?? e.fromSide ?? facing(ra, ta, via.length ? undefined : rb), sb = plan?.toSide ?? e.toSide ?? facing(rb, tb, via.length ? undefined : ra)
@@ -361,7 +452,7 @@ export function routeAll(nodes: NodeT[], edges: EdgeT[]): Map<string, Routed> {
     // ends that lead to the same place keep the order the connections were made in (the sort is stable), so a line being drawn,
     // which is the newest, is shown where it will be once it is let go and has an id of its own
     list.sort((p, q) => p.toward - q.toward)
-    const r = rects.get(list[0].node)!, size = r.x1 - r.x0
+    const r = rectAt(list[0].node), size = r.x1 - r.x0
     const gap = Math.min(0.5, (size * 0.76) / list.length)
     const centre = centreOn(r, list[0].side)
     const reach = size / 2 - EDGE
@@ -383,7 +474,11 @@ export function routeAll(nodes: NodeT[], edges: EdgeT[]): Map<string, Routed> {
     })
   }
 
-  const blocks = [...rects.values()]
+  // every component, as something a line has to keep clear of: only gathered up if a line is to be routed at all, and filed
+  // by where it stands when there are enough lines to route for that to pay (each asks what is near it)
+  let all: Blocks | null = null
+  const routing = sided.length - plans.size
+  const blocks = () => (all ??= ((list) => (routing * list.length > 40_000 ? new Ground(list) : list))([...byId.values()].map(boxOf)))
 
   // 3. two sides that face each other across clear ground are joined by one straight run wherever their ports can be made to meet.
   //    A line the user straightened may use the whole of both sides to stay straight; one left to the router only slides a port
@@ -391,7 +486,7 @@ export function routeAll(nodes: NodeT[], edges: EdgeT[]): Map<string, Routed> {
   const straight = new Set<string>()
   for (const e of sided) {
     if (e.shape === 'curved' || viaOf(e).length || (e.runs && e.runs.length) || plans.has(e.id)) continue
-    const { a, b } = ends.get(e.id)!, ra = rects.get(e.from)!, rb = rects.get(e.to)!
+    const { a, b } = ends.get(e.id)!, ra = rectAt(e.from), rb = rectAt(e.to)
     if (!opposite(a.side, b.side) || !beyond(ra, a.side, rb)) continue
     const ca = across(a.side, a.port), cb = across(b.side, b.port)
     const kept = !!e.runs
@@ -411,13 +506,14 @@ export function routeAll(nodes: NodeT[], edges: EdgeT[]): Map<string, Routed> {
     const was: [W, W, W, W] = [a.port, a.out, b.port, b.out]
     put(a, ra, c); put(b, rb, c)
     // the user's word is final; the router's own idea is dropped if something stands in the way
-    if (kept || clearRun(a.port, b.port, blocks, [ra, rb])) straight.add(e.id)
+    if (kept || clearRun(a.port, b.port, blocks(), [ra, rb])) straight.add(e.id)
     else [a.port, a.out, b.port, b.out] = was
   }
 
   // 4. parallel lines between the same two components each get their own lane
   const pairs = new Map<string, string[]>()
-  for (const e of sided) { const k = e.from < e.to ? e.from + '|' + e.to : e.to + '|' + e.from; (pairs.get(k) ?? pairs.set(k, []).get(k)!).push(e.id) }
+  // (a line routed now has both its components among the busy ones, and so has every line that runs between the same two)
+  for (const e of sided) { if (!busy.has(e.from) || !busy.has(e.to)) continue; const k = e.from < e.to ? e.from + '|' + e.to : e.to + '|' + e.from; (pairs.get(k) ?? pairs.set(k, []).get(k)!).push(e.id) }
   const lane = new Map<string, number>()
   for (const ids of pairs.values()) ids.forEach((id, i) => lane.set(id, i - (ids.length - 1) / 2))
 
@@ -425,7 +521,9 @@ export function routeAll(nodes: NodeT[], edges: EdgeT[]): Map<string, Routed> {
   //    its own track, a path found now, or an older file's points. A track that can no longer be followed falls through to a found path
   const out = new Map<string, Routed>()
   for (const e of live) {
-    const ra = rects.get(e.from)!, rb = rects.get(e.to)!
+    const plan = plans.get(e.id)
+    if (plan) { out.set(e.id, routeOfPlan(plan)); continue }
+    const ra = rectAt(e.from), rb = rectAt(e.to)
     if (e.shape === 'direct') {
       // one line from one to the other, wherever they stand: it leaves each where the line between their middles crosses its edge
       const p = exitOf(ra, mid(rb)), q = exitOf(rb, mid(ra))
@@ -433,8 +531,6 @@ export function routeAll(nodes: NodeT[], edges: EdgeT[]): Map<string, Routed> {
       continue
     }
     const { a, b } = ends.get(e.id)!
-    const plan = plans.get(e.id)
-    if (plan) { out.set(e.id, { pts: plan.pts.map((p) => [p[0], p[1]] as W), leg: plan.pts.slice(1).map(() => 0), fromSide: plan.fromSide, toSide: plan.toSide, manual: false, shape: 'ortho' }); continue }
     const via = viaOf(e)
     let pts: W[] | null = null, leg: number[] = [], manual = false
     if (e.shape === 'curved') {
@@ -448,7 +544,7 @@ export function routeAll(nodes: NodeT[], edges: EdgeT[]): Map<string, Routed> {
     else if (e.runs) { const t = tracked(a, b, ra, rb, e.runs); if (t) { pts = tidy(t); manual = true } }
     if (pts) leg = pts.slice(1).map(() => 0)
     else if (!via.length) {
-      const path = findPath(a.out, DIR[a.side], b.out, [-DIR[b.side][0], -DIR[b.side][1]], blocks, (lane.get(e.id) ?? 0) + a.lane)
+      const path = findPath(a.out, DIR[a.side], b.out, [-DIR[b.side][0], -DIR[b.side][1]], blocks(), (lane.get(e.id) ?? 0) + a.lane)
       pts = tidy([a.port, ...path, b.port])
       leg = pts.slice(1).map(() => 0)
     } else {

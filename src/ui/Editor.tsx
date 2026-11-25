@@ -1,16 +1,16 @@
-import { useEffect, useMemo, useRef } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import {
   Activity, Box, ChevronLeft, Home, PanelLeft, PanelRight, Rotate3d, RotateCcw, RotateCw, CircleHelp, Command, Download, Grid3x3, History, Layers, LayoutGrid, Minus, Moon, MousePointer2,
   Plus, Redo2, Scan, Share2, SquareDashed, Sun, Tag, Type, Undo2, Upload, Waypoints, X, Magnet } from 'lucide-react'
 import { Canvas } from '../canvas/Canvas'
-import { animateView, beginOrbit, cam, fitView, hud, orbitTo, setFlat, turn, viewHome, viewTop, zoomBy } from '../canvas/camera'
+import { animateView, beginOrbit, cam, fitView, followView, hud, orbitTo, setFlat, turn, viewHome, viewTop, zoomBy } from '../canvas/camera'
 import { sceneBounds } from '../canvas/Scene'
 import { analyze } from '../core/advisor'
 import { docCost, money, nodeColor, nodeName } from '../core/catalog'
 import { makeCam, normYaw, poly, pt, upright } from '../core/iso'
 import { type Panel, type Tool, coalesce, enableAutosave, flushSave, useStore } from '../core/store'
 import { getPref, loadDoc, setPref } from '../core/storage'
-import { IconBtn, Segmented, useTween, focusPending, keys, typeAhead } from './atoms'
+import { IconBtn, Logo, Segmented, useTween, focusPending, keys, typeAhead } from './atoms'
 import { saveVersion, selectAll, tidy } from './actions'
 import { AdvisorPanel } from './AdvisorPanel'
 import { BudgetPanel } from './BudgetPanel'
@@ -19,6 +19,7 @@ import { ExportDialog, HistoryDialog, ImportDialog, ShareDialog, ShortcutsDialog
 import { Inspector } from './Inspector'
 import { CloudSeg, Palette } from './Palette'
 import { footOf } from '../core/types'
+import { MAX_K, MIN_K } from '../canvas/touch'
 import { describe, traceFlow } from '../core/links'
 import { goHome, navigate, useBackLayer } from '../core/nav'
 import { usePhone } from './device'
@@ -39,17 +40,6 @@ import { Sheet } from './Sheet'
  * actions (which never change) from event handlers, without subscribing to anything. State must
  * not be drawn from `s`: it is a snapshot taken at render.
  */
-
-/** Three stacked planes: the product is literally layers of infrastructure. */
-export function Logo({ size = 22 }: { size?: number }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 32 32" aria-hidden className="logo">
-      <path d="M16 4.5 28 11 16 17.5 4 11z" fill="currentColor" />
-      <path d="M4 16l12 6.5L28 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" opacity=".55" />
-      <path d="M4 21l12 6.5L28 21" fill="none" stroke="currentColor" strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" opacity=".25" />
-    </svg>
-  )
-}
 
 function TopBar({ phone }: { phone?: boolean }) {
   const name = useStore((s) => s.doc.name)
@@ -152,40 +142,95 @@ function Toolbar() {
 }
 
 /**
- * The whole diagram in small, with the part on screen framed. Everything in it is in scene
- * coordinates: projected screen pixels at zoom 1, before the view's pan and zoom are applied.
+ * The whole diagram in small, with the part on screen framed. The drawing is in scene coordinates: projected
+ * screen pixels at zoom 1, before the view's pan and zoom are applied.
+ *
+ * The diagram is only drawn again when the blueprint or the camera angle changes. The frame follows the view
+ * on every frame of a pan or a zoom, so it is not drawn at all: it is a box, carried and stretched to where
+ * the view is by a transform (see camera.ts for why it is done that way and no other).
  */
 function Minimap() {
   const doc = useStore((s) => s.doc)
-  const view = useStore((s) => s.view)
   const yaw = useStore((s) => s.yaw)
   const pitch = useStore((s) => s.pitch)
-  const ref = useRef<SVGSVGElement>(null)
+  const ref = useRef<HTMLDivElement>(null)
+  const frame = useRef<HTMLDivElement>(null)
   const proj = useMemo(() => makeCam(yaw, pitch), [yaw, pitch])
   const b = useMemo(() => sceneBounds(doc, proj, 120), [doc, proj])
-  // the visible part of the canvas, taken back through the view transform (screen = scene * k + offset)
-  const vp = { x: -view.x / view.k, y: -view.y / view.k, w: cam.w / view.k, h: cam.h / view.k }
-  // centre the view on the point pressed. The map is letterboxed in its box (`xMidYMid meet`), so the
-  // margins that adds are taken off before a pixel is turned into a scene position
+  // Every component of one colour is a single shape: a large blueprint is a few dozen shapes here, not thousands. Each
+  // component's outline is kept against the component itself, so an edit works out the outline of what it changed and no more
+  const [outlines] = useState(() => ({ proj, of: new WeakMap<object, string>() }))
+  const shapes = useMemo(() => {
+    if (outlines.proj !== proj) { outlines.proj = proj; outlines.of = new WeakMap() }
+    const byColour = new Map<string, string[]>()
+    for (const n of doc.nodes) {
+      let d = outlines.of.get(n)
+      if (d === undefined) {
+        const s = footOf(n), q = [pt(proj, n.x, n.y), pt(proj, n.x + s, n.y), pt(proj, n.x + s, n.y + s), pt(proj, n.x, n.y + s)]
+        d = 'M' + q.map((c) => Math.round(c[0]) + ' ' + Math.round(c[1])).join('L') + 'Z'
+        outlines.of.set(n, d)
+      }
+      const c = nodeColor(n), list = byColour.get(c)
+      if (list) list.push(d); else byColour.set(c, [d])
+    }
+    return [...byColour].map(([colour, list]) => [colour, list.join('')] as const)
+  }, [doc.nodes, proj, outlines])
+  const some = doc.nodes.length > 0
+  // How big the map is on the page. Measured when it changes and kept, not asked for on every edit: asking makes the
+  // browser lay the page out there and then, in the middle of putting the edit on it
+  const [size, setSize] = useState({ w: 168, h: 104 })
+  useEffect(() => {
+    const box = ref.current
+    if (!box || typeof ResizeObserver === 'undefined') return
+    const ro = new ResizeObserver(() => { const w = box.clientWidth, h = box.clientHeight; if (w && h) setSize((was) => (was.w === w && was.h === h ? was : { w, h })) })
+    ro.observe(box)
+    return () => ro.disconnect()
+  }, [some])
+  useLayoutEffect(() => {
+    const el = frame.current
+    if (!el) return
+    // The map is letterboxed in its box (`xMidYMid meet`): `m` is map px to a scene px, and (ox, oy) where the scene's origin lands
+    const { w, h } = size
+    const m = Math.min(w / b.w, h / b.h), ox = (w - b.w * m) / 2 - b.x * m, oy = (h - b.h * m) / 2 - b.y * m
+    // The frame is five pieces, each one pixel square and stretched to its place by a transform: the wash inside it both
+    // ways, and each of its four sides along its own length only, so that a side is one pixel thick whatever size the
+    // frame is, on every frame of a zoom. A box with a border, scaled as a whole, has a border as thick as the scale
+    // makes it, and a box given its real width and height on each frame has the page laid out each time. All of it sits
+    // on whole device pixels, where a line a pixel thick is drawn as one
+    const [wash, top, right, bottom, left] = Array.from(el.children) as HTMLElement[]
+    const whole = (n: number) => { const dpr = (typeof devicePixelRatio === 'number' && devicePixelRatio) || 1; return Math.round(n * dpr) / dpr }
+    const fit = (v: { x: number; y: number; k: number }) => {
+      const x = whole(ox - (v.x / v.k) * m), y = whole(oy - (v.y / v.k) * m), fw = Math.max(2, whole((cam.w / v.k) * m)), fh = Math.max(2, whole((cam.h / v.k) * m))
+      wash.style.transform = `translate(${x}px, ${y}px) scale(${fw}, ${fh})`
+      top.style.transform = `translate(${x}px, ${y}px) scaleX(${fw})`
+      bottom.style.transform = `translate(${x}px, ${y + fh - 1}px) scaleX(${fw})`
+      // (between the other two: where two sides met, the corner would be drawn twice over)
+      left.style.transform = `translate(${x}px, ${y + 1}px) scaleY(${fh - 2})`
+      right.style.transform = `translate(${x + fw - 1}px, ${y + 1}px) scaleY(${fh - 2})`
+    }
+    return followView(fit)
+  }, [b, some, size])
+  // centre the view on the point pressed: the margins the letterboxing adds are taken off before a pixel is turned into a scene position
   const jump = (e: React.PointerEvent) => {
-    const r = ref.current!.getBoundingClientRect()
+    const r = ref.current!.getBoundingClientRect(), k = useStore.getState().view.k
     const scale = Math.max(b.w / r.width, b.h / r.height)
     const ox = (r.width * scale - b.w) / 2, oy = (r.height * scale - b.h) / 2
     const sx = b.x - ox + (e.clientX - r.left) * scale, sy = b.y - oy + (e.clientY - r.top) * scale
-    useStore.setState({ view: { k: view.k, x: cam.w / 2 - sx * view.k, y: cam.h / 2 - sy * view.k } })
+    useStore.setState({ view: { k, x: cam.w / 2 - sx * k, y: cam.h / 2 - sy * k } })
   }
-  if (!doc.nodes.length) return null
+  if (!some) return null
+  // one pixel of the map, in the scene's own px: what a group's outline is drawn with, so that it is a hairline at any size of map
+  const hair = 1 / Math.min(size.w / b.w, size.h / b.h)
   return (
-    <svg ref={ref} className="minimap" viewBox={`${b.x} ${b.y} ${b.w} ${b.h}`} preserveAspectRatio="xMidYMid meet"
-      onPointerDown={(e) => { e.currentTarget.setPointerCapture(e.pointerId); jump(e) }} onPointerMove={(e) => e.buttons === 1 && jump(e)}>
-      {doc.areas.map((a) => (
-        <polygon key={a.id} points={poly([pt(proj, a.x, a.y), pt(proj, a.x + a.w, a.y), pt(proj, a.x + a.w, a.y + a.d), pt(proj, a.x, a.y + a.d)])} fill={a.color} fillOpacity={0.1} stroke={a.color} strokeOpacity={0.5} strokeWidth={1} vectorEffect="non-scaling-stroke" />
-      ))}
-      {doc.nodes.map((n) => (
-        <polygon key={n.id} points={poly([pt(proj, n.x, n.y), pt(proj, n.x + footOf(n), n.y), pt(proj, n.x + footOf(n), n.y + footOf(n)), pt(proj, n.x, n.y + footOf(n))])} fill={nodeColor(n)} />
-      ))}
-      <rect className="mm-view" x={vp.x} y={vp.y} width={vp.w} height={vp.h} rx={b.w / 120} />
-    </svg>
+    <div ref={ref} className="minimap" onPointerDown={(e) => { e.currentTarget.setPointerCapture(e.pointerId); jump(e) }} onPointerMove={(e) => e.buttons === 1 && jump(e)}>
+      <svg viewBox={`${b.x} ${b.y} ${b.w} ${b.h}`} preserveAspectRatio="xMidYMid meet" aria-hidden>
+        {doc.areas.map((a) => (
+          <polygon key={a.id} points={poly([pt(proj, a.x, a.y), pt(proj, a.x + a.w, a.y), pt(proj, a.x + a.w, a.y + a.d), pt(proj, a.x, a.y + a.d)])} fill={a.color} fillOpacity={0.1} stroke={a.color} strokeOpacity={0.5} strokeWidth={hair} />
+        ))}
+        {shapes.map(([colour, d]) => <path key={colour} d={d} fill={colour} />)}
+      </svg>
+      <div ref={frame} className="mm-view"><i className="mm-wash" /><i /><i /><i /><i /></div>
+    </div>
   )
 }
 
@@ -303,8 +348,38 @@ function TraceBar() {
   )
 }
 
+// every figure the zoom read-out can show: the zoom runs from 15% to 400%
+const ZOOM_FROM = Math.round(MIN_K * 100), ZOOM_TO = Math.round(MAX_K * 100)
+const FIGURES = Array.from({ length: ZOOM_TO - ZOOM_FROM + 1 }, (_, i) => <i key={i}>{ZOOM_FROM + i}%</i>)
+
+/**
+ * The zoom read-out and its buttons. The figure changes on every frame of a zoom, and changing a line of text
+ * would have the page laid out on each of them (see camera.ts). So every figure there can be is already there,
+ * laid out once, and the read-out only changes which one is visible.
+ */
+function ZoomControls() {
+  const figures = useRef<HTMLSpanElement>(null)
+  useLayoutEffect(() => {
+    let shown: Element | null = null
+    return followView((v) => {
+      const next = figures.current?.children[Math.max(ZOOM_FROM, Math.min(ZOOM_TO, Math.round(v.k * 100))) - ZOOM_FROM] ?? null
+      if (next === shown) return
+      shown?.classList.remove('on'); next?.classList.add('on')
+      shown = next
+    })
+  }, [])
+  return (
+    <div className="zoom-ctl">
+      <IconBtn title="Zoom out" kbd="-" onClick={() => animateView(zoomBy(1 / 1.3), 180)}><Minus size={14} /></IconBtn>
+      <button className="zoom-pct" onClick={() => animateView({ ...zoomBy(1 / useStore.getState().view.k), k: 1 }, 240)}><span ref={figures}>{FIGURES}</span><span className="tip">Reset to 100%</span></button>
+      <IconBtn title="Zoom in" kbd="+" onClick={() => animateView(zoomBy(1.3), 180)}><Plus size={14} /></IconBtn>
+      <span className="sep" />
+      <IconBtn title="Fit" kbd="F" onClick={() => fitView()}><Scan size={14} /></IconBtn>
+    </div>
+  )
+}
+
 function CanvasChrome({ phone }: { phone?: boolean }) {
-  const k = useStore((s) => s.view.k)
   const tool = useStore((s) => s.tool)
   const placing = useStore((s) => s.placing)
   const hint = placing ? 'Release on the canvas to place · Esc cancels'
@@ -322,13 +397,7 @@ function CanvasChrome({ phone }: { phone?: boolean }) {
       <Hud />
       <div className="zoom">
         <Minimap />
-        <div className="zoom-ctl">
-          <IconBtn title="Zoom out" kbd="-" onClick={() => animateView(zoomBy(1 / 1.3), 180)}><Minus size={14} /></IconBtn>
-          <button className="zoom-pct" onClick={() => animateView({ ...zoomBy(1 / k), k: 1 }, 240)}>{Math.round(k * 100)}%<span className="tip">Reset to 100%</span></button>
-          <IconBtn title="Zoom in" kbd="+" onClick={() => animateView(zoomBy(1.3), 180)}><Plus size={14} /></IconBtn>
-          <span className="sep" />
-          <IconBtn title="Fit" kbd="F" onClick={() => fitView()}><Scan size={14} /></IconBtn>
-        </div>
+        <ZoomControls />
       </div>
     </>
   )

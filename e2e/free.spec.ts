@@ -1,5 +1,5 @@
 import type { Page } from '@playwright/test'
-import { type App, expect, makeDoc, test } from './fixtures'
+import { type App, expect, makeDoc, rested, test } from './fixtures'
 
 /**
  * The canvas is the user's. Whatever is on screen when the pointer is let go is what stays: nothing is
@@ -25,11 +25,11 @@ const diagram = (more: Extra = {}) => makeDoc(
 const scene = (page: Page) => page.evaluate(() => {
   const r1 = (v: number) => Math.round(v * 10) / 10
   const out: Record<string, string> = {}
-  for (const el of document.querySelectorAll<SVGGraphicsElement>('.canvas-svg [data-kind="node"], .canvas-svg [data-kind="label"]')) { const m = el.getScreenCTM()!; out[el.dataset.kind + ':' + el.dataset.id] = r1(m.e) + ',' + r1(m.f) }
+  for (const el of document.querySelectorAll<SVGGraphicsElement>('.canvas-surface [data-kind="node"], .canvas-surface [data-kind="label"]')) { const m = el.getScreenCTM()!; out[el.dataset.kind + ':' + el.dataset.id] = r1(m.e) + ',' + r1(m.f) }
   // the body is measured too, so a component that is drawn lifted or shifted within its own frame is caught
-  for (const el of document.querySelectorAll<SVGGraphicsElement>('.canvas-svg [data-kind="node"] .nd-body')) { const b = el.getBoundingClientRect(); out['body:' + (el.closest('[data-kind]') as HTMLElement).dataset.id] = [b.x, b.y, b.width, b.height].map(r1).join(',') }
-  document.querySelectorAll<SVGGraphicsElement>('.canvas-svg [data-kind="area"]').forEach((el, i) => { const b = el.getBoundingClientRect(); out['area:' + el.dataset.id + ':' + i] = [b.x, b.y, b.width, b.height].map(r1).join(',') })
-  for (const el of document.querySelectorAll<SVGPathElement>('.canvas-svg .edge-hit')) out['line:' + el.dataset.id] = el.getAttribute('d')!
+  for (const el of document.querySelectorAll<SVGGraphicsElement>('.canvas-surface [data-kind="node"] .nd-body')) { const b = el.getBoundingClientRect(); out['body:' + (el.closest('[data-kind]') as HTMLElement).dataset.id] = [b.x, b.y, b.width, b.height].map(r1).join(',') }
+  document.querySelectorAll<SVGGraphicsElement>('.canvas-surface [data-kind="area"]').forEach((el, i) => { const b = el.getBoundingClientRect(); out['area:' + el.dataset.id + ':' + i] = [b.x, b.y, b.width, b.height].map(r1).join(',') })
+  for (const el of document.querySelectorAll<SVGPathElement>('.canvas-surface .edge-hit')) out['line:' + el.dataset.id] = el.getAttribute('d')!
   return out
 })
 /** the parts of two scenes that differ, by name: empty when they are the same */
@@ -46,7 +46,7 @@ const geometry = async (app: App) => {
     edges: d.edges.map((e: any) => [e.id, e.fromSide, e.toSide, e.fromAt, e.toAt, e.runs, e.plan?.pts]),
   }
 }
-const plan = async (page: Page) => { await page.keyboard.press('2'); await page.waitForTimeout(800) }
+const plan = async (page: Page) => { await page.keyboard.press('2'); await page.waitForTimeout(800); await rested(page) }
 const open = async (page: Page, app: App, d = diagram()) => { await app.open(d); await plan(page) }
 const middle = async (page: Page, id: string) => { const b = (await page.locator(`[data-kind="node"][data-id="${id}"] .nd-body`).boundingBox())!; return { x: b.x + b.width / 2, y: b.y + b.height / 2 } }
 /** press, carry by (dx, dy) pixels, and stop with the button still down: returns the scene at that last frame */
@@ -183,7 +183,7 @@ test.describe('nothing that happens afterwards changes it', () => {
     await same('after panning')
     await page.keyboard.press('q'); await page.waitForTimeout(600); await page.keyboard.press('e'); await page.waitForTimeout(600)
     await same('after turning the view and back')
-    await page.keyboard.press('3'); await page.waitForTimeout(700); await page.keyboard.press('2'); await page.waitForTimeout(800)
+    await page.keyboard.press('3'); await page.waitForTimeout(700); await rested(page); await page.keyboard.press('2'); await page.waitForTimeout(800); await rested(page)
     await same('after the isometric view and back')
     const m = await middle(page, 'b'); await page.mouse.click(m.x, m.y); await page.keyboard.press('Escape')
     await same('after selecting and deselecting')

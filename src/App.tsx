@@ -1,8 +1,44 @@
-import { Component, type ReactNode, useEffect, useSyncExternalStore } from 'react'
+import { Component, type ComponentType, type ReactNode, useEffect, useState, useSyncExternalStore } from 'react'
 import { decodeShare, saveDoc } from './core/storage'
 import { useStore } from './core/store'
-import { Dashboard } from './ui/Dashboard'
-import { Editor } from './ui/Editor'
+
+// ---- the two screens, each fetched when it is first wanted ------------------------------------------------------
+//
+// The app's code is in three parts: what every screen needs, the list of blueprints, and the editor. Someone landing on
+// the list does not wait for the editor, nor the other way round; the one not shown is fetched as soon as the page is
+// idle (main.tsx), so going from one to the other is not a wait either.
+//
+// This is deliberately not React's `lazy` and <Suspense>. React keeps a Suspense fallback on screen for a third of a
+// second once it has shown it, so that it does not flicker, which here would make every first screen a third of a second
+// late. Instead the page asks for the first screen's code at the same moment as the app's own (see vite.config.ts) and
+// the app is not drawn until it has it (main.tsx): the first thing drawn is the screen itself.
+type ScreenName = 'Dashboard' | 'Editor'
+const screens: { Dashboard?: ComponentType; Editor?: ComponentType<{ id: string }> } = {}
+const fetching: Partial<Record<ScreenName, Promise<void>>> = {}
+/** Which screen an address shows. A shared link ends in the editor, so that is what it will need. */
+export const screenFor = (hash: string): ScreenName => (/^#\/[ds]\//.test(hash) ? 'Editor' : 'Dashboard')
+// (each `import()` on a line of its own: written as two arms of one expression, the build fetches what both need whichever is taken)
+const fetchers: Record<ScreenName, () => Promise<void>> = {
+  Editor: () => import('./ui/editing').then((m) => { screens.Editor = m.Editor }),
+  Dashboard: () => import('./ui/Dashboard').then((m) => { screens.Dashboard = m.Dashboard }),
+}
+/** Fetch a screen's code, once. Resolves when it can be drawn; rejects (and may be asked again) if it could not be fetched. */
+export function loadScreen(name: ScreenName): Promise<void> {
+  return (fetching[name] ??= fetchers[name]().catch((e) => { delete fetching[name]; throw e }))
+}
+/** True once the screen's code is here; until then it is being fetched. A failure to fetch it is thrown, for the boundary to show. */
+function useScreen(name: ScreenName): boolean {
+  const [, redraw] = useState(0)
+  const [failed, setFailed] = useState<Error | null>(null)
+  useEffect(() => {
+    if (screens[name]) return
+    let live = true
+    loadScreen(name).then(() => { if (live) redraw((n) => n + 1) }, (e) => { if (live) setFailed(e instanceof Error ? e : new Error(String(e))) })
+    return () => { live = false }
+  }, [name])
+  if (failed) throw failed
+  return !!screens[name]
+}
 
 /*
  * The application shell: picks a screen from the address, and nothing else.
@@ -56,6 +92,17 @@ function Toasts() {
   )
 }
 
+/** The screen the address asks for; a quiet holding screen while a shared link is decoded, or for the moment a screen's code is still on its way. */
+function Screen({ hash }: { hash: string }) {
+  const ready = useScreen(screenFor(hash))
+  const doc = hash.match(/^#\/d\/([\w-]+)/)
+  const { Editor, Dashboard } = screens
+  // the editor is keyed by blueprint id, so opening another one starts it from nothing
+  if (doc) return ready && Editor ? <Editor id={doc[1]} key={doc[1]} /> : <div className="boot" />
+  if (hash.startsWith('#/s/')) return <div className="boot" />
+  return ready && Dashboard ? <Dashboard /> : <div className="boot" />
+}
+
 export default function App() {
   const hash = useHash()
   const theme = useStore((s) => s.theme)
@@ -77,13 +124,12 @@ export default function App() {
     return () => { live = false }
   }, [hash])
 
-  const doc = hash.match(/^#\/d\/([\w-]+)/)
   // The boundary is keyed by the kind of screen ('#/d/', '#/s/' or '#/'), so leaving a crashed screen for another kind
-  // clears the failure. The editor is keyed by blueprint id, so opening another one starts it from nothing.
+  // clears the failure.
   return (
     <>
       <Boundary key={hash.slice(0, 4)}>
-        {doc ? <Editor id={doc[1]} key={doc[1]} /> : hash.startsWith('#/s/') ? <div className="boot" /> : <Dashboard />}
+        <Screen hash={hash} />
       </Boundary>
       <Toasts />
     </>

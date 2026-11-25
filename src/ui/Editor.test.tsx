@@ -8,7 +8,8 @@ import { listSnapshots, loadDoc, saveDoc } from '../core/storage'
 import { useStore } from '../core/store'
 import { docOf, edge, node, resetStore } from '../test/helpers'
 import { PHONE, stubMedia } from '../test/media'
-import { Editor, Logo } from './Editor'
+import { Editor } from './Editor'
+import { Logo } from './atoms'
 
 const S = () => useStore.getState()
 vi.setConfig({ testTimeout: 20_000 })
@@ -54,7 +55,7 @@ describe('opening a blueprint', () => {
     expect(S()).toMatchObject({ selection: [], past: [], future: [], saved: true, panel: 'inspect', modal: null, yaw: 45, flat: false, tool: 'select', placing: null, lens: 'none' })
     expect(screen.getByLabelText('Blueprint name')).toHaveValue('Shop')
     expect(document.title).toBe('Shop · CloudMill Graph')
-    expect(document.querySelectorAll('.canvas-svg [data-kind="node"]')).toHaveLength(2)
+    expect(document.querySelectorAll('.canvas-surface [data-kind="node"]')).toHaveLength(2)
     expect(screen.getByText('Saved')).toBeInTheDocument()
     expect(document.querySelector('.editor')).toHaveAttribute('data-lib', 'true')
     expect(document.querySelector('.panel.palette')).not.toBeNull()
@@ -232,10 +233,10 @@ describe('canvas chrome', () => {
   it('zooms in steps, resets to 100% and fits', async () => {
     open()
     act(() => { useStore.setState({ view: { x: 0, y: 0, k: 1 } }) })
-    expect(document.querySelector('.zoom-pct')).toHaveTextContent('100%')
+    expect(document.querySelector('.zoom-pct .on')).toHaveTextContent(/^100%$/)
     click(btn('Zoom in'))
     await waitFor(() => expect(S().view.k).toBeCloseTo(1.3), { timeout: 3000 })
-    expect(document.querySelector('.zoom-pct')).toHaveTextContent('130%')
+    expect(document.querySelector('.zoom-pct .on')).toHaveTextContent(/^130%$/)
     click(document.querySelector('.zoom-pct')!)
     await waitFor(() => expect(S().view.k).toBe(1), { timeout: 3000 })
     click(btn('Zoom out'))
@@ -272,7 +273,9 @@ describe('canvas chrome', () => {
   it('jumps the view from the minimap', () => {
     open()
     const map = document.querySelector('.minimap')!
-    expect(map.querySelectorAll('polygon')).toHaveLength(3) // one area, two components
+    // one area; and the components, all of one colour drawn as a single shape with a closed outline each
+    expect(map.querySelectorAll('polygon')).toHaveLength(1)
+    expect([...map.querySelectorAll('path')].reduce((n, p) => n + (p.getAttribute('d')!.match(/Z/g) ?? []).length, 0)).toBe(2)
     vi.spyOn(map, 'getBoundingClientRect').mockReturnValue({ left: 0, top: 0, width: 180, height: 120, right: 180, bottom: 120, x: 0, y: 0, toJSON() {} })
     fireEvent.pointerDown(map, { pointerId: 1, clientX: 20, clientY: 20 })
     const a = S().view
@@ -283,6 +286,62 @@ describe('canvas chrome', () => {
     expect(b.k).toBe(a.k)
     fireEvent.pointerMove(map, { pointerId: 1, buttons: 0, clientX: 20, clientY: 20 })
     expect(S().view).toEqual(b)
+  })
+  it('the minimap frame is the part of the map the canvas shows, follows the view, and is sized again when the map is', () => {
+    // the browser says when the map changes size: here the test does
+    let resized: (() => void) | null = null
+    vi.stubGlobal('ResizeObserver', class { constructor(cb: () => void) { resized = cb } observe() {} unobserve() {} disconnect() {} })
+    // jsdom lays nothing out: give the canvas a real box, as the canvas's own tests do
+    vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(function (this: Element) {
+      const box = this.classList?.contains('canvas-surface') ? { left: 0, top: 0, right: 1200, bottom: 800, width: 1200, height: 800 } : { left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0 }
+      return { ...box, x: box.left, y: box.top, toJSON() {} } as DOMRect
+    })
+    try {
+      open()
+      const frame = document.querySelector<HTMLElement>('.mm-view')!, map = document.querySelector<HTMLElement>('.minimap')!
+      const [wash, top, right, bottom, left] = [...frame.children] as HTMLElement[]
+      const placed = (el: HTMLElement) => el.style.transform.match(/translate\((-?[\d.]+)px, (-?[\d.]+)px\) scale[XY]?\(([\d.]+)(?:, ([\d.]+))?\)/)!.slice(1).map(Number)
+      const width = () => placed(wash)[2], shift = () => placed(wash).slice(0, 2)
+      const was = width(), at = shift()
+      expect(was).toBeGreaterThan(0)
+      // the frame's four sides run round the wash, each a pixel thick: stretched along its own length and no other way
+      const sides = () => {
+        const [x, y, w, h] = placed(wash)
+        expect(top.style.transform).toBe(`translate(${x}px, ${y}px) scaleX(${w})`)
+        expect(bottom.style.transform).toBe(`translate(${x}px, ${y + h - 1}px) scaleX(${w})`)
+        expect(left.style.transform).toBe(`translate(${x}px, ${y + 1}px) scaleY(${h - 2})`)
+        expect(right.style.transform).toBe(`translate(${x + w - 1}px, ${y + 1}px) scaleY(${h - 2})`)
+      }
+      sides()
+      // the view slides: the frame slides the other way's worth on the map, by transforms alone
+      act(() => { useStore.setState({ view: { ...S().view, x: S().view.x - 300 } }) })
+      expect(shift()[0]).toBeGreaterThan(at[0])
+      expect(shift()[1]).toBe(at[1])
+      expect(width()).toBe(was)
+      sides()
+      // the view zooms in to twice the size: the frame is half as large at once, its sides still a pixel thick, and
+      // nothing about it waits for the zoom to end
+      const k = S().view.k
+      act(() => { useStore.setState({ view: { ...S().view, k: k * 2 } }) })
+      expect(Math.abs(width() - was / 2)).toBeLessThanOrEqual(1) // (it sits on whole pixels)
+      sides()
+      expect(frame.style.width).toBe('')
+      act(() => { useStore.setState({ view: { ...S().view, k } }) })
+      expect(width()).toBe(was)
+      // the map is drawn twice as large (its box was measured as nothing before, and taken to be its usual size): so is the frame
+      Object.defineProperty(map, 'clientWidth', { value: 336, configurable: true })
+      Object.defineProperty(map, 'clientHeight', { value: 208, configurable: true })
+      act(() => resized!())
+      expect(Math.abs(width() - was * 2)).toBeLessThanOrEqual(1)
+      sides()
+      // told again with nothing changed, or with a box that has no size (the map is hidden), it is left as it is
+      const kept = wash.style.transform
+      act(() => resized!())
+      Object.defineProperty(map, 'clientWidth', { value: 0, configurable: true })
+      act(() => resized!())
+      expect(wash.style.transform).toBe(kept)
+      expect(Math.abs(width() - was * 2)).toBeLessThanOrEqual(1)
+    } finally { vi.unstubAllGlobals() }
   })
   it('turns and resets the camera from the view cube', async () => {
     open()

@@ -1,5 +1,5 @@
 import type { Page } from '@playwright/test'
-import { type App, expect, makeDoc, test } from './fixtures'
+import { type App, expect, makeDoc, rested, test } from './fixtures'
 
 /**
  * Straight lines. A connection that could be one straight run is one, without being asked;
@@ -25,7 +25,7 @@ const select = async (page: Page, id: string, t = 0.5) => { const p = await at(p
 const saved = async (app: App, id: string) => (await app.settled()).edges.find((e) => e.id === id) as any
 const bar = (page: Page, name: string) => page.locator('.edge-bar').getByRole('button', { name, exact: true })
 const centre = async (page: Page, sel: string) => { const b = (await page.locator(sel).last().boundingBox())!; return { x: b.x + b.width / 2, y: b.y + b.height / 2 } }
-const plan = async (page: Page) => { await page.keyboard.press('2'); await page.waitForTimeout(800) }
+const plan = async (page: Page) => { await page.keyboard.press('2'); await page.waitForTimeout(800); await rested(page) }
 const open = async (page: Page, app: App, d: ReturnType<typeof doc>) => { await app.open(d); await plan(page) }
 
 test.describe('straight without being asked', () => {

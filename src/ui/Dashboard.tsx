@@ -7,12 +7,22 @@ import { ISO, ISO_PITCH, ISO_YAW, makeCam } from '../core/iso'
 import { type DocMeta, deleteDoc, duplicateDoc, listDocs, loadDoc, saveDoc } from '../core/storage'
 import { useStore } from '../core/store'
 import { TEMPLATES, instantiate } from '../core/templates'
-import { exportTerraform } from '../core/terraform'
 import { type Doc, emptyDoc } from '../core/types'
-import { go } from './actions'
-import { ImportDialog } from './Dialogs'
-import { Logo } from './Editor'
-import { onActivate } from './atoms'
+import { navigate as go } from '../core/nav'
+
+import { Logo, onActivate } from './atoms'
+
+// Reading and writing Terraform, and the dialog that imports it, are not needed to draw this page. They come with the
+// editor's code (see ./editing), which is fetched once this page is idle, when the pointer first comes to an Import
+// button, or when one is pressed, whichever comes first: the sample of generated Terraform fills in as it arrives.
+// The dialog is fetched by hand and not through React's `lazy`. That holds back anything that arrives a moment late
+// for a third of a second so as not to flash a placeholder, which here would be a pause after every first press; and
+// when the code cannot be fetched at all it fails the whole page, where all that has gone wrong is one button
+type Importer = typeof import('./editing').ImportDialog
+let importer: Importer | null = null
+let fetchingImporter: Promise<void> | null = null
+/** Fetch the import dialog's code, once. Rejects, and may be asked again, if it could not be fetched. */
+const fetchImporter = () => (fetchingImporter ??= import('./editing').then((m) => { importer = m.ImportDialog }, (e) => { fetchingImporter = null; throw e }))
 
 /*
  * The first screen: an introduction to the product, the templates, and the blueprints stored in this
@@ -39,8 +49,34 @@ function open(doc: Doc) {
 const still = () => typeof matchMedia !== 'undefined' && matchMedia('(prefers-reduced-motion: reduce)').matches
 
 /**
+ * True once the element has come within a screen's height or so of being seen, and from then on. For drawing something
+ * costly only when it is about to be looked at: a list of saved blueprints can run to dozens of diagrams.
+ */
+function useNear(ref: { current: Element | null }): boolean {
+  const [near, setNear] = useState(false)
+  useEffect(() => {
+    const el = ref.current
+    // where the browser cannot say (or in a test, which lays nothing out), it is simply drawn
+    if (near || !el || typeof IntersectionObserver === 'undefined') { setNear(true); return }
+    const io = new IntersectionObserver((seen) => { if (seen.some((e) => e.isIntersecting)) setNear(true) }, { rootMargin: '600px' })
+    io.observe(el)
+    return () => io.disconnect()
+  }, [ref, near])
+  return near
+}
+
+/** A blueprint with more components than this is drawn plainly in a preview: at that size nothing finer could be made out. */
+const PLAIN_PREVIEW = 120
+/** How often the picture that turns on its own is drawn again, in ms: it moves a fraction of a degree a frame, so thirty a second is as smooth as sixty. */
+const TURN_EVERY = 30
+
+/**
  * A diagram that is alive: it drifts through a slow orbit on its own (`auto`),
  * or leans a few degrees while hovered. Same renderer as the editor.
+ *
+ * Every turn of the camera draws the whole diagram again, so it only turns while there is a reason to: the one that
+ * turns on its own stops when it is scrolled out of sight, and one that leans draws nothing until it is pointed at and
+ * nothing more once it has come back to rest.
  */
 function LivePreview({ doc, theme, auto, labels = false, flow = false, onYaw }: {
   doc: Doc; theme: 'dark' | 'light'; auto?: boolean; labels?: boolean; flow?: boolean; onYaw?: (yaw: number) => void
@@ -60,11 +96,15 @@ function LivePreview({ doc, theme, auto, labels = false, flow = false, onYaw }: 
   }, [shown, auto])
   useEffect(() => {
     if (still()) return
-    let raf = 0
+    let raf = 0, last = 0, seen = true
     const t0 = performance.now()
     const tick = (now: number) => {
-      raf = requestAnimationFrame(tick)
+      raf = 0
       if (auto) {
+        if (!seen) return
+        raf = requestAnimationFrame(tick)
+        if (now - last < TURN_EVERY) return
+        last = now
         const t = (now - t0) / 1000
         const yaw = ISO_YAW + Math.sin(t / 4.2) * 16
         setCam({ yaw, pitch: ISO_PITCH + Math.sin(t / 6.1) * 3 })
@@ -72,24 +112,30 @@ function LivePreview({ doc, theme, auto, labels = false, flow = false, onYaw }: 
       } else {
         const target = hover.current ? 13 : 0
         const next = lean.current + (target - lean.current) * 0.09
+        // back at rest, or as far over as it goes: nothing more to draw until the pointer comes or goes
         if (Math.abs(next - lean.current) < 0.01) return
         lean.current = next
         setCam({ yaw: ISO_YAW - next, pitch: ISO_PITCH + next * 0.22 })
+        raf = requestAnimationFrame(tick)
       }
     }
-    raf = requestAnimationFrame(tick)
+    const run = () => { if (!raf) raf = requestAnimationFrame(tick) }
     const card = wrap.current?.closest('.card, .hero-stage, .feat')
-    const on = () => { hover.current = true }, off = () => { hover.current = false }
+    const on = () => { hover.current = true; run() }, off = () => { hover.current = false; run() }
     card?.addEventListener('pointerenter', on)
     card?.addEventListener('pointerleave', off)
-    return () => { cancelAnimationFrame(raf); card?.removeEventListener('pointerenter', on); card?.removeEventListener('pointerleave', off) }
+    // the one that turns on its own does so only while some of it can be seen
+    const io = auto && wrap.current && typeof IntersectionObserver !== 'undefined' ? new IntersectionObserver((e) => { seen = e.some((x) => x.isIntersecting); if (seen) run() }) : null
+    if (io) io.observe(wrap.current!)
+    else if (auto) run()
+    return () => { cancelAnimationFrame(raf); io?.disconnect(); card?.removeEventListener('pointerenter', on); card?.removeEventListener('pointerleave', off) }
     // `onYaw` is left out on purpose: callers pass a new function each render, and restarting the loop would restart the orbit
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [auto])
   const proj = useMemo(() => makeCam(cam.yaw, cam.pitch), [cam])
   return (
     <svg ref={wrap} viewBox={`${b.x} ${b.y} ${b.w} ${b.h}`} className="preview" preserveAspectRatio="xMidYMid meet" style={{ pointerEvents: 'none' }} aria-hidden="true">
-      <Scene doc={shown} proj={proj} theme={THEMES[theme]} showLabels={labels} flow={flow} />
+      <Scene doc={shown} proj={proj} theme={THEMES[theme]} showLabels={labels} flow={flow} plain={shown.nodes.length > PLAIN_PREVIEW} />
     </svg>
   )
 }
@@ -98,12 +144,15 @@ function LivePreview({ doc, theme, auto, labels = false, flow = false, onYaw }: 
 function DocCard({ meta, theme, onChange }: { meta: DocMeta; theme: 'dark' | 'light'; onChange: () => void }) {
   const doc = useMemo(() => loadDoc(meta.id), [meta.id, meta.updatedAt])
   const [confirm, setConfirm] = useState(false)
+  const card = useRef<HTMLDivElement>(null)
+  // its picture is drawn when the card is about to come into view: far down a long list, it never is
+  const near = useNear(card)
+  const cost = useMemo(() => (doc ? docCost(doc).total : 0), [doc])
   if (!doc) return null
-  const cost = docCost(doc).total
   return (
-    <div className="card doc">
+    <div className="card doc" ref={card}>
       <button className="card-open" aria-label={`Open ${doc.name || 'Untitled'}`} onClick={() => go('#/d/' + meta.id)} />
-      <div className="card-art">{doc.nodes.length ? <LivePreview doc={doc} theme={theme} /> : <span className="label dim">Empty plane</span>}</div>
+      <div className="card-art">{!doc.nodes.length ? <span className="label dim">Empty plane</span> : near ? <LivePreview doc={doc} theme={theme} /> : null}</div>
       <div className="card-body">
         <h3>{doc.name || 'Untitled'}</h3>
         <div className="card-meta"><span>{String(doc.nodes.length).padStart(2, '0')} nodes</span><span>{money(cost, true)}/mo</span><span>{ago(meta.updatedAt)}</span></div>
@@ -123,7 +172,21 @@ export function Dashboard() {
   const setTheme = useStore((s) => s.setTheme)
   const [docs, setDocs] = useState<DocMeta[]>(listDocs)
   const [q, setQ] = useState('')
+  // the import dialog has been asked for; it is drawn as soon as its code is here, which after the first time is at once
   const [importing, setImporting] = useState(false)
+  const [, arrived] = useState(0)
+  const openImport = () => {
+    setImporting(true)
+    if (importer) return
+    fetchImporter().then(() => arrived((n) => n + 1), () => {
+      setImporting(false)
+      useStore.getState().toast('The importer could not be loaded. Check your connection and try again.', 'warn')
+    })
+  }
+  // the pointer, a finger or the keyboard has come to an Import button: by the time it is pressed the dialog is ready
+  const nearImport = () => { fetchImporter().catch(() => { /* asked for again when the button is pressed, which is when to say so */ }) }
+  const waiting = importing && !importer
+  const Import = importer
   const templates = useMemo(() => TEMPLATES.map((t) => ({ t, doc: instantiate(t) })), [])
   const hero = templates[3]
   const az = useRef<HTMLSpanElement>(null)
@@ -139,10 +202,25 @@ export function Dashboard() {
     const cost = docCost(doc)
     const cats = CATEGORIES.map((c) => ({ ...c, value: cost.byCategory.get(c.id) ?? 0 })).filter((c) => c.value > 0).sort((a, b) => b.value - a.value)
     const { findings, score } = analyze(doc)
-    const lines = exportTerraform(doc).split('\n')
-    const at = lines.findIndex((l) => l.startsWith('resource "aws_db_instance"'))
-    return { cost, cats, findings, score, hcl: lines.slice(Math.max(0, at), Math.max(0, at) + 11) }
+    return { cost, cats, findings, score }
   }, [templates])
+  // The first lines of the Terraform the sample blueprint exports to, from its database on. Worked out by the editor's
+  // code, so it waits until the panel is nearly in view: fetched any sooner, that code would be competing with this page
+  // for the connection. The panel has a fixed height, so it fills in without moving anything
+  const [hcl, setHcl] = useState<string[]>([])
+  const ship = useRef<HTMLElement>(null)
+  const shipNear = useNear(ship)
+  useEffect(() => {
+    if (!shipNear) return
+    let live = true
+    import('./editing').then(({ exportTerraform }) => {
+      if (!live) return
+      const lines = exportTerraform(templates[0].doc).split('\n')
+      const at = Math.max(0, lines.findIndex((l) => l.startsWith('resource "aws_db_instance"')))
+      setHcl(lines.slice(at, at + 11))
+    }).catch(() => { /* offline before it was fetched: the panel stays empty */ })
+    return () => { live = false }
+  }, [templates, shipNear])
 
   return (
     <div className="dash">
@@ -156,7 +234,7 @@ export function Dashboard() {
         <button className="icon-btn" aria-label="Toggle theme" onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}>
           {theme === 'dark' ? <Sun size={15} /> : <Moon size={15} />}<span className="tip">{theme === 'dark' ? 'Light theme' : 'Dark theme'}</span>
         </button>
-        <button className="text-btn" onClick={() => setImporting(true)}>Import Terraform</button>
+        <button className="text-btn" onClick={openImport} onPointerEnter={nearImport} onPointerDown={nearImport} onFocus={nearImport} aria-busy={waiting || undefined}>Import Terraform</button>
         <button className="btn primary" onClick={() => open(emptyDoc())}>New blueprint<ArrowRight size={15} /></button>
       </header>
 
@@ -168,7 +246,7 @@ export function Dashboard() {
           <div className="hero-cta">
             <button className="btn primary lg" onClick={() => open(emptyDoc())}>Start a blueprint<ArrowRight size={15} /></button>
             <button className="btn ghost lg" onClick={() => open(instantiate(hero.t))}>Open the sample<ArrowUpRight size={15} /></button>
-            <button className="btn ghost lg only-phone" onClick={() => setImporting(true)}>Import from Terraform</button>
+            <button className="btn ghost lg only-phone" onClick={openImport} onPointerDown={nearImport} onFocus={nearImport} aria-busy={waiting || undefined}>Import from Terraform</button>
           </div>
           <div className="hero-note">Runs entirely in your browser. No account, nothing uploaded.</div>
         </div>
@@ -219,8 +297,9 @@ export function Dashboard() {
           </div>
           <div className="feat-body"><span className="feat-n">03</span><h3>Review</h3><p>A built-in advisor checks reliability, security and spend, and fixes most findings in one click.</p></div>
         </article>
-        <article className="feat">
-          <div className="feat-art code"><pre aria-label="Terraform generated from the sample blueprint">{demo.hcl.map((l, i) => <span key={i} className={/^resource|^}/.test(l) ? 'k' : ''}>{l + '\n'}</span>)}</pre></div>
+        <article className="feat" ref={ship}>
+          {/* named on the panel, which has a role to carry a name; the listing itself is empty until the code that writes it has arrived */}
+          <div className="feat-art code" role="group" aria-label="Terraform generated from the sample blueprint"><pre>{hcl.map((l, i) => <span key={i} className={/^resource|^}/.test(l) ? 'k' : ''}>{l + '\n'}</span>)}</pre></div>
           <div className="feat-body"><span className="feat-n">04</span><h3>Ship</h3><p>Paste Terraform to get a diagram. Export a diagram to get Terraform, PNG, SVG or a share link.</p></div>
         </article>
       </section>
@@ -266,7 +345,7 @@ export function Dashboard() {
         <span><Logo size={16} />CloudMill Graph</span>
         <span>Prices are estimates from approximate public list prices. AWS, Google Cloud and Azure service names are used for reference only.</span>
       </footer>
-      {importing && <ImportDialog onClose={() => setImporting(false)} onDoc={(d) => open(d)} />}
+      {importing && Import && <Import onClose={() => setImporting(false)} onDoc={(d) => open(d)} />}
     </div>
   )
 }

@@ -1,5 +1,5 @@
 import type { Page } from '@playwright/test'
-import { type App, expect, makeDoc, test } from './fixtures'
+import { type App, expect, makeDoc, rested, test } from './fixtures'
 
 /**
  * Every layer of a connection lies on one path. The visible line, the dark channel under it, the area that takes a
@@ -41,7 +41,7 @@ const middle = (page: Page, id: string, t = 0.5) => page.evaluate(([id, t]) => {
 }, [id, t] as const)
 const open = async (page: Page, app: App, plan = true) => {
   await app.open(doc())
-  if (plan) { await page.keyboard.press('2'); await page.waitForTimeout(800) }
+  if (plan) { await page.keyboard.press('2'); await page.waitForTimeout(800); await rested(page) }
 }
 
 test.describe('every layer of a connection lies on one path', () => {
@@ -50,7 +50,7 @@ test.describe('every layer of a connection lies on one path', () => {
       await open(page, app)
       expect(await strays(page, line(id), hit(id))).toBeLessThan(0.6)
       // and from the camera's home angle too
-      await page.keyboard.press('3'); await page.waitForTimeout(800)
+      await page.keyboard.press('3'); await page.waitForTimeout(800); await rested(page)
       expect(await strays(page, line(id), hit(id))).toBeLessThan(0.6)
     })
 
@@ -111,7 +111,7 @@ test.describe('every layer of a connection lies on one path', () => {
     await open(page, app)
     const off = await page.evaluate(() => {
       const g = document.querySelector('.edge:has(.edge-hit[data-id="curve"])')!, path = g.querySelector('.edge-hit') as SVGPathElement, m = path.getScreenCTM()!
-      const box = g.querySelector('text')!.getBoundingClientRect(), c = { x: box.left + box.width / 2, y: box.top + box.height / 2 }
+      const box = document.querySelector('.edge-caption[data-edge="curve"]')!.getBoundingClientRect(), c = { x: box.left + box.width / 2, y: box.top + box.height / 2 }
       const len = path.getTotalLength()
       let least = Infinity
       for (let i = 0; i <= 4000; i++) { const q = path.getPointAtLength((len * i) / 4000); least = Math.min(least, Math.hypot(q.x * m.a + q.y * m.c + m.e - c.x, q.x * m.b + q.y * m.d + m.f - c.y)) }

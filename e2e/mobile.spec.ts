@@ -124,9 +124,9 @@ test.describe('phone: canvas gestures', () => {
     // carry c six cells along, to sit in line with b, and look before letting go
     await (fingers as any).send('touchStart', [from])
     for (let i = 1; i <= 12; i++) { await fingers.move({ x: from.x + (d.x * i) / 12, y: from.y + (d.y * i) / 12 }); await page.waitForTimeout(12) }
-    await expect(page.locator('.canvas-svg .guide')).toHaveCount(1)
+    await expect(page.locator('.canvas-surface .guide')).toHaveCount(1)
     await fingers.lift()
-    await expect(page.locator('.canvas-svg .guide')).toHaveCount(0)
+    await expect(page.locator('.canvas-surface .guide')).toHaveCount(0)
     expect((await app.settled()).nodes[2]).toMatchObject({ x: 6, y: 6 })
   })
 
@@ -171,7 +171,7 @@ test.describe('phone: canvas gestures', () => {
     expect(after.y - before.y).toBeCloseTo(40, 0)
     // lifting one finger of the two: sent as pointer events, the only way to lift exactly one
     const moved = await page.evaluate(async ([x, y]) => {
-      const svg = document.querySelector('.canvas-svg')!
+      const svg = document.querySelector('.canvas-surface')!
       const ev = (type: string, id: number, cx: number, cy: number) => svg.dispatchEvent(new PointerEvent(type, { pointerId: id, pointerType: 'touch', clientX: cx, clientY: cy, bubbles: true, cancelable: true, button: 0, buttons: type === 'pointerup' ? 0 : 1 }))
       const frame = () => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)))
       const corner = () => { const r = document.querySelector('[data-id="a"] .nd-body')!.getBoundingClientRect(); return [r.x, r.y] }
@@ -196,7 +196,7 @@ test.describe('phone: canvas gestures', () => {
   })
 
   /** which way the line from a to b points on screen, in degrees, clockwise positive */
-  const bearing = async (app: any) => { const a = await app.corner('a'), b = await app.corner('b'); return (Math.atan2(b.y - a.y, b.x - a.x) * 180) / Math.PI }
+  const bearing = async (app: any) => { const [a, b] = await app.corners(['a', 'b']); return (Math.atan2(b.y - a.y, b.x - a.x) * 180) / Math.PI }
   const turned = (from: number, to: number) => ((to - from + 540) % 360) - 180
 
   test('a twist turns the scene the way the fingers turn, about the point between them, and it stays put', async ({ page, app, fingers }) => {
@@ -233,7 +233,7 @@ test.describe('phone: canvas gestures', () => {
   test('two fingers sliding up and down tilt the view, and the reset button brings it home', async ({ page, app, fingers }) => {
     const vp = page.viewportSize()!
     const at = { x: vp.width / 2, y: vp.height * 0.55 }
-    const depth = async () => { const a = await app.corner('a'), c = await app.corner('c'), b = await app.corner('b'); return Math.abs(c.y - a.y) / Math.hypot(b.x - a.x, b.y - a.y) }
+    const depth = async () => { const [a, b, c] = await app.corners(['a', 'b', 'c']); return Math.abs(c.y - a.y) / Math.hypot(b.x - a.x, b.y - a.y) }
     const home = await depth(), bear = await bearing(app)
     await expect(page.getByRole('button', { name: 'Reset view' })).toHaveCount(0)
     // up: the camera drops towards the horizon and the ground flattens
@@ -253,7 +253,7 @@ test.describe('phone: canvas gestures', () => {
   })
 
   test('double tap zooms in, double tap and slide zooms by thumb, two fingers tapped zoom out', async ({ page, app, fingers }) => {
-    const size = async () => { const a = await app.corner('a'), b = await app.corner('b'); return Math.hypot(b.x - a.x, b.y - a.y) }
+    const size = async () => { const [a, b] = await app.corners(['a', 'b']); return Math.hypot(b.x - a.x, b.y - a.y) }
     const settle = async () => { let last = -1; await expect.poll(async () => { const s = await size(); const same = Math.abs(s - last) < 0.01; last = s; return same }, { intervals: [120] }).toBe(true); return last }
     const s0 = await settle(), at = await app.world(3, 3)
     await fingers.doubleTap(at)
@@ -365,7 +365,7 @@ test.describe('phone: building a diagram', () => {
     await fingers.tap(await app.world(1, 1))
     await dock(page).getByRole('button', { name: 'Connect' }).tap()
     await expect(dock(page).getByRole('status')).toHaveText('Now tap what web-1 connects to')
-    await expect(page.locator('.canvas-svg .link-from')).toHaveCount(1)
+    await expect(page.locator('.canvas-surface .link-from')).toHaveCount(1)
     await fingers.tap(await app.world(7, 1))
     await expect(app.edges()).toHaveCount(1)
     await expect(dock(page).locator('.dock-name b')).toHaveText('Connection')
@@ -478,7 +478,7 @@ test.describe('phone: building a diagram', () => {
     await page.getByRole('button', { name: 'Deselect' }).tap()
     await dock(page).getByRole('button', { name: 'Text' }).tap()
     await fingers.tap(await app.world(4, 5))
-    await expect(page.locator('.canvas-svg [data-kind="label"]')).toHaveCount(1)
+    await expect(page.locator('.canvas-surface [data-kind="label"]')).toHaveCount(1)
     await expect(dock(page).locator('.dock-name b')).toHaveText('Label')
   })
 
@@ -509,7 +509,7 @@ test.describe('phone: building a diagram', () => {
     await app.open(TRIO())
     await page.getByRole('button', { name: 'Switch to plan view' }).tap()
     await expect(page.getByRole('button', { name: 'Switch to 3D view' })).toBeVisible()
-    await expect.poll(async () => { const a = await app.corner('a'), b = await app.corner('b'); return Math.abs(a.y - b.y) < 1.5 }).toBe(true)
+    await expect.poll(async () => { const [a, b] = await app.corners(['a', 'b']); return Math.abs(a.y - b.y) < 1.5 }).toBe(true)
     await page.getByRole('button', { name: 'Fit to screen' }).tap()
     await expect(page.locator('.hud-cell.cost')).toContainText('$')
   })
@@ -755,7 +755,7 @@ test.describe('phone: sheets and the view', () => {
   test.beforeEach(async ({ app }) => { await app.open(TRIO()) })
 
   test('a sheet keeps what is being edited in clear view, never zooms, and gives the view back when it goes', async ({ page, app, fingers }) => {
-    const span = async () => { const a = await app.corner('a'), b = await app.corner('b'); return Math.hypot(b.x - a.x, b.y - a.y) }
+    const span = async () => { const [a, b] = await app.corners(['a', 'b']); return Math.hypot(b.x - a.x, b.y - a.y) }
     const rest = async () => { let last = { x: -1, y: -1 }; await expect.poll(async () => { const c = await app.corner('a'); const same = Math.abs(c.x - last.x) < 0.5 && Math.abs(c.y - last.y) < 0.5; last = c; return same }, { intervals: [150] }).toBe(true); return last }
     const before = await rest(), zoom = await span()
     await fingers.tap(await app.world(1, 7)) // c, the lowest of the three

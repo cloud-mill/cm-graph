@@ -16,7 +16,8 @@
     "test:e2e:ui": "playwright test --ui",
     "verify": "npm run typecheck && npm run lint && npm run test:coverage && npm run build && npm run test:e2e && npm run test:e2e:prod",
     "test:e2e:prod": "E2E_PROD=1 playwright test",
-    "test:perf": "playwright test --project=performance --no-deps"
+    "test:perf": "playwright test --project=performance --no-deps",
+    "bench": "node scripts/bench.mjs"
   },
   "dependencies": {
     "@fontsource-variable/geist": "^5.3.0",

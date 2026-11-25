@@ -93,7 +93,7 @@ test.describe('dashboard', () => {
     await expect(card.getByRole('button', { name: 'Delete?' })).toBeFocused()
     await page.keyboard.press('Enter')
     await expect(page.locator('.card.doc')).toHaveCount(0)
-    await expect(page.locator('.canvas-svg')).toHaveCount(0)
+    await expect(page.locator('.canvas-surface')).toHaveCount(0)
     await expect(page.getByText('Nothing drafted yet')).toBeVisible()
   })
 
@@ -124,6 +124,8 @@ test.describe('dashboard', () => {
     await page.goto('/')
     await page.getByRole('button', { name: 'Import Terraform' }).click()
     const dialog = page.getByRole('dialog', { name: 'Import' })
+    // its code is fetched when it is first asked for: at once from the built app, a module at a time from the development server
+    await expect(dialog).toBeVisible({ timeout: 20_000 })
     await expect(dialog.getByRole('button', { name: 'Create blueprint' })).toBeDisabled()
     await dialog.getByRole('button', { name: 'Load sample' }).click()
     await expect(dialog.getByText('10 of 21 resources mapped')).toBeVisible()
