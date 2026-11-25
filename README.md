@@ -2,10 +2,11 @@
 
 # CloudMill Graph
 
-**Draw cloud architecture that knows what it costs.**
+**The design studio for cloud architecture.**
 
-An isometric design studio for AWS, Google Cloud and Azure. It prices your
-architecture as you draw, reviews it for you, and turns it into Terraform.<br>
+Design AWS, Google Cloud and Azure systems on an isometric 3D canvas, with real
+cloud components, connections that carry meaning, and an architecture review
+built in.<br>
 It runs entirely in your browser. No account, no server, nothing uploaded.
 
 [**Open the app**](https://graph.cloud-mill.com) · [Features](#features) · [Quick start](#quick-start)
@@ -14,28 +15,31 @@ It runs entirely in your browser. No account, no server, nothing uploaded.
 
 <picture>
   <source media="(prefers-color-scheme: light)" srcset=".github/assets/editor-light.webp">
-  <img src=".github/assets/editor-dark.webp" alt="A Kubernetes architecture on the CloudMill Graph canvas, with its monthly cost on AWS, Google Cloud and Azure in the inspector">
+  <img src=".github/assets/editor-dark.webp" alt="A Kubernetes architecture designed on the CloudMill Graph canvas">
 </picture>
 
 ## Why
 
-Most architecture diagrams are pictures. They cannot tell you what the system
-costs, whether it survives a zone going down, or how to build it, and they are
-out of date the day after they are drawn.
+Cloud architecture is still designed in tools made for boxes and arrows. They
+do not know what a subnet is, what talks to what, or whether the design holds
+up.
 
-CloudMill Graph treats the diagram as a model. Every component is configured
-and priced. Every connection says what travels along it. The whole design can be
-reviewed, compared across clouds, and exported as infrastructure code.
+CloudMill Graph is a studio made for the job. You compose a system from real
+cloud services, group them into networks and zones, and connect them with lines
+that say what travels along them. Because the result is a model and not a
+picture, it can be reviewed, moved between clouds, and exported as Terraform.
 
 ## Features
 
-### Draw in three dimensions
+### Design in three dimensions
 
 A real orbit camera over an isometric scene, not a flat board with tilted
 icons.
 
-- **169 components** across AWS, Google Cloud and Azure, each with its own
-  configuration and price.
+- **169 cloud services** across AWS, Google Cloud and Azure, ready to place and
+  configure.
+- **Structure like the real thing.** Areas for VPCs, subnets, zones and groups,
+  with labels on the ground.
 - **Orbit, tilt and turn** around any point, snap to standard views with the
   view cube, or switch to a flat top view in one click.
 - **Six starter blueprints**, from a three-tier web app to a streaming data
@@ -45,31 +49,16 @@ icons.
 
 ### Connections that mean something
 
+![A selected connection, with its relationship, protocol and routing in the inspector](.github/assets/connection.webp)
+
 - **Every line carries a relationship** (request, data, event, replication or
   dependency), with a protocol and a port.
 - **Lines route themselves** in clean right angles around everything in the
   way, and moving dots show which way traffic runs.
-- **Shape any line by hand** and it is kept exactly as you left it.
+- **Shape any line by hand** and it is kept exactly as you left it, or switch
+  it to a direct or curved stroke.
 - **Follow the flow** lights up everything upstream and downstream of a
   component.
-
-### Know the cost before you build
-
-![The budget panel beside a canvas coloured by cost](.github/assets/budget.webp)
-
-- **A live monthly estimate** for the whole blueprint and for every component
-  and category.
-- **Real AWS rates**, read from the public AWS Price List per instance type and
-  region, with on-demand, one-year and three-year pricing.
-- **A cost heatmap** on the canvas shows where the money goes.
-- **Honest figures.** Each line is marked fixed, usage-based or estimated, and
-  free allowances are taken off once for the whole design.
-
-### One architecture, three clouds
-
-The inspector prices the same design on AWS, Google Cloud and Azure, side by
-side. One click moves the whole blueprint, swapping every component for its
-closest equivalent, and one undo brings it back.
 
 ### A reviewer built in
 
@@ -77,16 +66,26 @@ closest equivalent, and one undo brings it back.
 
 - **Thirteen checks** for reliability, security, cost and hygiene: single
   points of failure, databases in one zone, exposed data stores, missing
-  firewalls, cheaper processors, idle load balancers and more.
-- **A score, and what it would save.** Findings are ranked by severity, with
-  the monthly saving beside each one.
+  firewalls, idle load balancers and more.
+- **A score for the design**, with findings ranked by severity.
 - **One-click fixes**, one at a time or all the recommended ones together.
+
+### One architecture, three clouds
+
+Design it once and move it. One click swaps every component for its closest
+equivalent on another cloud, and one undo brings it back.
 
 ### Terraform, both ways
 
 Paste HCL and get a laid-out diagram: resources become components, references
 become connections, and VPC membership becomes areas. Export any blueprint back
 to HCL for the `aws`, `google` and `azurerm` providers.
+
+### Cost, when you want it
+
+Every design carries a monthly estimate built on public list prices, with a
+heatmap on the canvas to show where the money goes and the same design priced
+on each cloud.
 
 ### Yours, and easy to share
 
